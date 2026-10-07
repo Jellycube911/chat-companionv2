@@ -37,3 +37,7 @@ jobs:
             core/build/reports/tests/
             minecraft-common/build/reports/tests/
             fabric/test-runs/gametest/reports/
+            local-agent/minecraft_agent.py
+            local-agent/mcp_server.py
+            local-agent/memory_store.py
+            local-agent/requirements.txt
