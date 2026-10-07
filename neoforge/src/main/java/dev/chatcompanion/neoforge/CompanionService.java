@@ -365,22 +365,20 @@ public final class CompanionService implements AutoCloseable {
         }
 
         companion.getNavigation().stop();
-        lookAtBlock(companion, placement.block());
-        if (!canInteractWithBlock(companion, placement.block(), world)) return;
+        BlockPos support = placement.block().relative(placement.face().getOpposite());
+        Vec3 hitPoint = Vec3.atCenterOf(support)
+                .add(Vec3.atLowerCornerOf(placement.face().getNormal()).scale(0.5));
+        lookAtPoint(companion, hitPoint);
+        if (!canInteractWithPoint(companion, support, hitPoint, world)) return;
 
         FakePlayer fake = fake(companion, world, placement.slot());
         fake.setYRot(companion.getYRot());
         fake.setXRot(companion.getXRot());
         BlockState before = world.getBlockState(placement.block());
-        BlockPos support = placement.block().relative(placement.face().getOpposite());
         InteractionResult used = fake.getMainHandItem().useOn(new UseOnContext(
                 fake,
                 InteractionHand.MAIN_HAND,
-                new BlockHitResult(
-                        Vec3.atCenterOf(support).add(Vec3.atLowerCornerOf(placement.face().getNormal()).scale(0.5)),
-                        placement.face(),
-                        support,
-                        false)));
+                new BlockHitResult(hitPoint, placement.face(), support, false)));
         companion.companionInventory().setItem(placement.slot(), fake.getMainHandItem().copy());
 
         if (used.consumesAction() && !before.equals(world.getBlockState(placement.block()))) companion.complete("block_placed");
@@ -412,18 +410,24 @@ public final class CompanionService implements AutoCloseable {
     }
 
     private void lookAtBlock(CompanionEntity companion, BlockPos block) {
-        Vec3 target = Vec3.atCenterOf(block);
+        lookAtPoint(companion, Vec3.atCenterOf(block));
+    }
+
+    private void lookAtPoint(CompanionEntity companion, Vec3 target) {
         companion.getLookControl().setLookAt(target.x, target.y, target.z, 30.0F, 30.0F);
     }
 
     private boolean canInteractWithBlock(CompanionEntity companion, BlockPos block, ServerLevel world) {
-        if (!withinBlockReach(companion, block)) return false;
+        return canInteractWithPoint(companion, block, Vec3.atCenterOf(block), world);
+    }
+
+    private boolean canInteractWithPoint(CompanionEntity companion, BlockPos expectedHit, Vec3 target, ServerLevel world) {
         Vec3 eye = companion.getEyePosition();
-        Vec3 target = Vec3.atCenterOf(block);
+        if (eye.distanceToSqr(target) > 4.5 * 4.5) return false;
         Vec3 direction = target.subtract(eye).normalize();
         if (companion.getViewVector(1.0F).normalize().dot(direction) < 0.97) return false;
         HitResult hit = world.clip(new ClipContext(eye, target, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, companion));
-        return hit instanceof BlockHitResult blockHit && blockHit.getBlockPos().equals(block);
+        return hit instanceof BlockHitResult blockHit && blockHit.getBlockPos().equals(expectedHit);
     }
 
     private void tickCollect(UUID owner, CompanionEntity companion, PhysicalJob job, ServerLevel world) {
