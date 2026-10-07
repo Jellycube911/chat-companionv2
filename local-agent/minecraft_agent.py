@@ -221,6 +221,10 @@ def craft(width, height, grid, times):
     )
 
 
+def equip_slot(slot):
+    return _post("/equip-slot", {"slot": slot})
+
+
 tools = [
     {
         "type": "function",
@@ -396,6 +400,18 @@ tools = [
         },
         "strict": True,
     },
+    {
+        "type": "function",
+        "name": "equip_slot",
+        "description": "Swap one of your inventory slots into tool slot 0 before mining.",
+        "parameters": {
+            "type": "object",
+            "properties": {"slot": {"type": "integer", "minimum": 0, "maximum": 35}},
+            "required": ["slot"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
 ]
 
 
@@ -423,6 +439,7 @@ def call_tool(name, args):
         "craft": lambda: craft(
             args["width"], args["height"], args["grid"], args["times"]
         ),
+        "equip_slot": lambda: equip_slot(args["slot"]),
     }
 
     function = functions.get(name)
@@ -443,6 +460,7 @@ blocks, entities, inventory, recipes, or action results.
 
 Movement and physical interactions should behave like a player:
 - mining and placing walk into reach, face the target and require line of sight;
+- mining uses inventory slot 0 as the active tool; equip_slot can swap the correct tool into it;
 - dropped items touching your body are picked up automatically;
 - collect_items is for deliberately seeking nearby drops;
 - hostile combat is allowed, non-hostile targets are rejected.
