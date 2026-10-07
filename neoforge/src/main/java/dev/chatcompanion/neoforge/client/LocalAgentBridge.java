@@ -103,6 +103,7 @@ public final class LocalAgentBridge {
             created.createContext("/attack-entity", LocalAgentBridge::handleAttackEntity);
             created.createContext("/take-held-item", LocalAgentBridge::handleTakeHeldItem);
             created.createContext("/craft", LocalAgentBridge::handleCraft);
+            created.createContext("/equip-slot", LocalAgentBridge::handleEquipSlot);
             created.createContext("/chat-inbox", LocalAgentBridge::handleChatInbox);
             created.setExecutor(HTTP_EXECUTOR);
             created.start();
@@ -646,6 +647,51 @@ public final class LocalAgentBridge {
         }
     }
 
+    private static void handleEquipSlot(HttpExchange exchange) throws IOException {
+        if (!requireMethod(exchange, "POST")) {
+            return;
+        }
+
+        EquipRequest request;
+        try {
+            request = readJson(exchange, EquipRequest.class);
+        } catch (IllegalArgumentException failure) {
+            sendJson(exchange, 400, GSON.toJson(Map.of("error", failure.getMessage())));
+            return;
+        }
+
+        if (request == null || request.slot() < 0 || request.slot() > 35) {
+            sendJson(exchange, 400, "{\"error\":\"slot must be between 0 and 35\"}");
+            return;
+        }
+
+        try {
+            Map<String, Object> result = withCompanion(context -> {
+                SimpleContainer inventory = context.companion().companionInventory();
+                if (request.slot() == 0) {
+                    ItemStack current = inventory.getItem(0);
+                    return Map.of(
+                            "ok", true,
+                            "slot", 0,
+                            "item", current.isEmpty() ? "" : BuiltInRegistries.ITEM.getKey(current.getItem()).toString());
+                }
+
+                ItemStack selected = inventory.getItem(request.slot()).copy();
+                ItemStack oldMain = inventory.getItem(0).copy();
+                inventory.setItem(0, selected);
+                inventory.setItem(request.slot(), oldMain);
+
+                return Map.of(
+                        "ok", true,
+                        "slot", 0,
+                        "item", selected.isEmpty() ? "" : BuiltInRegistries.ITEM.getKey(selected.getItem()).toString());
+            });
+            sendJson(exchange, 200, GSON.toJson(result));
+        } catch (Exception failure) {
+            sendFailure(exchange, failure);
+        }
+    }
+
     private static void handleChatInbox(HttpExchange exchange) throws IOException {
         if (!requireMethod(exchange, "GET")) {
             return;
@@ -980,6 +1026,7 @@ public final class LocalAgentBridge {
     private record PlaceRequest(int x, int y, int z, int inventory_slot, String face) {}
     private record AttackRequest(String entity_id) {}
     private record CraftRequest(int width, int height, List<String> grid, Integer times) {}
+    private record EquipRequest(int slot) {}
 
     private static final class BlockAggregate {
         private int count;
