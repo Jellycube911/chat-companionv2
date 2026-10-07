@@ -218,7 +218,7 @@ public final class CompanionService implements AutoCloseable {
                 + " | " + companion.jobType() + " " + companion.jobState() + " (" + companion.reason() + ")"
                 + " | distance " + String.format(Locale.ROOT, "%.1f", companion.distanceTo(owner))
                 + " | navigation " + (!companion.getNavigation().isDone() ? "ACTIVE" : "IDLE")
-                + " | actions " + companion.actionsAllowed() + " | remote consent " + companion.remoteConsent() + " | speech " + companion.speechConsent());
+                + " | remote consent " + companion.remoteConsent() + " | speech " + companion.speechConsent());
         message(owner, serverCredentialVisibility());
         Session current = sessions.get(owner.getUUID());
         if (current == null) { message(owner, "AI workflow not started; local movement works. Use /chat remote on to start remote conversation."); return; }
