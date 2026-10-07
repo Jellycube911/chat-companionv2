@@ -124,8 +124,9 @@ class MemoryStore:
             age_days = max(0.0, (now - row["updated_at"]) / 86400.0)
             score += 2.0 / (1.0 + math.log1p(age_days))
 
-            if query_tokens and overlap == 0 and query_lower not in haystack:
-                score -= 2
+            matched = not query_tokens or overlap > 0 or (query_lower and query_lower in haystack)
+            if not matched:
+                continue
 
             ranked.append((score, row))
 
