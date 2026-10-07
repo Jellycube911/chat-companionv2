@@ -1,0 +1,189 @@
+package dev.chatcompanion.neoforge.client;
+
+import com.google.gson.Gson;
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
+import dev.chatcompanion.neoforge.ChatCompanion;
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import net.minecraft.client.Minecraft;
+import net.minecraft.network.chat.Component;
+import net.neoforged.api.distmarker.Dist;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
+
+/**
+ * Tiny localhost-only HTTP bridge used to prove that an external agent can
+ * observe and control the Minecraft client.
+ *
+ * <p>This is deliberately small. It is not the final MCP/OpenAI integration.
+ */
+@EventBusSubscriber(modid = ChatCompanion.MOD_ID, value = Dist.CLIENT, bus = EventBusSubscriber.Bus.MOD)
+public final class LocalAgentBridge {
+    private static final Gson GSON = new Gson();
+    private static final int PORT = 8765;
+    private static final int MAX_BODY_BYTES = 16 * 1024;
+
+    private static final ExecutorService HTTP_EXECUTOR = Executors.newCachedThreadPool(r -> {
+        Thread thread = new Thread(r, "chat-companion-agent-http");
+        thread.setDaemon(true);
+        return thread;
+    });
+
+    private static final ScheduledExecutorService TIMER = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread thread = new Thread(r, "chat-companion-agent-timer");
+        thread.setDaemon(true);
+        return thread;
+    });
+
+    private static volatile HttpServer server;
+
+    private LocalAgentBridge() {}
+
+    @SubscribeEvent
+    public static void clientSetup(FMLClientSetupEvent event) {
+        event.enqueueWork(LocalAgentBridge::start);
+    }
+
+    public static synchronized void start() {
+        if (server != null) {
+            return;
+        }
+
+        try {
+            HttpServer created = HttpServer.create(new InetSocketAddress("127.0.0.1", PORT), 0);
+            created.createContext("/state", LocalAgentBridge::handleState);
+            created.createContext("/say", LocalAgentBridge::handleSay);
+            created.createContext("/move-forward", LocalAgentBridge::handleMoveForward);
+            created.setExecutor(HTTP_EXECUTOR);
+            created.start();
+            server = created;
+
+            Runtime.getRuntime().addShutdownHook(new Thread(LocalAgentBridge::stop, "chat-companion-agent-shutdown"));
+            System.out.println("[ChatCompanion] Local agent bridge listening on http://127.0.0.1:" + PORT);
+        } catch (IOException failure) {
+            System.err.println("[ChatCompanion] Could not start local agent bridge on port " + PORT);
+            failure.printStackTrace();
+        }
+    }
+
+    private static synchronized void stop() {
+        HttpServer current = server;
+        server = null;
+        if (current != null) {
+            current.stop(0);
+        }
+        HTTP_EXECUTOR.shutdownNow();
+        TIMER.shutdownNow();
+    }
+
+    private static void handleState(HttpExchange exchange) throws IOException {
+        if (!requireMethod(exchange, "GET")) {
+            return;
+        }
+
+        Minecraft minecraft = Minecraft.getInstance();
+        CompletableFuture<Map<String, Object>> result = new CompletableFuture<>();
+
+        minecraft.execute(() -> {
+            Map<String, Object> state = new LinkedHashMap<>();
+            if (minecraft.player == null) {
+                state.put("inWorld", false);
+            } else {
+                state.put("inWorld", true);
+                state.put("x", minecraft.player.getX());
+                state.put("y", minecraft.player.getY());
+                state.put("z", minecraft.player.getZ());
+                state.put("health", minecraft.player.getHealth());
+                state.put("food", minecraft.player.getFoodData().getFoodLevel());
+                state.put("dimension", minecraft.player.level().dimension().location().toString());
+            }
+            result.complete(state);
+        });
+
+        try {
+            sendJson(exchange, 200, GSON.toJson(result.get(3, TimeUnit.SECONDS)));
+        } catch (Exception failure) {
+            sendJson(exchange, 500, "{\"error\":\"Could not read Minecraft state\"}");
+        }
+    }
+
+    private static void handleSay(HttpExchange exchange) throws IOException {
+        if (!requireMethod(exchange, "POST")) {
+            return;
+        }
+
+        byte[] body = exchange.getRequestBody().readAllBytes();
+        if (body.length > MAX_BODY_BYTES) {
+            sendJson(exchange, 413, "{\"error\":\"Request body too large\"}");
+            return;
+        }
+
+        SayRequest request;
+        try {
+            request = GSON.fromJson(new String(body, StandardCharsets.UTF_8), SayRequest.class);
+        } catch (RuntimeException failure) {
+            sendJson(exchange, 400, "{\"error\":\"Invalid JSON\"}");
+            return;
+        }
+
+        if (request == null || request.message() == null || request.message().isBlank()) {
+            sendJson(exchange, 400, "{\"error\":\"Missing message\"}");
+            return;
+        }
+        if (request.message().length() > 4096) {
+            sendJson(exchange, 400, "{\"error\":\"Message too long\"}");
+            return;
+        }
+
+        Minecraft minecraft = Minecraft.getInstance();
+        minecraft.execute(() ->
+                minecraft.gui.getChat().addMessage(Component.literal("[AI] " + request.message())));
+
+        sendJson(exchange, 200, "{\"ok\":true}");
+    }
+
+    private static void handleMoveForward(HttpExchange exchange) throws IOException {
+        if (!requireMethod(exchange, "POST")) {
+            return;
+        }
+
+        Minecraft minecraft = Minecraft.getInstance();
+        minecraft.execute(() -> minecraft.options.keyUp.setDown(true));
+        TIMER.schedule(
+                () -> minecraft.execute(() -> minecraft.options.keyUp.setDown(false)),
+                500,
+                TimeUnit.MILLISECONDS);
+
+        sendJson(exchange, 200, "{\"ok\":true}");
+    }
+
+    private static boolean requireMethod(HttpExchange exchange, String method) throws IOException {
+        if (method.equalsIgnoreCase(exchange.getRequestMethod())) {
+            return true;
+        }
+        exchange.getResponseHeaders().set("Allow", method);
+        sendJson(exchange, 405, "{\"error\":\"" + method + " only\"}");
+        return false;
+    }
+
+    private static void sendJson(HttpExchange exchange, int status, String json) throws IOException {
+        byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
+        exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
+        exchange.sendResponseHeaders(status, bytes.length);
+        try (var output = exchange.getResponseBody()) {
+            output.write(bytes);
+        }
+    }
+
+    private record SayRequest(String message) {}
+}
