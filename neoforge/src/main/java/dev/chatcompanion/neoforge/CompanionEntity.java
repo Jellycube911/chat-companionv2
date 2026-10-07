@@ -19,7 +19,8 @@ import net.minecraft.world.entity.ai.goal.FloatGoal;
 import net.minecraft.world.entity.ai.goal.RandomLookAroundGoal;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.player.Player;
-import net.minecraft.world.inventory.GenericContainerMenu;
+import net.minecraft.world.inventory.ChestMenu;
+import net.minecraft.world.inventory.MenuType;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
@@ -73,7 +74,7 @@ public final class CompanionEntity extends PathfinderMob {
         if (!level().isClientSide() && player instanceof ServerPlayer serverPlayer) {
             serverPlayer.openMenu(new SimpleMenuProvider(
                     (containerId, playerInventory, ignored) ->
-                            GenericContainerMenu.fourRows(containerId, playerInventory, inventory),
+                            new ChestMenu(MenuType.GENERIC_9x4, containerId, playerInventory, inventory, 4),
                     getName().copy().append(" Inventory")));
         }
         return InteractionResult.sidedSuccess(level().isClientSide());
