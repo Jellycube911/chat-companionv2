@@ -15,6 +15,7 @@ import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.ai.goal.FloatGoal;
 import net.minecraft.world.entity.ai.goal.LookAtPlayerGoal;
 import net.minecraft.world.entity.ai.goal.RandomLookAroundGoal;
+import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
@@ -23,7 +24,7 @@ import net.minecraft.world.phys.Vec3;
 /** Server-owned goals keep ticking while the Agent is disconnected or busy. */
 public final class CompanionEntity extends PathfinderMob {
     public enum JobState { SUSPENDED, RUNNING, COMPLETED, CANCELLED, FAILED, UNKNOWN }
-    public enum JobType { NONE, FOLLOW, MOVE, MINE, COLLECT, DEFEND }
+    public enum JobType { NONE, FOLLOW, MOVE, MINE, PLACE, COLLECT, DEFEND }
 
     private UUID owner;
     private UUID jobId;
@@ -128,7 +129,24 @@ public final class CompanionEntity extends PathfinderMob {
 
     @Override public void tick() {
         super.tick();
-        if (!(level() instanceof ServerLevel world) || jobState != JobState.RUNNING) return;
+        if (!(level() instanceof ServerLevel world)) return;
+
+        // Player-like passive pickup: items must be very close to the body.
+        if (tickCount % 4 == 0) {
+            var nearbyItems = world.getEntitiesOfClass(
+                    ItemEntity.class,
+                    getBoundingBox().inflate(1.0, 0.5, 1.0),
+                    item -> item.isAlive() && !item.hasPickUpDelay());
+            for (ItemEntity item : nearbyItems) {
+                ItemStack original = item.getItem();
+                ItemStack remainder = inventory.addItem(original.copy());
+                if (remainder.getCount() == original.getCount()) continue;
+                if (remainder.isEmpty()) item.discard();
+                else item.setItem(remainder);
+            }
+        }
+
+        if (jobState != JobState.RUNNING) return;
         if (jobType != JobType.FOLLOW && jobType != JobType.MOVE) return;
         Vec3 target = destination;
         ServerPlayer player = owner == null ? null : world.getServer().getPlayerList().getPlayer(owner);
