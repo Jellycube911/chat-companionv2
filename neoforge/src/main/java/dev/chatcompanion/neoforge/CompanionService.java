@@ -435,7 +435,10 @@ public final class CompanionService implements AutoCloseable {
         items.sort(Comparator.comparingDouble(companion::distanceToSqr));
         if (items.isEmpty() || job.changed() >= job.limit()) { companion.complete("collection_complete:" + job.changed()); work.remove(owner); return; }
         ItemEntity target = items.getFirst();
-        if (companion.distanceToSqr(target) > 4) { if (world.getGameTime() % 15 == 0) companion.getNavigation().moveTo(target, 1.1); return; }
+        if (!companion.getBoundingBox().inflate(1.0, 0.5, 1.0).intersects(target.getBoundingBox())) {
+            if (world.getGameTime() % 10 == 0) companion.getNavigation().moveTo(target, 1.1);
+            return;
+        }
         ItemStack original = target.getItem(); int before = original.getCount(); ItemStack remainder = companion.companionInventory().addItem(original.copy());
         if (remainder.getCount() == before) { companion.failJob("inventory_full"); work.remove(owner); return; }
         if (remainder.isEmpty()) target.discard(); else target.setItem(remainder);
