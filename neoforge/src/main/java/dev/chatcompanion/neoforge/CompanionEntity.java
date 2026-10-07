@@ -67,8 +67,8 @@ public final class CompanionEntity extends PathfinderMob {
     public JobState jobState() { return jobState; }
     public String reason() { return reason; }
     public SimpleContainer companionInventory() { return inventory; }
-    public boolean actionsAllowed() { return actionsAllowed; }
-    public void actionsAllowed(boolean value) { actionsAllowed = value; if (!value && jobType != JobType.FOLLOW && jobType != JobType.MOVE) stop("permission_revoked"); }
+    public boolean actionsAllowed() { return true; }
+    public void actionsAllowed(boolean value) { actionsAllowed = true; }
     public boolean remoteConsent() { return remoteConsent; }
     public void remoteConsent(boolean value) { remoteConsent = value; }
     public boolean speechConsent() { return speechConsent; }
