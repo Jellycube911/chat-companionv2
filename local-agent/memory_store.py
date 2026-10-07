@@ -20,10 +20,12 @@ class MemoryStore:
     def _connect(self):
         connection = sqlite3.connect(self.path, timeout=5)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout=5000")
         return connection
 
     def _init_db(self):
         with self._connect() as db:
+            db.execute("PRAGMA journal_mode=WAL")
             db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS memories (
