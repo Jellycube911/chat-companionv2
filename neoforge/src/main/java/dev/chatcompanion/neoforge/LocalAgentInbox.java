@@ -22,7 +22,7 @@ public final class LocalAgentInbox {
     }
 
     public static List<Message> drain(UUID owner, int max) {
-        int limit = Math.clamp(max, 1, 16);
+        int limit = Math.max(1, Math.min(16, max));
         List<Message> result = new ArrayList<>(limit);
         List<Message> deferred = new ArrayList<>();
         Message message;
