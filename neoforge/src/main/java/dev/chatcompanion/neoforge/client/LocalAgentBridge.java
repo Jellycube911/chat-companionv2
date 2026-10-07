@@ -12,7 +12,6 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
@@ -20,6 +19,8 @@ import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
+import net.neoforged.neoforge.client.event.MovementInputUpdateEvent;
+import net.neoforged.neoforge.common.NeoForge;
 
 /**
  * Tiny localhost-only HTTP bridge used to prove that an external agent can
@@ -32,6 +33,7 @@ public final class LocalAgentBridge {
     private static final Gson GSON = new Gson();
     private static final int PORT = 8765;
     private static final int MAX_BODY_BYTES = 16 * 1024;
+    private static final long MOVE_FORWARD_DURATION_NANOS = TimeUnit.MILLISECONDS.toNanos(500);
 
     private static final ExecutorService HTTP_EXECUTOR = Executors.newCachedThreadPool(r -> {
         Thread thread = new Thread(r, "chat-companion-agent-http");
@@ -39,19 +41,17 @@ public final class LocalAgentBridge {
         return thread;
     });
 
-    private static final ScheduledExecutorService TIMER = Executors.newSingleThreadScheduledExecutor(r -> {
-        Thread thread = new Thread(r, "chat-companion-agent-timer");
-        thread.setDaemon(true);
-        return thread;
-    });
-
     private static volatile HttpServer server;
+    private static volatile long moveForwardUntilNanos;
 
     private LocalAgentBridge() {}
 
     @SubscribeEvent
     public static void clientSetup(FMLClientSetupEvent event) {
-        event.enqueueWork(LocalAgentBridge::start);
+        event.enqueueWork(() -> {
+            NeoForge.EVENT_BUS.addListener(LocalAgentBridge::movementInput);
+            start();
+        });
     }
 
     public static synchronized void start() {
@@ -83,7 +83,17 @@ public final class LocalAgentBridge {
             current.stop(0);
         }
         HTTP_EXECUTOR.shutdownNow();
-        TIMER.shutdownNow();
+    }
+
+    private static void movementInput(MovementInputUpdateEvent event) {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (event.getEntity() != minecraft.player || System.nanoTime() >= moveForwardUntilNanos) {
+            return;
+        }
+
+        event.getInput().up = true;
+        event.getInput().down = false;
+        event.getInput().forwardImpulse = 1.0F;
     }
 
     private static void handleState(HttpExchange exchange) throws IOException {
@@ -158,12 +168,12 @@ public final class LocalAgentBridge {
         }
 
         Minecraft minecraft = Minecraft.getInstance();
-        minecraft.execute(() -> minecraft.options.keyUp.setDown(true));
-        TIMER.schedule(
-                () -> minecraft.execute(() -> minecraft.options.keyUp.setDown(false)),
-                500,
-                TimeUnit.MILLISECONDS);
+        if (minecraft.player == null) {
+            sendJson(exchange, 409, "{\"error\":\"Player is not in a world\"}");
+            return;
+        }
 
+        moveForwardUntilNanos = System.nanoTime() + MOVE_FORWARD_DURATION_NANOS;
         sendJson(exchange, 200, "{\"ok\":true}");
     }
 
