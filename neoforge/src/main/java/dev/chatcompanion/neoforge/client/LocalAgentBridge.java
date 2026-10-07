@@ -1,6 +1,7 @@
 package dev.chatcompanion.neoforge.client;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonObject;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import dev.chatcompanion.neoforge.ChatCompanion;
@@ -30,6 +31,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.SimpleContainer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.monster.Enemy;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.state.BlockState;
@@ -87,6 +89,14 @@ public final class LocalAgentBridge {
             created.createContext("/say", LocalAgentBridge::handleSay);
             created.createContext("/move-forward", LocalAgentBridge::handleMoveForward);
             created.createContext("/move-to", LocalAgentBridge::handleMoveTo);
+            created.createContext("/follow-owner", LocalAgentBridge::handleFollowOwner);
+            created.createContext("/stop-action", LocalAgentBridge::handleStopAction);
+            created.createContext("/resume-action", LocalAgentBridge::handleResumeAction);
+            created.createContext("/collect-items", LocalAgentBridge::handleCollectItems);
+            created.createContext("/mine-block", LocalAgentBridge::handleMineBlock);
+            created.createContext("/place-block", LocalAgentBridge::handlePlaceBlock);
+            created.createContext("/attack-entity", LocalAgentBridge::handleAttackEntity);
+            created.createContext("/take-held-item", LocalAgentBridge::handleTakeHeldItem);
             created.setExecutor(HTTP_EXECUTOR);
             created.start();
             server = created;
@@ -136,6 +146,7 @@ public final class LocalAgentBridge {
                 result.put("jobType", companion.jobType().name());
                 result.put("jobState", companion.jobState().name());
                 result.put("jobReason", companion.reason());
+                result.put("worldActionsAllowed", companion.actionsAllowed());
 
                 Map<String, Object> ownerState = new LinkedHashMap<>();
                 ownerState.put("x", owner.getX());
@@ -191,6 +202,12 @@ public final class LocalAgentBridge {
                     if (entity instanceof LivingEntity living) {
                         item.put("health", living.getHealth());
                         item.put("maxHealth", living.getMaxHealth());
+                    }
+                    if (entity instanceof ItemEntity dropped) {
+                        ItemStack stack = dropped.getItem();
+                        item.put("droppedItem", BuiltInRegistries.ITEM.getKey(stack.getItem()).toString());
+                        item.put("itemName", stack.getHoverName().getString());
+                        item.put("count", stack.getCount());
                     }
                     items.add(item);
                 }
@@ -418,6 +435,239 @@ public final class LocalAgentBridge {
         }
     }
 
+
+    private static void handleFollowOwner(HttpExchange exchange) throws IOException {
+        if (!requireMethod(exchange, "POST")) {
+            return;
+        }
+
+        FollowRequest request;
+        try {
+            request = readOptionalJson(exchange, FollowRequest.class);
+        } catch (IllegalArgumentException failure) {
+            sendJson(exchange, 400, GSON.toJson(Map.of("error", failure.getMessage())));
+            return;
+        }
+
+        double stopDistance = request == null || request.stop_distance() == null ? 3.0 : request.stop_distance();
+        if (!Double.isFinite(stopDistance) || stopDistance < 2.0 || stopDistance > 8.0) {
+            sendJson(exchange, 400, "{\"error\":\"stop_distance must be between 2 and 8\"}");
+            return;
+        }
+
+        try {
+            Map<String, Object> result = withCompanion(context -> {
+                JsonObject args = new JsonObject();
+                args.addProperty("player_id", context.owner().getUUID().toString());
+                args.addProperty("stop_distance", stopDistance);
+                context.service().action(context.owner(), "follow_player", args);
+                return queued("follow_player");
+            });
+            sendJson(exchange, 202, GSON.toJson(result));
+        } catch (Exception failure) {
+            sendFailure(exchange, failure);
+        }
+    }
+
+    private static void handleStopAction(HttpExchange exchange) throws IOException {
+        if (!requireMethod(exchange, "POST")) {
+            return;
+        }
+
+        try {
+            Map<String, Object> result = withCompanion(context -> {
+                context.service().stop(context.owner());
+                return Map.of("ok", true, "action", "stop");
+            });
+            sendJson(exchange, 200, GSON.toJson(result));
+        } catch (Exception failure) {
+            sendFailure(exchange, failure);
+        }
+    }
+
+    private static void handleResumeAction(HttpExchange exchange) throws IOException {
+        if (!requireMethod(exchange, "POST")) {
+            return;
+        }
+
+        try {
+            Map<String, Object> result = withCompanion(context -> {
+                context.service().resume(context.owner());
+                return Map.of("ok", true, "action", "resume");
+            });
+            sendJson(exchange, 200, GSON.toJson(result));
+        } catch (Exception failure) {
+            sendFailure(exchange, failure);
+        }
+    }
+
+    private static void handleCollectItems(HttpExchange exchange) throws IOException {
+        if (!requireMethod(exchange, "POST")) {
+            return;
+        }
+
+        CollectRequest request;
+        try {
+            request = readOptionalJson(exchange, CollectRequest.class);
+        } catch (IllegalArgumentException failure) {
+            sendJson(exchange, 400, GSON.toJson(Map.of("error", failure.getMessage())));
+            return;
+        }
+
+        int radius = request == null || request.radius() == null ? 8 : request.radius();
+        int maxItems = request == null || request.max_items() == null ? 16 : request.max_items();
+        if (radius < 1 || radius > 8 || maxItems < 1 || maxItems > 32) {
+            sendJson(exchange, 400, "{\"error\":\"radius must be 1-8 and max_items must be 1-32\"}");
+            return;
+        }
+
+        try {
+            Map<String, Object> result = withCompanion(context -> {
+                requireWorldActions(context.companion());
+                JsonObject args = new JsonObject();
+                args.addProperty("radius", radius);
+                args.addProperty("max_items", maxItems);
+                context.service().action(context.owner(), "collect_items", args);
+                return queued("collect_items");
+            });
+            sendJson(exchange, 202, GSON.toJson(result));
+        } catch (Exception failure) {
+            sendFailure(exchange, failure);
+        }
+    }
+
+    private static void handleMineBlock(HttpExchange exchange) throws IOException {
+        if (!requireMethod(exchange, "POST")) {
+            return;
+        }
+
+        BlockRequest request;
+        try {
+            request = readJson(exchange, BlockRequest.class);
+        } catch (IllegalArgumentException failure) {
+            sendJson(exchange, 400, GSON.toJson(Map.of("error", failure.getMessage())));
+            return;
+        }
+
+        try {
+            Map<String, Object> result = withCompanion(context -> {
+                requireWorldActions(context.companion());
+                JsonObject args = blockArgs(context.companion(), request.x(), request.y(), request.z());
+                context.service().action(context.owner(), "mine_block", args);
+                return queued("mine_block");
+            });
+            sendJson(exchange, 202, GSON.toJson(result));
+        } catch (Exception failure) {
+            sendFailure(exchange, failure);
+        }
+    }
+
+    private static void handlePlaceBlock(HttpExchange exchange) throws IOException {
+        if (!requireMethod(exchange, "POST")) {
+            return;
+        }
+
+        PlaceRequest request;
+        try {
+            request = readJson(exchange, PlaceRequest.class);
+        } catch (IllegalArgumentException failure) {
+            sendJson(exchange, 400, GSON.toJson(Map.of("error", failure.getMessage())));
+            return;
+        }
+
+        if (request.inventory_slot() < 0 || request.inventory_slot() > 35) {
+            sendJson(exchange, 400, "{\"error\":\"inventory_slot must be between 0 and 35\"}");
+            return;
+        }
+        String face = request.face() == null ? "up" : request.face().toLowerCase(java.util.Locale.ROOT);
+        if (!java.util.Set.of("up", "down", "north", "south", "east", "west").contains(face)) {
+            sendJson(exchange, 400, "{\"error\":\"face must be up, down, north, south, east, or west\"}");
+            return;
+        }
+
+        try {
+            Map<String, Object> result = withCompanion(context -> {
+                requireWorldActions(context.companion());
+                JsonObject args = blockArgs(context.companion(), request.x(), request.y(), request.z());
+                args.addProperty("inventory_slot", request.inventory_slot());
+                args.addProperty("face", face);
+                context.service().action(context.owner(), "place_block", args);
+                return queued("place_block");
+            });
+            sendJson(exchange, 202, GSON.toJson(result));
+        } catch (Exception failure) {
+            sendFailure(exchange, failure);
+        }
+    }
+
+    private static void handleAttackEntity(HttpExchange exchange) throws IOException {
+        if (!requireMethod(exchange, "POST")) {
+            return;
+        }
+
+        AttackRequest request;
+        try {
+            request = readJson(exchange, AttackRequest.class);
+            UUID.fromString(request.entity_id());
+        } catch (Exception failure) {
+            sendJson(exchange, 400, "{\"error\":\"entity_id must be a valid entity UUID\"}");
+            return;
+        }
+
+        try {
+            Map<String, Object> result = withCompanion(context -> {
+                requireWorldActions(context.companion());
+                JsonObject args = new JsonObject();
+                args.addProperty("entity_id", request.entity_id());
+                context.service().action(context.owner(), "attack_entity", args);
+                return queued("attack_entity");
+            });
+            sendJson(exchange, 202, GSON.toJson(result));
+        } catch (Exception failure) {
+            sendFailure(exchange, failure);
+        }
+    }
+
+    private static void handleTakeHeldItem(HttpExchange exchange) throws IOException {
+        if (!requireMethod(exchange, "POST")) {
+            return;
+        }
+
+        try {
+            Map<String, Object> result = withCompanion(context -> {
+                context.service().give(context.owner());
+                return Map.of("ok", true, "action", "take_held_item");
+            });
+            sendJson(exchange, 200, GSON.toJson(result));
+        } catch (Exception failure) {
+            sendFailure(exchange, failure);
+        }
+    }
+
+    private static Map<String, Object> queued(String action) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("ok", true);
+        result.put("queued", true);
+        result.put("action", action);
+        result.put("note", "The server job was submitted; use get_state/get_inventory to verify its result.");
+        return result;
+    }
+
+    private static JsonObject blockArgs(CompanionEntity companion, int x, int y, int z) {
+        JsonObject args = new JsonObject();
+        args.addProperty("dimension", companion.level().dimension().location().toString());
+        args.addProperty("x", x);
+        args.addProperty("y", y);
+        args.addProperty("z", z);
+        return args;
+    }
+
+    private static void requireWorldActions(CompanionEntity companion) {
+        if (!companion.actionsAllowed()) {
+            throw new IllegalStateException("World-changing actions are disabled. Run /chat actions on in Minecraft first.");
+        }
+    }
+
     private static void validateMove(ServerLevel world, CompanionEntity companion, Vec3 target, double stopDistance) {
         BlockPos pos = BlockPos.containing(target);
         if (target.y < world.getMinBuildHeight() || target.y >= world.getMaxBuildHeight()) {
@@ -471,13 +721,29 @@ public final class LocalAgentBridge {
                     throw new IllegalStateException("Companion world is unavailable");
                 }
 
-                result.complete(operation.apply(new ServerContext(owner, companion, world)));
+                result.complete(operation.apply(new ServerContext(owner, companion, world, service)));
             } catch (Throwable failure) {
                 result.completeExceptionally(failure);
             }
         });
 
         return result.get(5, TimeUnit.SECONDS);
+    }
+
+    private static <T> T readOptionalJson(HttpExchange exchange, Class<T> type) throws IOException {
+        byte[] body = exchange.getRequestBody().readAllBytes();
+        if (body.length == 0) {
+            return null;
+        }
+        if (body.length > MAX_BODY_BYTES) {
+            throw new IllegalArgumentException("Request body too large");
+        }
+
+        try {
+            return GSON.fromJson(new String(body, StandardCharsets.UTF_8), type);
+        } catch (RuntimeException failure) {
+            throw new IllegalArgumentException("Invalid JSON");
+        }
     }
 
     private static <T> T readJson(HttpExchange exchange, Class<T> type) throws IOException {
@@ -538,9 +804,14 @@ public final class LocalAgentBridge {
         }
     }
 
-    private record ServerContext(ServerPlayer owner, CompanionEntity companion, ServerLevel world) {}
+    private record ServerContext(ServerPlayer owner, CompanionEntity companion, ServerLevel world, CompanionService service) {}
     private record SayRequest(String message) {}
     private record MoveToRequest(double x, double y, double z, Double stop_distance) {}
+    private record FollowRequest(Double stop_distance) {}
+    private record CollectRequest(Integer radius, Integer max_items) {}
+    private record BlockRequest(int x, int y, int z) {}
+    private record PlaceRequest(int x, int y, int z, int inventory_slot, String face) {}
+    private record AttackRequest(String entity_id) {}
 
     private static final class BlockAggregate {
         private int count;
