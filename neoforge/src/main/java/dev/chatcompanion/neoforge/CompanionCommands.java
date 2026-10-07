@@ -19,7 +19,7 @@ final class CompanionCommands {
     static void register(RegisterCommandsEvent event) { register(event.getDispatcher()); }
     static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
         var root = Commands.literal("chat").executes(context -> {
-            context.getSource().sendSuccess(() -> Component.literal("Chat Companion: spawn, follow, stop, move, say, agent, remote, speech, give, mine, place, collect, defend, resume, inventory. Address Chat in normal chat with chat: ..."), false); return 1;
+            context.getSource().sendSuccess(() -> Component.literal("Chat Companion: spawn, follow, stop, move, say, agent, remote, speech, give, mine, place, collect, defend, resume, inventory. Normal chat is heard by Chat while the local MCP agent is running."), false); return 1;
         });
         root.then(Commands.literal("spawn").executes(context -> { ServerPlayer owner = context.getSource().getPlayerOrException(); try { CompanionEntity companion = service().spawn(owner); CompanionService.message(owner, "Companion ready: " + companion.getUUID()); } catch (IllegalStateException error) { CompanionService.message(owner, error.getMessage()); } return 1; }));
         root.then(Commands.literal("follow").executes(context -> { ServerPlayer owner = context.getSource().getPlayerOrException(); JsonObject args = new JsonObject(); args.addProperty("player_id", owner.getUUID().toString()); args.addProperty("stop_distance", 3); service().action(owner, "follow_player", args); return 1; }));
@@ -55,10 +55,8 @@ final class CompanionCommands {
     }
     static void chat(ServerChatEvent event) {
         if (event.isCanceled() || ChatCompanion.service == null) return;
-        String text = event.getRawText().strip(); String lower = text.toLowerCase(java.util.Locale.ROOT);
-        if (lower.startsWith("chat:") || lower.startsWith("chat,") || lower.startsWith("chat ")) {
-            String addressed = text.substring(5).strip(); if (!addressed.isEmpty()) LocalAgentInbox.offer(event.getPlayer().getUUID(), addressed);
-        }
+        String text = event.getRawText().strip();
+        if (!text.isEmpty()) LocalAgentInbox.offer(event.getPlayer().getUUID(), text);
     }
     private static JsonObject position(ServerPlayer player, BlockPos pos) { JsonObject args = new JsonObject(); args.addProperty("dimension", player.level().dimension().location().toString()); args.addProperty("x", pos.getX()); args.addProperty("y", pos.getY()); args.addProperty("z", pos.getZ()); return args; }
     private static CompanionService service() { if (ChatCompanion.service == null) throw new IllegalStateException("Companion server not ready"); return ChatCompanion.service; }
