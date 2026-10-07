@@ -166,7 +166,7 @@ public final class CompanionService implements AutoCloseable {
         }).whenComplete((entry, failure) -> server.execute(() -> {
             if (closed) return;
             if (failure != null) message(owner, "Action rejected: " + safeFailure(failure));
-            else if (entry.outcome() != null && !entry.outcome().accepted())
+            else if (entry.outcome() != null && !entry.outcome().success())
                 message(owner, "Action rejected: " + entry.outcome().reasonCode());
         }));
     }
