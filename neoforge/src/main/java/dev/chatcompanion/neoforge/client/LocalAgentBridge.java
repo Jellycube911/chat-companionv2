@@ -4,9 +4,11 @@ import com.google.gson.Gson;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import dev.chatcompanion.neoforge.ChatCompanion;
+import dev.chatcompanion.neoforge.CompanionEntity;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -19,12 +21,10 @@ import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
-import net.neoforged.neoforge.client.event.MovementInputUpdateEvent;
-import net.neoforged.neoforge.common.NeoForge;
 
 /**
  * Tiny localhost-only HTTP bridge used to prove that an external agent can
- * observe and control the Minecraft client.
+ * observe and control the Chat Companion entity.
  *
  * <p>This is deliberately small. It is not the final MCP/OpenAI integration.
  */
@@ -33,7 +33,8 @@ public final class LocalAgentBridge {
     private static final Gson GSON = new Gson();
     private static final int PORT = 8765;
     private static final int MAX_BODY_BYTES = 16 * 1024;
-    private static final long MOVE_FORWARD_DURATION_NANOS = TimeUnit.MILLISECONDS.toNanos(500);
+    private static final double COMPANION_SEARCH_RADIUS = 128.0;
+    private static final double FORWARD_DISTANCE = 5.0;
 
     private static final ExecutorService HTTP_EXECUTOR = Executors.newCachedThreadPool(r -> {
         Thread thread = new Thread(r, "chat-companion-agent-http");
@@ -42,16 +43,12 @@ public final class LocalAgentBridge {
     });
 
     private static volatile HttpServer server;
-    private static volatile long moveForwardUntilNanos;
 
     private LocalAgentBridge() {}
 
     @SubscribeEvent
     public static void clientSetup(FMLClientSetupEvent event) {
-        event.enqueueWork(() -> {
-            NeoForge.EVENT_BUS.addListener(LocalAgentBridge::movementInput);
-            start();
-        });
+        event.enqueueWork(LocalAgentBridge::start);
     }
 
     public static synchronized void start() {
@@ -85,17 +82,6 @@ public final class LocalAgentBridge {
         HTTP_EXECUTOR.shutdownNow();
     }
 
-    private static void movementInput(MovementInputUpdateEvent event) {
-        Minecraft minecraft = Minecraft.getInstance();
-        if (event.getEntity() != minecraft.player || System.nanoTime() >= moveForwardUntilNanos) {
-            return;
-        }
-
-        event.getInput().up = true;
-        event.getInput().down = false;
-        event.getInput().forwardImpulse = 1.0F;
-    }
-
     private static void handleState(HttpExchange exchange) throws IOException {
         if (!requireMethod(exchange, "GET")) {
             return;
@@ -106,24 +92,43 @@ public final class LocalAgentBridge {
 
         minecraft.execute(() -> {
             Map<String, Object> state = new LinkedHashMap<>();
-            if (minecraft.player == null) {
+
+            if (minecraft.player == null || minecraft.level == null) {
                 state.put("inWorld", false);
-            } else {
-                state.put("inWorld", true);
-                state.put("x", minecraft.player.getX());
-                state.put("y", minecraft.player.getY());
-                state.put("z", minecraft.player.getZ());
-                state.put("health", minecraft.player.getHealth());
-                state.put("food", minecraft.player.getFoodData().getFoodLevel());
-                state.put("dimension", minecraft.player.level().dimension().location().toString());
+                state.put("companionAvailable", false);
+                result.complete(state);
+                return;
             }
+
+            state.put("inWorld", true);
+
+            CompanionEntity companion = findCompanion(minecraft);
+            if (companion == null) {
+                state.put("companionAvailable", false);
+                result.complete(state);
+                return;
+            }
+
+            state.put("companionAvailable", true);
+            state.put("body", "chatcompanion");
+            state.put("entityId", companion.getId());
+            state.put("x", companion.getX());
+            state.put("y", companion.getY());
+            state.put("z", companion.getZ());
+            state.put("health", companion.getHealth());
+            state.put("maxHealth", companion.getMaxHealth());
+            state.put("dimension", companion.level().dimension().location().toString());
+            state.put("yaw", companion.getYRot());
+            state.put("jobType", companion.jobType().name());
+            state.put("jobState", companion.jobState().name());
+            state.put("jobReason", companion.reason());
             result.complete(state);
         });
 
         try {
             sendJson(exchange, 200, GSON.toJson(result.get(3, TimeUnit.SECONDS)));
         } catch (Exception failure) {
-            sendJson(exchange, 500, "{\"error\":\"Could not read Minecraft state\"}");
+            sendJson(exchange, 500, "{\"error\":\"Could not read companion state\"}");
         }
     }
 
@@ -168,13 +173,67 @@ public final class LocalAgentBridge {
         }
 
         Minecraft minecraft = Minecraft.getInstance();
-        if (minecraft.player == null) {
-            sendJson(exchange, 409, "{\"error\":\"Player is not in a world\"}");
-            return;
+        CompletableFuture<Map<String, Object>> result = new CompletableFuture<>();
+
+        minecraft.execute(() -> {
+            Map<String, Object> response = new LinkedHashMap<>();
+
+            if (minecraft.player == null || minecraft.level == null || minecraft.player.connection == null) {
+                response.put("ok", false);
+                response.put("error", "Player is not connected to a world");
+                result.complete(response);
+                return;
+            }
+
+            CompanionEntity companion = findCompanion(minecraft);
+            if (companion == null) {
+                response.put("ok", false);
+                response.put("error", "No nearby Chat Companion entity found. Spawn one first with /chat spawn.");
+                result.complete(response);
+                return;
+            }
+
+            double yawRadians = Math.toRadians(companion.getYRot());
+            double dx = -Math.sin(yawRadians) * FORWARD_DISTANCE;
+            double dz = Math.cos(yawRadians) * FORWARD_DISTANCE;
+
+            int targetX = (int) Math.floor(companion.getX() + dx);
+            int targetY = (int) Math.floor(companion.getY());
+            int targetZ = (int) Math.floor(companion.getZ() + dz);
+
+            minecraft.player.connection.sendCommand(
+                    "chat move " + targetX + " " + targetY + " " + targetZ
+            );
+
+            response.put("ok", true);
+            response.put("body", "chatcompanion");
+            response.put("targetX", targetX);
+            response.put("targetY", targetY);
+            response.put("targetZ", targetZ);
+            result.complete(response);
+        });
+
+        try {
+            Map<String, Object> response = result.get(3, TimeUnit.SECONDS);
+            int status = Boolean.TRUE.equals(response.get("ok")) ? 200 : 409;
+            sendJson(exchange, status, GSON.toJson(response));
+        } catch (Exception failure) {
+            sendJson(exchange, 500, "{\"error\":\"Could not command companion movement\"}");
+        }
+    }
+
+    private static CompanionEntity findCompanion(Minecraft minecraft) {
+        if (minecraft.player == null || minecraft.level == null) {
+            return null;
         }
 
-        moveForwardUntilNanos = System.nanoTime() + MOVE_FORWARD_DURATION_NANOS;
-        sendJson(exchange, 200, "{\"ok\":true}");
+        return minecraft.level
+                .getEntitiesOfClass(
+                        CompanionEntity.class,
+                        minecraft.player.getBoundingBox().inflate(COMPANION_SEARCH_RADIUS))
+                .stream()
+                .min(Comparator.comparingDouble(entity -> entity.distanceToSqr(minecraft.player)))
+                .orElse(null);
     }
 
     private static boolean requireMethod(HttpExchange exchange, String method) throws IOException {
