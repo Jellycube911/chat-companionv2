@@ -1,0 +1,13 @@
+.gradle/
+**/build/
+**/run/
+**/runs/
+**/test-runs/
+*.log
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+.DS_Store
+dist/

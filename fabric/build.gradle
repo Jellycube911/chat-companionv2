@@ -1,0 +1,51 @@
+plugins {
+    id 'fabric-loom'
+}
+
+base.archivesName = "chat-companion-fabric-${minecraft_version}"
+
+loom {
+    splitEnvironmentSourceSets()
+    runs {
+        gameTestServer {
+            server()
+            name = 'Companion GameTests'
+            vmArg '-Dfabric-api.gametest'
+            vmArg '-Dfabric-api.gametest.report-file=reports/gametest-results.xml'
+            vmArg '-Xverify:all'
+            runDir 'test-runs/gametest'
+        }
+    }
+    mods {
+        chatcompanion {
+            sourceSet sourceSets.main
+            sourceSet sourceSets.client
+            sourceSet project(':core').sourceSets.main
+            sourceSet project(':minecraft-common').sourceSets.main
+        }
+    }
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${minecraft_version}"
+    mappings loom.officialMojangMappings()
+    modImplementation "net.fabricmc:fabric-loader:${fabric_loader_version}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${fabric_api_version}"
+    implementation project(':core')
+    implementation project(':minecraft-common')
+}
+
+processResources {
+    inputs.properties(mod_version: mod_version, fabric_loader_version: fabric_loader_version,
+            fabric_api_version: fabric_api_version)
+    filesMatching('fabric.mod.json') {
+        expand(mod_version: mod_version, fabric_loader_version: fabric_loader_version,
+                fabric_api_version: fabric_api_version)
+    }
+}
+
+tasks.named('jar') {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from project(':core').sourceSets.main.output
+    from project(':minecraft-common').sourceSets.main.output
+}

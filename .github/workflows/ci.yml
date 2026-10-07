@@ -1,0 +1,30 @@
+name: Build and recovery checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Core tests, loader builds and real server GameTests
+        env:
+          JAVA_TOOL_OPTIONS: -Xverify:all
+        run: ./gradlew -Dorg.gradle.parallel=false :core:test :minecraft-common:test :neoforge:build :fabric:build :neoforge:runGameTestServer :fabric:runGameTestServer --console=plain
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chat-companion-build
+          path: |
+            neoforge/build/libs/*.jar
+            fabric/build/libs/*.jar
+            core/build/reports/tests/
+            minecraft-common/build/reports/tests/
+            fabric/test-runs/gametest/reports/

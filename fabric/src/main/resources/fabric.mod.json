@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "id": "chatcompanion",
+  "version": "${mod_version}",
+  "name": "Chat Companion",
+  "description": "Persistent Minecraft companion with durable conversation and server-authoritative actions.",
+  "license": "All Rights Reserved",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "dev.chatcompanion.fabric.ChatCompanionFabric"
+    ],
+    "client": [
+      "dev.chatcompanion.fabric.client.ChatCompanionFabricClient"
+    ],
+    "fabric-gametest": [
+      "dev.chatcompanion.fabric.CompanionGameTests"
+    ]
+  },
+  "mixins": [
+    {
+      "config": "chatcompanion.speech.mixins.json",
+      "environment": "client"
+    }
+  ],
+  "depends": {
+    "fabricloader": ">=${fabric_loader_version}",
+    "fabric-api": ">=${fabric_api_version}",
+    "minecraft": "1.21.1",
+    "java": ">=21"
+  }
+}

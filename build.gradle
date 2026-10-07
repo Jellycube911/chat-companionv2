@@ -1,0 +1,41 @@
+plugins {
+    id 'base'
+    id 'net.neoforged.moddev' version '2.0.148' apply false
+    id 'fabric-loom' version '1.14.10' apply false
+}
+
+allprojects {
+    group = 'dev.chatcompanion'
+    version = providers.gradleProperty('mod_version').get()
+}
+
+subprojects {
+    apply plugin: 'java-library'
+
+    repositories {
+        mavenCentral()
+    }
+
+    java {
+        toolchain.languageVersion = JavaLanguageVersion.of(21)
+        withSourcesJar()
+    }
+
+    tasks.withType(JavaCompile).configureEach {
+        options.encoding = 'UTF-8'
+        options.release = 21
+    }
+
+    tasks.withType(Test).configureEach {
+        useJUnitPlatform()
+        testLogging.events = ['failed', 'skipped']
+    }
+}
+
+tasks.named('build') {
+    dependsOn subprojects.collect { it.tasks.named('build') }
+}
+
+tasks.named('check') {
+    dependsOn subprojects.collect { it.tasks.named('check') }
+}
