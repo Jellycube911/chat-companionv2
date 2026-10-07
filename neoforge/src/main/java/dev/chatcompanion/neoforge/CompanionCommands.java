@@ -28,7 +28,7 @@ final class CompanionCommands {
         root.then(Commands.literal("resume").executes(context -> { service().resume(context.getSource().getPlayerOrException()); return 1; }));
         root.then(Commands.literal("agent").executes(context -> { service().status(context.getSource().getPlayerOrException()); return 1; }));
         root.then(Commands.literal("tasks").executes(context -> { service().status(context.getSource().getPlayerOrException()); return 1; }));
-        root.then(Commands.literal("say").then(Commands.argument("message", StringArgumentType.greedyString()).executes(context -> { service().say(context.getSource().getPlayerOrException(), StringArgumentType.getString(context, "message")); return 1; })));
+        root.then(Commands.literal("say").then(Commands.argument("message", StringArgumentType.greedyString()).executes(context -> { ServerPlayer owner = context.getSource().getPlayerOrException(); LocalAgentInbox.offer(owner.getUUID(), StringArgumentType.getString(context, "message")); return 1; })));
         root.then(Commands.literal("move").then(Commands.argument("position", BlockPosArgument.blockPos()).executes(context -> {
             ServerPlayer owner = context.getSource().getPlayerOrException(); JsonObject args = position(owner, BlockPosArgument.getBlockPos(context, "position")); args.addProperty("stop_distance", 1.5); service().action(owner, "move_to", args); return 1;
         })));
