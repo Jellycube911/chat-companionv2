@@ -14,6 +14,8 @@ jobs:
           distribution: temurin
           java-version: '21'
       - uses: gradle/actions/setup-gradle@v4
+      - name: Make Gradle wrapper executable
+        run: chmod +x gradlew
       - name: Core tests, loader builds and real server GameTests
         env:
           JAVA_TOOL_OPTIONS: -Xverify:all
