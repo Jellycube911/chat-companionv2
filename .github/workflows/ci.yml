@@ -23,6 +23,34 @@ jobs:
           python -m py_compile local-agent/minecraft_agent.py local-agent/mcp_server.py local-agent/memory_store.py
           cd local-agent
           python -c "import agents, mcp, requests, memory_store, mcp_server"
+          python - <<'PY'
+          import asyncio
+          import sys
+          from pathlib import Path
+          from agents.mcp import MCPServerStdio
+
+          async def main():
+              here = Path.cwd()
+              async with MCPServerStdio(
+                  name="CI Minecraft MCP",
+                  params={
+                      "command": sys.executable,
+                      "args": [str(here / "mcp_server.py")],
+                      "cwd": str(here),
+                  },
+                  cache_tools_list=True,
+                  require_approval="never",
+              ) as server:
+                  names = {tool.name for tool in await server.list_tools()}
+                  expected = {
+                      "observe", "navigate", "world_action", "craft",
+                      "say", "remember", "recall_memory", "memory_status",
+                  }
+                  missing = expected - names
+                  assert not missing, f"Missing MCP tools: {sorted(missing)}"
+
+          asyncio.run(main())
+          PY
       - name: Core tests, loader builds and real server GameTests
         env:
           JAVA_TOOL_OPTIONS: -Xverify:all
