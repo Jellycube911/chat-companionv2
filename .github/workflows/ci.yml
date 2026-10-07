@@ -16,6 +16,8 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: Make Gradle wrapper executable
         run: chmod +x gradlew
+      - name: Check local Python agent syntax
+        run: python -m py_compile local-agent/minecraft_agent.py local-agent/mcp_server.py local-agent/memory_store.py
       - name: Core tests, loader builds and real server GameTests
         env:
           JAVA_TOOL_OPTIONS: -Xverify:all
