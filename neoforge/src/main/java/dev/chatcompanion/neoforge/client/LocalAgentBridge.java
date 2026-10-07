@@ -7,6 +7,7 @@ import com.sun.net.httpserver.HttpServer;
 import dev.chatcompanion.neoforge.ChatCompanion;
 import dev.chatcompanion.neoforge.CompanionEntity;
 import dev.chatcompanion.neoforge.CompanionService;
+import dev.chatcompanion.neoforge.LocalAgentInbox;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -24,6 +25,7 @@ import java.util.function.Function;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -34,6 +36,9 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.monster.Enemy;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.crafting.CraftingInput;
+import net.minecraft.world.item.crafting.RecipeType;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.api.distmarker.Dist;
@@ -55,10 +60,10 @@ public final class LocalAgentBridge {
     private static final double FORWARD_DISTANCE = 5.0;
     private static final double MAX_MOVE_DISTANCE = 64.0;
     private static final double ENTITY_RADIUS = 16.0;
-    private static final int MAX_ENTITIES = 32;
+    private static final int MAX_ENTITIES = 16;
     private static final int BLOCK_RADIUS = 8;
     private static final int BLOCK_VERTICAL_RADIUS = 4;
-    private static final int MAX_BLOCK_TYPES = 48;
+    private static final int MAX_BLOCK_TYPES = 24;
 
     private static final ExecutorService HTTP_EXECUTOR = Executors.newCachedThreadPool(r -> {
         Thread thread = new Thread(r, "chat-companion-agent-http");
@@ -97,6 +102,8 @@ public final class LocalAgentBridge {
             created.createContext("/place-block", LocalAgentBridge::handlePlaceBlock);
             created.createContext("/attack-entity", LocalAgentBridge::handleAttackEntity);
             created.createContext("/take-held-item", LocalAgentBridge::handleTakeHeldItem);
+            created.createContext("/craft", LocalAgentBridge::handleCraft);
+            created.createContext("/chat-inbox", LocalAgentBridge::handleChatInbox);
             created.setExecutor(HTTP_EXECUTOR);
             created.start();
             server = created;
@@ -146,7 +153,6 @@ public final class LocalAgentBridge {
                 result.put("jobType", companion.jobType().name());
                 result.put("jobState", companion.jobState().name());
                 result.put("jobReason", companion.reason());
-                result.put("worldActionsAllowed", companion.actionsAllowed());
 
                 Map<String, Object> ownerState = new LinkedHashMap<>();
                 ownerState.put("x", owner.getX());
@@ -523,7 +529,6 @@ public final class LocalAgentBridge {
 
         try {
             Map<String, Object> result = withCompanion(context -> {
-                requireWorldActions(context.companion());
                 JsonObject args = new JsonObject();
                 args.addProperty("radius", radius);
                 args.addProperty("max_items", maxItems);
@@ -551,7 +556,6 @@ public final class LocalAgentBridge {
 
         try {
             Map<String, Object> result = withCompanion(context -> {
-                requireWorldActions(context.companion());
                 JsonObject args = blockArgs(context.companion(), request.x(), request.y(), request.z());
                 context.service().action(context.owner(), "mine_block", args);
                 return queued("mine_block");
@@ -587,7 +591,6 @@ public final class LocalAgentBridge {
 
         try {
             Map<String, Object> result = withCompanion(context -> {
-                requireWorldActions(context.companion());
                 JsonObject args = blockArgs(context.companion(), request.x(), request.y(), request.z());
                 args.addProperty("inventory_slot", request.inventory_slot());
                 args.addProperty("face", face);
@@ -616,7 +619,6 @@ public final class LocalAgentBridge {
 
         try {
             Map<String, Object> result = withCompanion(context -> {
-                requireWorldActions(context.companion());
                 JsonObject args = new JsonObject();
                 args.addProperty("entity_id", request.entity_id());
                 context.service().action(context.owner(), "attack_entity", args);
@@ -644,13 +646,184 @@ public final class LocalAgentBridge {
         }
     }
 
+    private static void handleChatInbox(HttpExchange exchange) throws IOException {
+        if (!requireMethod(exchange, "GET")) {
+            return;
+        }
+
+        try {
+            Map<String, Object> result = withCompanion(context -> {
+                List<Map<String, Object>> messages = new ArrayList<>();
+                for (LocalAgentInbox.Message message : LocalAgentInbox.drain(context.owner().getUUID(), 8)) {
+                    messages.add(Map.of(
+                            "id", message.id(),
+                            "text", message.text()));
+                }
+                return Map.of("messages", messages);
+            });
+            sendJson(exchange, 200, GSON.toJson(result));
+        } catch (Exception failure) {
+            sendFailure(exchange, failure);
+        }
+    }
+
+    private static void handleCraft(HttpExchange exchange) throws IOException {
+        if (!requireMethod(exchange, "POST")) {
+            return;
+        }
+
+        CraftRequest request;
+        try {
+            request = readJson(exchange, CraftRequest.class);
+        } catch (IllegalArgumentException failure) {
+            sendJson(exchange, 400, GSON.toJson(Map.of("error", failure.getMessage())));
+            return;
+        }
+
+        if (request == null
+                || request.width() < 1 || request.width() > 3
+                || request.height() < 1 || request.height() > 3
+                || request.grid() == null
+                || request.grid().size() != request.width() * request.height()) {
+            sendJson(exchange, 400, "{\"error\":\"width/height must be 1-3 and grid length must equal width*height\"}");
+            return;
+        }
+
+        int times = request.times() == null ? 1 : request.times();
+        if (times < 1 || times > 64) {
+            sendJson(exchange, 400, "{\"error\":\"times must be between 1 and 64\"}");
+            return;
+        }
+
+        try {
+            Map<String, Object> result = withCompanion(context -> craft(context, request, times));
+            sendJson(exchange, 200, GSON.toJson(result));
+        } catch (Exception failure) {
+            sendFailure(exchange, failure);
+        }
+    }
+
+    private static Map<String, Object> craft(ServerContext context, CraftRequest request, int times) {
+        CompanionEntity companion = context.companion();
+        ServerLevel world = context.world();
+
+        if ((request.width() > 2 || request.height() > 2) && !hasNearbyCraftingTable(companion, world)) {
+            throw new IllegalStateException("A 3x3 recipe requires a crafting table within reach.");
+        }
+
+        List<String> normalizedGrid = new ArrayList<>(request.grid().size());
+        List<ItemStack> recipeStacks = new ArrayList<>(request.grid().size());
+        for (String raw : request.grid()) {
+            String id = raw == null ? "" : raw.strip();
+            normalizedGrid.add(id);
+            if (id.isEmpty()) {
+                recipeStacks.add(ItemStack.EMPTY);
+                continue;
+            }
+
+            ResourceLocation location;
+            try {
+                location = ResourceLocation.parse(id);
+            } catch (RuntimeException failure) {
+                throw new IllegalArgumentException("Invalid item id in crafting grid: " + id);
+            }
+
+            var item = BuiltInRegistries.ITEM.get(location);
+            if (item == null || BuiltInRegistries.ITEM.getKey(item).equals(ResourceLocation.withDefaultNamespace("air"))) {
+                throw new IllegalArgumentException("Unknown item id in crafting grid: " + id);
+            }
+            recipeStacks.add(new ItemStack(item));
+        }
+
+        CraftingInput input = CraftingInput.of(request.width(), request.height(), recipeStacks);
+        var recipe = world.getRecipeManager()
+                .getRecipeFor(RecipeType.CRAFTING, input, world)
+                .orElseThrow(() -> new IllegalArgumentException("The supplied grid does not match a crafting recipe."));
+
+        ItemStack sampleOutput = recipe.value().assemble(input, world.registryAccess());
+        if (sampleOutput.isEmpty()) {
+            throw new IllegalStateException("Crafting recipe produced no output.");
+        }
+
+        int completed = 0;
+        int totalOutput = 0;
+        for (int iteration = 0; iteration < times; iteration++) {
+            if (!hasCraftingInputs(companion.companionInventory(), normalizedGrid)) break;
+
+            consumeCraftingInputs(companion.companionInventory(), normalizedGrid);
+            var remainders = recipe.value().getRemainingItems(input);
+            for (ItemStack remainder : remainders) {
+                if (!remainder.isEmpty()) addOrDrop(companion, remainder.copy());
+            }
+
+            ItemStack output = sampleOutput.copy();
+            totalOutput += output.getCount();
+            addOrDrop(companion, output);
+            completed++;
+        }
+
+        if (completed == 0) {
+            throw new IllegalStateException("Required crafting ingredients are not present in the companion inventory.");
+        }
+
+        return Map.of(
+                "ok", true,
+                "recipe", recipe.id().toString(),
+                "item", BuiltInRegistries.ITEM.getKey(sampleOutput.getItem()).toString(),
+                "count", totalOutput,
+                "crafts", completed);
+    }
+
+    private static boolean hasCraftingInputs(SimpleContainer inventory, List<String> grid) {
+        Map<String, Integer> needed = new LinkedHashMap<>();
+        for (String id : grid) if (!id.isEmpty()) needed.merge(id, 1, Integer::sum);
+
+        Map<String, Integer> available = new LinkedHashMap<>();
+        for (int slot = 0; slot < inventory.getContainerSize(); slot++) {
+            ItemStack stack = inventory.getItem(slot);
+            if (!stack.isEmpty()) {
+                available.merge(BuiltInRegistries.ITEM.getKey(stack.getItem()).toString(), stack.getCount(), Integer::sum);
+            }
+        }
+
+        return needed.entrySet().stream().allMatch(entry ->
+                available.getOrDefault(entry.getKey(), 0) >= entry.getValue());
+    }
+
+    private static void consumeCraftingInputs(SimpleContainer inventory, List<String> grid) {
+        Map<String, Integer> needed = new LinkedHashMap<>();
+        for (String id : grid) if (!id.isEmpty()) needed.merge(id, 1, Integer::sum);
+
+        for (Map.Entry<String, Integer> entry : needed.entrySet()) {
+            int remaining = entry.getValue();
+            for (int slot = 0; slot < inventory.getContainerSize() && remaining > 0; slot++) {
+                ItemStack stack = inventory.getItem(slot);
+                if (stack.isEmpty()) continue;
+                if (!BuiltInRegistries.ITEM.getKey(stack.getItem()).toString().equals(entry.getKey())) continue;
+                int take = Math.min(remaining, stack.getCount());
+                stack.shrink(take);
+                remaining -= take;
+                if (stack.isEmpty()) inventory.setItem(slot, ItemStack.EMPTY);
+            }
+        }
+    }
+
+    private static void addOrDrop(CompanionEntity companion, ItemStack stack) {
+        ItemStack remainder = companion.companionInventory().addItem(stack);
+        if (!remainder.isEmpty()) companion.spawnAtLocation(remainder);
+    }
+
+    private static boolean hasNearbyCraftingTable(CompanionEntity companion, ServerLevel world) {
+        BlockPos origin = companion.blockPosition();
+        for (BlockPos pos : BlockPos.betweenClosed(origin.offset(-4, -2, -4), origin.offset(4, 2, 4))) {
+            if (!world.getBlockState(pos).is(Blocks.CRAFTING_TABLE)) continue;
+            if (companion.getEyePosition().distanceToSqr(Vec3.atCenterOf(pos)) <= 4.5 * 4.5) return true;
+        }
+        return false;
+    }
+
     private static Map<String, Object> queued(String action) {
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("ok", true);
-        result.put("queued", true);
-        result.put("action", action);
-        result.put("note", "The server job was submitted; use get_state/get_inventory to verify its result.");
-        return result;
+        return Map.of("ok", true, "action", action);
     }
 
     private static JsonObject blockArgs(CompanionEntity companion, int x, int y, int z) {
@@ -660,12 +833,6 @@ public final class LocalAgentBridge {
         args.addProperty("y", y);
         args.addProperty("z", z);
         return args;
-    }
-
-    private static void requireWorldActions(CompanionEntity companion) {
-        if (!companion.actionsAllowed()) {
-            throw new IllegalStateException("World-changing actions are disabled. Run /chat actions on in Minecraft first.");
-        }
     }
 
     private static void validateMove(ServerLevel world, CompanionEntity companion, Vec3 target, double stopDistance) {
@@ -812,6 +979,7 @@ public final class LocalAgentBridge {
     private record BlockRequest(int x, int y, int z) {}
     private record PlaceRequest(int x, int y, int z, int inventory_slot, String face) {}
     private record AttackRequest(String entity_id) {}
+    private record CraftRequest(int width, int height, List<String> grid, Integer times) {}
 
     private static final class BlockAggregate {
         private int count;
