@@ -128,9 +128,7 @@ def _wait_for_job(timeout=10.0):
     }
 
 
-@mcp.tool()
-@_tool_guard
-def observe(view: Literal["state", "entities", "blocks", "inventory"]):
+def _observe(view: Literal["state", "entities", "blocks", "inventory", "vision"]):
     """Read one compact Minecraft observation. Prefer the narrowest useful view."""
     if view == "state":
         state = _get("/state")
@@ -164,6 +162,41 @@ def observe(view: Literal["state", "entities", "blocks", "inventory"]):
                 state.get("jobReason"),
             ]
         return result
+
+    if view == "vision":
+        result = _get("/vision")
+        if _failed(result):
+            return result
+        return {
+            "facing": [round(result.get("yaw", 0), 1), round(result.get("pitch", 0), 1)],
+            "fov": [result.get("horizontalFov"), result.get("verticalFov")],
+            "blocks": [
+                {
+                    "type": block.get("type"),
+                    "d": round(block.get("distance", 0), 2),
+                    "pos": [block.get("x"), block.get("y"), block.get("z")],
+                    "screen": [block.get("yawOffset"), block.get("pitchOffset")],
+                }
+                for block in result.get("blocks", [])
+            ],
+            "entities": [
+                {
+                    "id": entity.get("uuid"),
+                    "type": entity.get("type"),
+                    "d": round(entity.get("distance", 0), 2),
+                    "pos": [
+                        round(entity.get("x", 0), 1),
+                        round(entity.get("y", 0), 1),
+                        round(entity.get("z", 0), 1),
+                    ],
+                    **({"owner": True} if entity.get("owner") else {}),
+                    **({"hostile": True} if entity.get("hostile") else {}),
+                    **({"item": entity.get("item"), "count": entity.get("count", 1)}
+                       if entity.get("item") else {}),
+                }
+                for entity in result.get("entities", [])
+            ],
+        }
 
     if view == "entities":
         result = _get("/nearby-entities")
@@ -222,6 +255,15 @@ def observe(view: Literal["state", "entities", "blocks", "inventory"]):
         }
         for item in result.get("items", [])
     ]
+
+
+
+
+@mcp.tool()
+@_tool_guard
+def observe(view: Literal["state", "entities", "blocks", "inventory", "vision"]):
+    """Read one compact Minecraft sense. vision is view-dependent ray-based sight."""
+    return _observe(view)
 
 
 @mcp.tool()
@@ -283,7 +325,7 @@ def world_action(
         if _failed(started):
             return started
         result = _wait_for_job(12)
-        result["inventory"] = observe("inventory")
+        result["inventory"] = _observe("inventory")
         return result
 
     if action == "mine":
@@ -293,7 +335,7 @@ def world_action(
         if _failed(started):
             return started
         result = _wait_for_job(15)
-        result["inventory"] = observe("inventory")
+        result["inventory"] = _observe("inventory")
         return result
 
     if action == "place":
@@ -325,7 +367,7 @@ def world_action(
         result = _post("/take-held-item")
         if _failed(result):
             return result
-        return {"ok": True, "inventory": observe("inventory")}
+        return {"ok": True, "inventory": _observe("inventory")}
 
     if slot is None:
         return {"ok": False, "error": "equip requires slot"}
@@ -376,6 +418,38 @@ def remember(
 def recall_memory(query: str, limit: int = 6):
     """Retrieve a few locally stored memories relevant to the current situation."""
     return store.recall(query, limit)
+
+
+@mcp.tool()
+@_tool_guard
+def goals(
+    action: Literal["create", "list", "update"],
+    title: str | None = None,
+    description: str | None = None,
+    goal_id: int | None = None,
+    status: Literal["active", "paused", "completed", "cancelled", "all"] | None = None,
+    priority: int | None = None,
+):
+    """Create, inspect, or update persistent self-directed goals."""
+    if action == "create":
+        if not title:
+            return {"ok": False, "error": "create requires title"}
+        return store.create_goal(
+            title,
+            description or "",
+            5 if priority is None else priority,
+            "self",
+        )
+    if action == "list":
+        return store.list_goals(status or "active", 8)
+    if goal_id is None:
+        return {"ok": False, "error": "update requires goal_id"}
+    return store.update_goal(
+        goal_id,
+        status=None if status in {None, "all"} else status,
+        description=description,
+        priority=priority,
+    )
 
 
 @mcp.tool()
