@@ -1,4 +1,5 @@
 import asyncio
+import random
 import sys
 import time
 from pathlib import Path
@@ -19,6 +20,8 @@ MCP_TIMEOUT_SECONDS = 35
 MAX_AGENT_TURNS = 24
 AUTONOMY_GOAL_INTERVAL = 20.0
 AUTONOMY_IDLE_INTERVAL = 60.0
+AMBIENT_LOOK_INTERVAL = 8.0
+AMBIENT_WANDER_INTERVAL = 24.0
 REFLEX_COOLDOWN = 4.0
 AGENT_BUILD = "unified-autonomy-vision-memory-2026-10-08"
 BASE_DIR = Path(__file__).resolve().parent
@@ -309,6 +312,8 @@ async def autonomy_sensor(input_queue, runtime):
     last_hostile_reflex = 0.0
     last_owner_approach = 0.0
     last_item_reflex = 0.0
+    last_ambient_look = 0.0
+    last_ambient_wander = 0.0
 
     while True:
         await asyncio.sleep(SENSOR_INTERVAL)
@@ -439,6 +444,46 @@ async def autonomy_sensor(input_queue, runtime):
             goal for goal in goals
             if goal.get("source") != "system" or goal.get("priority", 0) >= 6
         ]
+
+        if (
+            not meaningful_goals
+            and now - runtime["last_user_activity"] > 8.0
+            and owner_distance <= 16.0
+        ):
+            if now - last_ambient_look >= AMBIENT_LOOK_INTERVAL:
+                angle = random.random() * 6.283185307179586
+                distance = random.uniform(5.0, 10.0)
+                try:
+                    await asyncio.to_thread(
+                        _post,
+                        "/look-at",
+                        {
+                            "x": int(round(state.get("x", 0) + distance * __import__("math").cos(angle))),
+                            "y": int(round(state.get("y", 0) + random.uniform(-1.0, 2.0))),
+                            "z": int(round(state.get("z", 0) + distance * __import__("math").sin(angle))),
+                        },
+                    )
+                except Exception:
+                    pass
+                last_ambient_look = now
+
+            if now - last_ambient_wander >= AMBIENT_WANDER_INTERVAL:
+                angle = random.random() * 6.283185307179586
+                distance = random.uniform(2.0, 4.0)
+                try:
+                    await asyncio.to_thread(
+                        _post,
+                        "/move-to",
+                        {
+                            "x": state.get("x", 0) + distance * __import__("math").cos(angle),
+                            "y": state.get("y", 0),
+                            "z": state.get("z", 0) + distance * __import__("math").sin(angle),
+                        },
+                    )
+                except Exception:
+                    pass
+                last_ambient_wander = now
+
         interval = (
             AUTONOMY_GOAL_INTERVAL
             if meaningful_goals
