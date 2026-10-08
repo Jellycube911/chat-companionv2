@@ -130,7 +130,7 @@ def _slot_matching(predicate):
     return None
 
 
-def _find_blocks(*, exact=None, contains=None, radius=20, limit=64):
+def _find_blocks(*, exact=None, contains=None, radius=20, limit=64, exposed_only=False):
     payload = _require(
         _post(
             "/find-blocks",
@@ -139,6 +139,7 @@ def _find_blocks(*, exact=None, contains=None, radius=20, limit=64):
                 "contains": contains or [],
                 "radius": radius,
                 "limit": limit,
+                "exposed_only": exposed_only,
             },
         ),
         "find blocks",
@@ -190,7 +191,7 @@ def _gather_logs(task_id, target_total):
     ) < target_total:
         _task(task_id)
         state = _require(_get("/state"), "read state")
-        blocks = _find_blocks(contains=LOG_PATTERNS, radius=20, limit=64)
+        blocks = _find_blocks(contains=LOG_PATTERNS, radius=20, limit=64, exposed_only=True)
         max_y = float(state.get("y", 0)) + 2.5
         blocks = [block for block in blocks if float(block["y"]) <= max_y]
 
@@ -444,7 +445,7 @@ def make_stone_pickaxe(task_id, args):
     )
 
     while _item_counts().get("minecraft:cobblestone", 0) < 3:
-        blocks = _find_blocks(exact=["minecraft:stone"], radius=20, limit=32)
+        blocks = _find_blocks(exact=["minecraft:stone"], radius=20, limit=32, exposed_only=True)
         if not blocks:
             raise SkillFailure("no stone found within 20 blocks")
 
