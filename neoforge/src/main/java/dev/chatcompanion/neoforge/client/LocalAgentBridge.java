@@ -99,6 +99,7 @@ public final class LocalAgentBridge {
             created.createContext("/say", LocalAgentBridge::handleSay);
             created.createContext("/move-forward", LocalAgentBridge::handleMoveForward);
             created.createContext("/move-to", LocalAgentBridge::handleMoveTo);
+            created.createContext("/look-at", LocalAgentBridge::handleLookAt);
             created.createContext("/follow-owner", LocalAgentBridge::handleFollowOwner);
             created.createContext("/stop-action", LocalAgentBridge::handleStopAction);
             created.createContext("/resume-action", LocalAgentBridge::handleResumeAction);
@@ -572,6 +573,47 @@ public final class LocalAgentBridge {
         }
     }
 
+
+    private static void handleLookAt(HttpExchange exchange) throws IOException {
+        if (!requireMethod(exchange, "POST")) {
+            return;
+        }
+
+        BlockRequest request;
+        try {
+            request = readJson(exchange, BlockRequest.class);
+        } catch (IllegalArgumentException failure) {
+            sendJson(exchange, 400, GSON.toJson(Map.of("error", failure.getMessage())));
+            return;
+        }
+
+        try {
+            Map<String, Object> result = withCompanion(context -> {
+                CompanionEntity companion = context.companion();
+                double dx = request.x() + 0.5 - companion.getX();
+                double dy = request.y() + 0.5 - companion.getEyeY();
+                double dz = request.z() + 0.5 - companion.getZ();
+                double horizontal = Math.sqrt(dx * dx + dz * dz);
+                float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+                float pitch = (float) -Math.toDegrees(Math.atan2(dy, horizontal));
+                pitch = Math.max(-90.0F, Math.min(90.0F, pitch));
+
+                companion.getNavigation().stop();
+                companion.setYRot(yaw);
+                companion.setYBodyRot(yaw);
+                companion.setYHeadRot(yaw);
+                companion.setXRot(pitch);
+
+                return Map.of(
+                        "ok", true,
+                        "yaw", yaw,
+                        "pitch", pitch);
+            });
+            sendJson(exchange, 200, GSON.toJson(result));
+        } catch (Exception failure) {
+            sendFailure(exchange, failure);
+        }
+    }
 
     private static void handleFollowOwner(HttpExchange exchange) throws IOException {
         if (!requireMethod(exchange, "POST")) {
