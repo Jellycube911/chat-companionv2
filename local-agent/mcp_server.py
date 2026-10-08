@@ -249,7 +249,9 @@ def world_action(
 ):
     """Perform one physical inventory/world action using the companion body."""
     if action == "collect":
-        _post("/collect-items")
+        started = _post("/collect-items")
+        if _failed(started):
+            return started
         result = _wait_for_job(12)
         result["inventory"] = observe("inventory")
         return result
@@ -257,7 +259,9 @@ def world_action(
     if action == "mine":
         if x is None or y is None or z is None:
             return {"ok": False, "error": "mine requires x, y and z"}
-        _post("/mine-block", {"x": x, "y": y, "z": z})
+        started = _post("/mine-block", {"x": x, "y": y, "z": z})
+        if _failed(started):
+            return started
         result = _wait_for_job(15)
         result["inventory"] = observe("inventory")
         return result
@@ -265,7 +269,7 @@ def world_action(
     if action == "place":
         if x is None or y is None or z is None or slot is None:
             return {"ok": False, "error": "place requires x, y, z and slot"}
-        _post(
+        started = _post(
             "/place-block",
             {
                 "x": x,
@@ -275,16 +279,22 @@ def world_action(
                 "face": face or "up",
             },
         )
+        if _failed(started):
+            return started
         return _wait_for_job(12)
 
     if action == "attack":
         if not entity_id:
             return {"ok": False, "error": "attack requires entity_id"}
-        _post("/attack-entity", {"entity_id": entity_id})
+        started = _post("/attack-entity", {"entity_id": entity_id})
+        if _failed(started):
+            return started
         return _wait_for_job(15)
 
     if action == "take_held":
-        _post("/take-held-item")
+        result = _post("/take-held-item")
+        if _failed(result):
+            return result
         return {"ok": True, "inventory": observe("inventory")}
 
     if slot is None:
