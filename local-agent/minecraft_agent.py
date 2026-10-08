@@ -1,102 +1,112 @@
 import asyncio
 import math
+import os
 import random
+import re
 import sys
 import time
 from pathlib import Path
 
 import requests
-from agents import Agent, Runner
+from openai import AsyncOpenAI
+from agents import (
+    Agent,
+    OpenAIChatCompletionsModel,
+    Runner,
+    set_tracing_disabled,
+)
 from agents.exceptions import MaxTurnsExceeded
 from agents.mcp import MCPServerStdio
 
 from memory_store import store
+from skill_executor import run_task
 
 
 MINECRAFT_URL = "http://127.0.0.1:8765"
-MODEL = "gpt-5.6"
-POLL_INTERVAL = 0.5
+POLL_INTERVAL = 0.35
 SENSOR_INTERVAL = 0.75
 MCP_TIMEOUT_SECONDS = 35
 MAX_AGENT_TURNS = 24
-AUTONOMY_GOAL_INTERVAL = 20.0
-AUTONOMY_IDLE_INTERVAL = 60.0
-AMBIENT_LOOK_INTERVAL = 8.0
-AMBIENT_WANDER_INTERVAL = 24.0
+AUTONOMY_GOAL_INTERVAL = 12.0
+AUTONOMY_IDLE_INTERVAL = 45.0
+AMBIENT_LOOK_INTERVAL = 7.0
+AMBIENT_WANDER_INTERVAL = 22.0
 REFLEX_COOLDOWN = 4.0
-AGENT_BUILD = "unified-autonomy-vision-memory-2026-10-08"
+AGENT_BUILD = "local-first-executive-awareness-2026-10-08"
 BASE_DIR = Path(__file__).resolve().parent
+
+set_tracing_disabled(True)
 
 
 INSTRUCTIONS = """
 You are Chat, one persistent AI embodied as the Chat Companion entity in
-Minecraft. Alik is a separate human player. Conversation, autonomous thought,
-memory, goals, perception, and physical actions are all parts of this same
-identity. Never describe an acting bot and a chatbot as separate agents.
+Minecraft. Alik is a separate human player. Conversation, memory, perception,
+goals, autonomous thought, local motor skills and physical actions all belong to
+this same identity. Never split yourself into a chatbot and an acting bot.
 
-You have a functional self-model, not human consciousness. You know you have a
-Minecraft body, inventory, current sensory state, persistent memories and
-persistent goals. Use those consistently across sessions.
+SELF MODEL
+You are not human and should not claim consciousness. Functionally, however,
+you have one persistent identity, a Minecraft body, current sensory awareness,
+an inventory, memories, goals, learned lessons and local motor skills. Your
+state continues across sessions through local files.
 
-PERCEPTION
-- observe(vision) is your primary visual sense. It is field-of-view and
-  line-of-sight based, so it reflects what your body can actually see.
-- observe(entities) is a broader proximity sense useful for nearby creatures
-  and dropped items.
-- observe(blocks) is a coarse local resource/map scan, not literal eyesight.
-- observe(state) is proprioception: body position, health, job state and Alik's
-  relative position.
-Never claim to see something that your current senses did not report.
+CURRENT AWARENESS
+Each turn contains a compact CURRENT AWARENESS snapshot maintained continuously
+by your local host. Treat it as your present perceptual state. observe(vision)
+can inspect your literal field of view in more detail. observe(blocks) is a
+coarse resource/map sense, not eyesight.
 
-AUTONOMY AND GOALS
-- Maintain persistent goals with the goals MCP tool.
-- Convert meaningful multi-step user requests into goals when useful.
-- Mark goals completed only after verifying the result.
-- Internal AUTONOMY messages are your own background thought opportunities,
-  not messages from Alik.
-- On an autonomy turn, pursue an active goal, inspect the environment, make a
-  small safe useful decision, or create a modest self-directed goal if idle.
-- Do not speak every time you think. Speak autonomously only when something is
-  genuinely useful, urgent, interesting, or relevant to Alik.
-- Avoid destructive or irreversible autonomous behavior unless it clearly
-  serves an active goal or immediate safety.
+LOCAL TASK EXECUTIVE
+Long physical jobs should use the skills MCP tool whenever a matching local
+skill exists. Local skill tasks continue on their own without another model
+turn. Available skills include gathering logs, making a stone pickaxe and
+building a basic house. If ACTIVE LOCAL TASKS shows that a task is already
+running, do not duplicate its individual mining/crafting/placing steps. You can
+keep talking while your body continues the task.
 
-FAST REFLEXES
-The local host may perform simple reflexes without asking the model first:
-defending against a close hostile, approaching Alik if extremely far away, and
-collecting a dropped item already very close. Treat those as actions your own
-body performed automatically, like reflexes, not as a different agent.
+When Alik asks for a multi-step goal such as "build a house", create/maintain a
+persistent goal and start the matching local skill. Do not merely announce an
+intention like "I will gather trees" and then stop.
 
-MEMORY
-- use recall_memory when older facts, preferences, places, lessons or skills may
-  matter;
-- use remember for durable information worth future retrieval;
-- important failures should become lessons rather than being retried forever;
-- do not store transient coordinates, health ticks, or routine chatter as
-  durable memories.
+AUTONOMY
+When Alik is silent, maintain goals and pursue useful tasks. A standing goal is
+not decoration: convert actionable goals into local tasks. Safe self-directed
+priorities are:
+1. survive immediate danger;
+2. honor Alik's current instructions;
+3. finish active tasks/goals;
+4. stay sufficiently near Alik to remain useful;
+5. improve basic tools when lacking them;
+6. observe/explore safely when genuinely idle.
+
+Internal AUTONOMY/EVENT/TASK messages are your own background processing, not
+messages from Alik. Do not speak on every internal thought. Speak when useful,
+urgent, interesting, or when a requested task meaningfully completes/fails.
+
+MEMORY AND LEARNING
+Use recall_memory for older facts, places, preferences, relationships, lessons
+or skills. Use remember for durable information only. Local skills themselves
+write persistent success/failure lessons. Retrieve relevant lessons before
+repeating a previously failed strategy.
 
 PHYSICAL BEHAVIOR
-- mining and placing require approach, reach, facing and line of sight;
-- mining uses inventory slot 0 as the active tool, so equip appropriately;
+- mining and placing physically approach, face and reach the target;
+- mining uses inventory slot 0 as the active tool;
 - dropped items touching your body are picked up automatically;
 - combat is limited by the server to hostile targets;
-- crafting uses real registered recipes; up to 2x2 works anywhere and larger
-  grids require a crafting table within usable reach.
+- crafting uses registered Minecraft recipes;
+- use navigate(look_at, ...) then observe(vision) when you deliberately inspect
+  a direction or object.
 
 EFFICIENCY
-- prefer one targeted sense/tool call over redundant scans;
-- reuse current-turn observations;
-- do not repeat the exact same failed tool call more than once;
-- if a tool returns {"ok": false, ...}, inspect once and choose a different
-  recovery or stop;
-- do not announce success until world/inventory evidence verifies it.
+Use a local skill instead of dozens of model-mediated motor calls whenever
+possible. Prefer one targeted observation over redundant scans. Do not repeat
+the exact same failed tool call more than once. Never claim a goal succeeded
+without world/inventory/task evidence.
 
-Normal Minecraft chat is conversation with you. When a turn came from Minecraft
-the host displays your final answer automatically, so use say only for an extra
-deliberate in-world utterance during another task.
-
-Do not narrate protocol details such as queued jobs or MCP plumbing. Keep
-ordinary replies concise.
+Normal Minecraft chat is conversation with you. The host displays your final
+answer back in Minecraft automatically. Use say only for an extra deliberate
+utterance while doing something else. Keep ordinary replies concise.
 """
 
 
@@ -107,7 +117,7 @@ def _get(path):
 
 
 def _post(path, payload=None):
-    kwargs = {"timeout": 5}
+    kwargs = {"timeout": 8}
     if payload is not None:
         kwargs["json"] = payload
     response = requests.post(f"{MINECRAFT_URL}{path}", **kwargs)
@@ -120,31 +130,145 @@ def _trim(text, limit=600):
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _local_endpoint():
+    return os.getenv(
+        "COMPANION_LOCAL_BASE_URL",
+        "http://127.0.0.1:11434/v1",
+    ).rstrip("/")
+
+
+def _discover_local_model():
+    base_url = _local_endpoint()
+    try:
+        response = requests.get(f"{base_url}/models", timeout=0.7)
+        if not response.ok:
+            return None
+        payload = response.json()
+        candidates = [
+            str(item.get("id", "")).strip()
+            for item in payload.get("data", [])
+            if str(item.get("id", "")).strip()
+        ]
+    except Exception:
+        return None
+
+    preferred = os.getenv("COMPANION_LOCAL_MODEL", "").strip()
+    if preferred:
+        if preferred in candidates:
+            return base_url, preferred
+        return None
+
+    useful = [
+        model
+        for model in candidates
+        if "embed" not in model.lower()
+    ]
+    if not useful:
+        return None
+    return base_url, useful[0]
+
+
+def choose_model():
+    provider = os.getenv("COMPANION_MODEL_PROVIDER", "auto").strip().lower()
+
+    if provider in {"auto", "local"}:
+        discovered = _discover_local_model()
+        if discovered is not None:
+            base_url, model_name = discovered
+            client = AsyncOpenAI(
+                base_url=base_url,
+                api_key=os.getenv("COMPANION_LOCAL_API_KEY", "local"),
+            )
+            return (
+                OpenAIChatCompletionsModel(
+                    model=model_name,
+                    openai_client=client,
+                ),
+                f"local:{model_name}",
+            )
+        if provider == "local":
+            raise RuntimeError(
+                "COMPANION_MODEL_PROVIDER=local but no OpenAI-compatible "
+                "local model endpoint was found. Start your local model server "
+                "or set COMPANION_LOCAL_BASE_URL/COMPANION_LOCAL_MODEL."
+            )
+
+    model_name = os.getenv(
+        "COMPANION_OPENAI_MODEL",
+        "gpt-5.6-luna",
+    ).strip() or "gpt-5.6-luna"
+
+    if "sol" in model_name.lower():
+        print(
+            "[MODEL] Refusing expensive Sol configuration; "
+            "falling back to gpt-5.6-luna."
+        )
+        model_name = "gpt-5.6-luna"
+
+    return model_name, f"openai:{model_name}"
+
+
 async def enqueue(input_queue, runtime, priority, source, message):
     runtime["sequence"] += 1
     await input_queue.put((priority, runtime["sequence"], source, message))
 
 
-def build_turn_input(message, source):
+def _awareness_text(runtime):
+    awareness = runtime.get("awareness") or {}
+    if not awareness:
+        return "CURRENT AWARENESS: unavailable"
+
+    state = awareness.get("state") or {}
+    owner = state.get("owner") or {}
+    vision = awareness.get("vision") or {}
+    entities = vision.get("entities") or []
+    blocks = vision.get("blocks") or []
+    inventory = awareness.get("inventory") or []
+
+    block_bits = [
+        f"{block.get('type')}@{block.get('x')},{block.get('y')},{block.get('z')} d={float(block.get('distance', 0)):.1f}"
+        for block in blocks[:10]
+    ]
+    entity_bits = [
+        f"{entity.get('type')} d={float(entity.get('distance', 0)):.1f}"
+        + (" hostile" if entity.get("hostile") else "")
+        + (f" item={entity.get('item')}x{entity.get('count', 1)}" if entity.get("item") else "")
+        for entity in entities[:8]
+    ]
+    inventory_bits = [
+        f"{item.get('item')}x{item.get('count')}"
+        for item in inventory[:12]
+    ]
+
+    return (
+        "CURRENT AWARENESS:\n"
+        f"- body: pos=({state.get('x'):.1f},{state.get('y'):.1f},{state.get('z'):.1f}) "
+        f"hp={state.get('health')}/{state.get('maxHealth')} facing={state.get('facing')}\n"
+        f"- Alik: distance={float(owner.get('distance', 0)):.1f} "
+        f"delta=({float(owner.get('dx', 0)):.1f},{float(owner.get('dy', 0)):.1f},{float(owner.get('dz', 0)):.1f})\n"
+        f"- visible blocks: {block_bits or ['none']}\n"
+        f"- visible entities: {entity_bits or ['none']}\n"
+        f"- inventory: {inventory_bits or ['empty']}"
+    )
+
+
+def build_turn_input(message, source, runtime):
     relevant = store.recall(message, 4)
     goals = store.list_goals("active", 4)
+    tasks = [
+        task
+        for task in store.list_tasks(8)
+        if task["status"] in {"queued", "running"}
+    ]
 
-    parts = []
+    parts = [_awareness_text(runtime)]
 
-    if source in {"minecraft", "console"}:
-        recent = store.recent_episodes(2)
-        if recent:
-            parts.append("RECENT CONVERSATION (local cache, reference only):")
-            for episode in recent:
-                parts.append(f"Alik: {_trim(episode['user'])}")
-                parts.append(f"Chat: {_trim(episode['assistant'])}")
-
-    recent_events = store.recent_events(3)
-    if recent_events:
-        parts.append("RECENT BODY/BRAIN EVENTS:")
-        for event in recent_events:
+    if tasks:
+        parts.append("ACTIVE LOCAL TASKS:")
+        for task in tasks[:4]:
             parts.append(
-                f"- [{event['kind']}] {_trim(event['summary'], 260)}"
+                f"- task #{task['id']} {task['skill']} "
+                f"{task['status']}: {_trim(task['progress'], 260)}"
             )
 
     if goals:
@@ -154,6 +278,22 @@ def build_turn_input(message, source):
                 f"- #{goal['id']} p{goal['priority']} {goal['title']}: "
                 f"{_trim(goal['description'], 320)}"
             )
+
+    recent_events = store.recent_events(4)
+    if recent_events:
+        parts.append("RECENT BODY/BRAIN EVENTS:")
+        for event in recent_events:
+            parts.append(
+                f"- [{event['kind']}] {_trim(event['summary'], 280)}"
+            )
+
+    if source in {"minecraft", "console"}:
+        recent = store.recent_episodes(2)
+        if recent:
+            parts.append("RECENT CONVERSATION:")
+            for episode in recent:
+                parts.append(f"Alik: {_trim(episode['user'])}")
+                parts.append(f"Chat: {_trim(episode['assistant'])}")
 
     if relevant:
         parts.append("RELEVANT LONG-TERM MEMORY:")
@@ -165,13 +305,19 @@ def build_turn_input(message, source):
 
     if source == "autonomy":
         parts.append(
-            "INTERNAL AUTONOMY TICK: This is not a message from Alik. "
-            "Choose whether any action is worth taking. Silence is allowed."
+            "INTERNAL AUTONOMY TICK: not a message from Alik. "
+            "Use goals/tasks/awareness to choose one useful next decision. "
+            "Do nothing if an existing local task is already making progress."
         )
     elif source == "event":
         parts.append(
-            "INTERNAL EVENT: This event was detected by your local body/sensors. "
-            "React only if further reasoning or action is useful."
+            "INTERNAL SENSOR EVENT: not a message from Alik. "
+            "React only if additional reasoning is useful."
+        )
+    elif source == "task":
+        parts.append(
+            "INTERNAL TASK EVENT: not a message from Alik. "
+            "A local skill changed state. Re-plan or notify Alik if meaningful."
         )
     else:
         parts.append("CURRENT MESSAGE FROM ALIK:")
@@ -180,44 +326,137 @@ def build_turn_input(message, source):
     return "\n".join(parts)
 
 
-async def run_turn(agent, message, source, reply_in_game):
-    prepared = build_turn_input(message, source)
-    max_turns = 12 if source in {"autonomy", "event"} else MAX_AGENT_TURNS
+async def run_turn(agent, message, source, reply_in_game, runtime):
+    prepared = build_turn_input(message, source, runtime)
+    max_turns = 12 if source in {"autonomy", "event", "task"} else MAX_AGENT_TURNS
 
     try:
         result = await Runner.run(agent, prepared, max_turns=max_turns)
         answer = str(result.final_output or "").strip()
     except MaxTurnsExceeded:
         answer = (
-            "I stopped this line of reasoning instead of retrying indefinitely."
-            if source in {"autonomy", "event"}
-            else (
-                "I stopped because this task used too many reasoning/tool steps. "
-                "I won't keep retrying blindly."
-            )
+            ""
+            if source in {"autonomy", "event", "task"}
+            else "I stopped that reasoning loop instead of retrying indefinitely."
         )
 
     if answer and source in {"minecraft", "console"}:
         print(f"\nAI: {answer}")
-    elif answer and source in {"autonomy", "event"}:
-        print(f"\n[AUTONOMY] {answer}")
+    elif answer:
+        print(f"\n[{source.upper()}] {answer}")
 
     if answer and reply_in_game:
         try:
-            await asyncio.to_thread(_post, "/say", {"message": answer[:4096]})
+            await asyncio.to_thread(
+                _post,
+                "/say",
+                {"message": answer[:4096]},
+            )
         except Exception as error:
             print(f"\n[CHAT ERROR] {error}")
 
     if source in {"minecraft", "console"}:
         store.record_episode(message, answer)
-    else:
-        store.record_event(source, f"{_trim(message, 500)} -> {_trim(answer, 500)}")
+    elif answer:
+        store.record_event(
+            source,
+            f"{_trim(message, 500)} -> {_trim(answer, 500)}",
+        )
 
     return answer
 
 
+def _active_task_for_skill(skill):
+    return next(
+        (
+            task
+            for task in store.list_tasks(12)
+            if task["skill"] == skill
+            and task["status"] in {"queued", "running"}
+        ),
+        None,
+    )
+
+
+def _start_goal_task(skill, title, description, priority=8, args=None):
+    existing = _active_task_for_skill(skill)
+    if existing is not None:
+        return existing
+
+    goal = store.create_goal(
+        title,
+        description,
+        priority,
+        "user",
+    )
+    payload = dict(args or {})
+    payload["goal_id"] = goal["id"]
+    task = store.create_task(skill, payload)
+    store.record_event(
+        "goal_to_task",
+        f"Created goal #{goal['id']} and local task #{task['id']} ({skill}).",
+    )
+    return task
+
+
+def _extract_count(text, default):
+    match = re.search(r"\b(\d{1,2})\b", text)
+    if not match:
+        return default
+    return max(1, min(64, int(match.group(1))))
+
+
+async def fast_task_intent(text):
+    normalized = text.lower().strip()
+
+    if (
+        "build" in normalized
+        and any(word in normalized for word in ("house", "shelter", "hut"))
+    ):
+        task = _start_goal_task(
+            "build_basic_house",
+            "Build a basic house",
+            text,
+            9,
+            {"width": 5, "length": 5, "height": 3},
+        )
+        return task
+
+    if (
+        ("stone pickaxe" in normalized or "stone pick" in normalized)
+        and any(word in normalized for word in ("make", "craft", "get", "build"))
+    ):
+        task = _start_goal_task(
+            "make_stone_pickaxe",
+            "Make a stone pickaxe",
+            text,
+            8,
+        )
+        return task
+
+    if (
+        any(word in normalized for word in ("wood", "logs", "tree"))
+        and any(word in normalized for word in ("gather", "collect", "get", "chop", "cut"))
+    ):
+        count = _extract_count(normalized, 8)
+        task = _start_goal_task(
+            "gather_logs",
+            f"Gather {count} logs",
+            text,
+            7,
+            {"count": count},
+        )
+        return task
+
+    return None
+
+
 async def fast_chat_reflex(text):
     normalized = text.lower().strip().rstrip(".!?")
+
+    task = await fast_task_intent(text)
+    if task is not None:
+        return
 
     try:
         if normalized in {
@@ -228,6 +467,7 @@ async def fast_chat_reflex(text):
             "can you come to me",
             "can u come to me",
         }:
+            store.cancel_tasks()
             state = await asyncio.to_thread(_get, "/state")
             owner = state.get("owner", {})
             result = await asyncio.to_thread(
@@ -246,6 +486,7 @@ async def fast_chat_reflex(text):
             return
 
         if normalized in {"follow me", "follow"}:
+            store.cancel_tasks()
             result = await asyncio.to_thread(_post, "/follow-owner")
             store.record_event(
                 "motor_reflex",
@@ -253,11 +494,12 @@ async def fast_chat_reflex(text):
             )
             return
 
-        if normalized in {"stop", "stop moving", "stay here", "wait here"}:
+        if normalized in {"stop", "stop moving", "stay here", "wait here", "cancel"}:
+            store.cancel_tasks()
             result = await asyncio.to_thread(_post, "/stop-action")
             store.record_event(
                 "motor_reflex",
-                f"Alik asked Chat to stop; body stopped immediately: {result}",
+                f"Alik asked Chat to stop; body/tasks stopped immediately: {result}",
             )
             return
 
@@ -292,7 +534,6 @@ async def poll_minecraft_chat(input_queue, runtime):
                     await enqueue(input_queue, runtime, 0, "minecraft", text)
         except Exception:
             pass
-
         await asyncio.sleep(POLL_INTERVAL)
 
 
@@ -302,9 +543,99 @@ async def console_input(input_queue, runtime):
         text = text.strip()
         if text:
             runtime["last_user_activity"] = time.monotonic()
+            await fast_task_intent(text)
             await enqueue(input_queue, runtime, 0, "console", text)
         if text.lower() in {"quit", "exit"}:
             return
+
+
+async def local_task_worker(input_queue, runtime):
+    while True:
+        task = await asyncio.to_thread(store.next_queued_task)
+        if task is None:
+            await asyncio.sleep(0.35)
+            continue
+
+        runtime["active_task"] = task["id"]
+        print(f"\n[SKILL] Starting #{task['id']} {task['skill']} {task.get('args', {})}")
+
+        await asyncio.to_thread(run_task, task)
+        finished = store.task(task["id"])
+        runtime["active_task"] = None
+
+        if finished is None:
+            continue
+
+        summary = (
+            f"Local task #{finished['id']} {finished['skill']} "
+            f"{finished['status']}: "
+            f"{finished['progress'] or finished['error']}"
+        )
+        print(f"\n[SKILL] {summary}")
+        await enqueue(input_queue, runtime, 1, "task", summary)
+
+
+def _goal_has_task_history(goal_id):
+    for task in store.list_tasks(20):
+        try:
+            if int(task.get("args", {}).get("goal_id", -1)) == int(goal_id):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _schedule_actionable_goal():
+    for goal in store.list_goals("active", 8):
+        if _goal_has_task_history(goal["id"]):
+            continue
+
+        text = f"{goal['title']} {goal['description']}".lower()
+        if any(word in text for word in ("house", "shelter", "hut")):
+            payload = {
+                "width": 5,
+                "length": 5,
+                "height": 3,
+                "goal_id": goal["id"],
+            }
+            return store.create_task("build_basic_house", payload)
+
+        if "stone pick" in text:
+            return store.create_task(
+                "make_stone_pickaxe",
+                {"goal_id": goal["id"]},
+            )
+
+        if any(word in text for word in ("gather logs", "gather wood", "collect wood")):
+            return store.create_task(
+                "gather_logs",
+                {"count": 8, "goal_id": goal["id"]},
+            )
+
+    return None
+
+
+async def update_awareness(runtime):
+    state_result, entities_result, vision_result, inventory_result = await asyncio.gather(
+        asyncio.to_thread(_get, "/state"),
+        asyncio.to_thread(_get, "/nearby-entities"),
+        asyncio.to_thread(_get, "/vision"),
+        asyncio.to_thread(_get, "/inventory"),
+        return_exceptions=True,
+    )
+
+    if isinstance(state_result, Exception):
+        return None
+
+    awareness = {
+        "state": state_result,
+        "entities": [] if isinstance(entities_result, Exception) else entities_result.get("entities", []),
+        "vision": {} if isinstance(vision_result, Exception) else vision_result,
+        "inventory": [] if isinstance(inventory_result, Exception) else inventory_result.get("items", []),
+        "updated": time.monotonic(),
+    }
+    runtime["awareness"] = awareness
+    return awareness
 
 
 async def autonomy_sensor(input_queue, runtime):
@@ -321,15 +652,24 @@ async def autonomy_sensor(input_queue, runtime):
         now = time.monotonic()
 
         try:
-            state = await asyncio.to_thread(_get, "/state")
-            entities_payload = await asyncio.to_thread(_get, "/nearby-entities")
+            awareness = await update_awareness(runtime)
         except Exception:
             continue
+        if not awareness:
+            continue
 
+        state = awareness["state"]
+        entities = awareness["entities"]
         health = state.get("health")
         owner = state.get("owner", {})
+
+        active_tasks = [
+            task
+            for task in store.list_tasks(6)
+            if task["status"] in {"queued", "running"}
+        ]
+        task_active = bool(active_tasks)
         job_active = bool(state.get("jobActive"))
-        entities = entities_payload.get("entities", [])
 
         hostiles = sorted(
             (
@@ -359,7 +699,7 @@ async def autonomy_sensor(input_queue, runtime):
                     1,
                     "event",
                     f"Your health dropped from {last_health} to {health}. "
-                    "Assess the danger and react if needed.",
+                    "Assess the danger and react if more than the local defense reflex is needed.",
                 )
         last_health = health
 
@@ -367,7 +707,6 @@ async def autonomy_sensor(input_queue, runtime):
             nearest = hostiles[0]
             hostile_id = nearest.get("uuid")
             hostile_distance = float(nearest.get("distance", 999))
-
             if (
                 hostile_distance <= 5.5
                 and state.get("jobType") != "DEFEND"
@@ -384,20 +723,32 @@ async def autonomy_sensor(input_queue, runtime):
                     )
                     store.record_event(
                         "reflex",
-                        f"Automatically engaged hostile {nearest.get('type')} "
+                        f"Automatically engaged {nearest.get('type')} "
                         f"at {hostile_distance:.1f} blocks: {result}.",
                     )
                 except Exception as error:
                     store.record_event(
                         "reflex_error",
-                        f"Could not engage nearby hostile: {error}",
+                        f"Could not engage hostile: {error}",
                     )
                 last_hostile_id = hostile_id
                 last_hostile_reflex = now
         else:
             last_hostile_id = None
 
+        if task_active:
+            continue
+
+        scheduled = _schedule_actionable_goal()
+        if scheduled is not None:
+            store.record_event(
+                "drive",
+                f"Persistent goal activated local task #{scheduled['id']} {scheduled['skill']}.",
+            )
+            continue
+
         owner_distance = float(owner.get("distance", 0) or 0)
+
         if (
             owner_distance > 18.0
             and not job_active
@@ -415,11 +766,12 @@ async def autonomy_sensor(input_queue, runtime):
                 )
                 store.record_event(
                     "reflex",
-                    f"Moved toward Alik after distance reached {owner_distance:.1f} blocks.",
+                    f"Moved toward Alik at {owner_distance:.1f} blocks distance.",
                 )
             except Exception:
                 pass
             last_owner_approach = now
+            continue
 
         if (
             nearby_items
@@ -431,18 +783,43 @@ async def autonomy_sensor(input_queue, runtime):
                 await asyncio.to_thread(_post, "/collect-items")
                 store.record_event(
                     "reflex",
-                    f"Moved to collect nearby dropped {nearby_items[0].get('droppedItem')}.",
+                    f"Moved to collect {nearby_items[0].get('droppedItem')}.",
                 )
             except Exception:
                 pass
             last_item_reflex = now
-
-        if job_active or runtime["autonomy_pending"]:
             continue
 
-        goals = store.list_goals("active", 4)
+        inventory_ids = {
+            item.get("item")
+            for item in awareness.get("inventory", [])
+        }
+        if (
+            "minecraft:stone_pickaxe" not in inventory_ids
+            and now - runtime["last_user_activity"] > 45.0
+            and not runtime["self_improvement_attempted"]
+            and owner_distance <= 20.0
+        ):
+            goal = store.create_goal(
+                "Improve basic tools",
+                "Acquire a stone pickaxe so future gathering and building are more capable.",
+                5,
+                "self",
+            )
+            task = store.create_task(
+                "make_stone_pickaxe",
+                {"goal_id": goal["id"]},
+            )
+            runtime["self_improvement_attempted"] = True
+            store.record_event(
+                "drive",
+                f"Self-improvement drive created task #{task['id']} for a stone pickaxe.",
+            )
+            continue
+
         meaningful_goals = [
-            goal for goal in goals
+            goal
+            for goal in store.list_goals("active", 4)
             if goal.get("source") != "system" or goal.get("priority", 0) >= 6
         ]
 
@@ -450,9 +827,10 @@ async def autonomy_sensor(input_queue, runtime):
             not meaningful_goals
             and now - runtime["last_user_activity"] > 8.0
             and owner_distance <= 16.0
+            and not job_active
         ):
             if now - last_ambient_look >= AMBIENT_LOOK_INTERVAL:
-                angle = random.random() * 6.283185307179586
+                angle = random.random() * math.tau
                 distance = random.uniform(5.0, 10.0)
                 try:
                     await asyncio.to_thread(
@@ -469,7 +847,7 @@ async def autonomy_sensor(input_queue, runtime):
                 last_ambient_look = now
 
             if now - last_ambient_wander >= AMBIENT_WANDER_INTERVAL:
-                angle = random.random() * 6.283185307179586
+                angle = random.random() * math.tau
                 distance = random.uniform(2.0, 4.0)
                 try:
                     await asyncio.to_thread(
@@ -491,33 +869,15 @@ async def autonomy_sensor(input_queue, runtime):
             if meaningful_goals
             else AUTONOMY_IDLE_INTERVAL
         )
-
         if now - runtime["last_autonomy_thought"] < interval:
             continue
-
         if (
             not meaningful_goals
             and now - runtime["last_user_activity"] < 20.0
         ):
             continue
-
-        try:
-            vision = await asyncio.to_thread(_get, "/vision")
-            visible_blocks = [
-                block.get("type")
-                for block in vision.get("blocks", [])[:8]
-            ]
-            visible_entities = [
-                entity.get("type")
-                for entity in vision.get("entities", [])[:6]
-            ]
-        except Exception:
-            visible_blocks = []
-            visible_entities = []
-
-        goal_summary = "; ".join(
-            f"#{goal['id']} {goal['title']}" for goal in goals[:3]
-        ) or "none"
+        if runtime["autonomy_pending"]:
+            continue
 
         runtime["autonomy_pending"] = True
         runtime["last_autonomy_thought"] = now
@@ -527,12 +887,10 @@ async def autonomy_sensor(input_queue, runtime):
             2,
             "autonomy",
             (
-                f"You are currently idle. Active goals: {goal_summary}. "
-                f"Alik is {owner_distance:.1f} blocks away. "
-                f"Visible blocks: {visible_blocks}. "
-                f"Visible entities: {visible_entities}. "
-                "Decide on one small useful next action, pursue a goal, observe "
-                "more closely, or deliberately do nothing if that is wiser."
+                "You are safely idle with no local skill currently running. "
+                "Review your current awareness and active goals. Start a useful "
+                "local skill if a goal can be advanced, inspect something if it "
+                "matters, or deliberately remain idle."
             ),
         )
 
@@ -544,8 +902,12 @@ async def main():
         "last_user_activity": time.monotonic(),
         "last_autonomy_thought": 0.0,
         "autonomy_pending": False,
+        "active_task": None,
+        "awareness": None,
+        "self_improvement_attempted": False,
     }
 
+    model, model_label = choose_model()
     python_executable = sys.executable
     server_file = BASE_DIR / "mcp_server.py"
 
@@ -562,7 +924,7 @@ async def main():
     ) as mcp_server:
         agent = Agent(
             name="Chat",
-            model=MODEL,
+            model=model,
             instructions=INSTRUCTIONS,
             mcp_servers=[mcp_server],
             mcp_config={
@@ -570,23 +932,21 @@ async def main():
             },
         )
 
-        chat_task = asyncio.create_task(
-            poll_minecraft_chat(input_queue, runtime)
-        )
-        console_task = asyncio.create_task(
-            console_input(input_queue, runtime)
-        )
-        autonomy_task = asyncio.create_task(
-            autonomy_sensor(input_queue, runtime)
-        )
+        tasks = [
+            asyncio.create_task(poll_minecraft_chat(input_queue, runtime)),
+            asyncio.create_task(console_input(input_queue, runtime)),
+            asyncio.create_task(autonomy_sensor(input_queue, runtime)),
+            asyncio.create_task(local_task_worker(input_queue, runtime)),
+        ]
 
         print()
-        print(f"Minecraft companion MCP agent connected. [{AGENT_BUILD}]")
+        print(f"Minecraft companion connected. [{AGENT_BUILD}]")
+        print(f"Brain model: {model_label}")
         print(f"Memory DB: {store.path}")
-        print("Unified chat/action/autonomy brain: ON")
-        print("Local reflexes: hostile defense, nearby pickup, owner-distance recovery")
-        print("Normal Minecraft chat is heard by Chat.")
-        print("Shift-right-click Chat in Minecraft to open his inventory.")
+        print("Continuous local awareness: ON")
+        print("Persistent task executive: ON")
+        print("Unified chat/action/autonomy identity: ON")
+        print("No Sol model will be selected by this agent.")
         print("Type 'quit' here to stop.")
         print()
 
@@ -601,11 +961,16 @@ async def main():
                     print(f"\n[MINECRAFT] Alik: {message}")
 
                 try:
+                    reply_in_game = source == "minecraft"
+                    if source == "task":
+                        reply_in_game = "completed" in message or "failed" in message
+
                     await run_turn(
                         agent,
                         message,
                         source=source,
-                        reply_in_game=(source == "minecraft"),
+                        reply_in_game=reply_in_game,
+                        runtime=runtime,
                     )
                 except Exception as error:
                     print(f"\nERROR: {error}")
@@ -623,18 +988,12 @@ async def main():
                         except Exception:
                             pass
                 finally:
-                    if source in {"autonomy", "event"}:
+                    if source in {"autonomy", "event", "task"}:
                         runtime["autonomy_pending"] = False
         finally:
-            chat_task.cancel()
-            console_task.cancel()
-            autonomy_task.cancel()
-            await asyncio.gather(
-                chat_task,
-                console_task,
-                autonomy_task,
-                return_exceptions=True,
-            )
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 if __name__ == "__main__":
