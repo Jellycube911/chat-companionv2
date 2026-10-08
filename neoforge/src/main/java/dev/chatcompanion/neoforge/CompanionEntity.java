@@ -107,8 +107,10 @@ public final class CompanionEntity extends PathfinderMob {
 
     public void suspend(String why) {
         getNavigation().stop();
-        if (jobState == JobState.RUNNING) jobState = JobState.SUSPENDED;
-        reason = why;
+        if (jobState == JobState.RUNNING) {
+            jobState = JobState.SUSPENDED;
+            reason = why;
+        }
     }
 
     public void stop(String why) {
