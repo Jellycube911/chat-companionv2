@@ -23,6 +23,7 @@ jobs:
           python -m py_compile local-agent/minecraft_agent.py local-agent/mcp_server.py local-agent/memory_store.py local-agent/skill_executor.py
           cd local-agent
           python -c "import agents, mcp, requests, memory_store, mcp_server, skill_executor; assert memory_store.store.list_goals('active', 5)"
+          python -c "import minecraft_agent; _, label = minecraft_agent.choose_model(); assert 'sol' not in label.lower(), label; print('brain model fallback:', label)"
           python - <<'PY'
           import asyncio
           import sys
