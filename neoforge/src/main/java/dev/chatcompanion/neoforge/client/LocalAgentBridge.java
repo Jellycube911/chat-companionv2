@@ -95,6 +95,7 @@ public final class LocalAgentBridge {
             created.createContext("/nearby-entities", LocalAgentBridge::handleNearbyEntities);
             created.createContext("/nearby-blocks", LocalAgentBridge::handleNearbyBlocks);
             created.createContext("/vision", LocalAgentBridge::handleVision);
+            created.createContext("/find-blocks", LocalAgentBridge::handleFindBlocks);
             created.createContext("/inventory", LocalAgentBridge::handleInventory);
             created.createContext("/say", LocalAgentBridge::handleSay);
             created.createContext("/move-forward", LocalAgentBridge::handleMoveForward);
@@ -422,6 +423,90 @@ public final class LocalAgentBridge {
                 return result;
             });
             sendJson(exchange, 200, GSON.toJson(observation));
+        } catch (Exception failure) {
+            sendFailure(exchange, failure);
+        }
+    }
+
+    private static void handleFindBlocks(HttpExchange exchange) throws IOException {
+        if (!requireMethod(exchange, "POST")) {
+            return;
+        }
+
+        FindBlocksRequest request;
+        try {
+            request = readOptionalJson(exchange, FindBlocksRequest.class);
+        } catch (IllegalArgumentException failure) {
+            sendJson(exchange, 400, GSON.toJson(Map.of("error", failure.getMessage())));
+            return;
+        }
+
+        int radius = request == null || request.radius() == null ? 12 : request.radius();
+        int limit = request == null || request.limit() == null ? 32 : request.limit();
+        if (radius < 1 || radius > 20 || limit < 1 || limit > 128) {
+            sendJson(exchange, 400, "{\"error\":\"radius must be 1-20 and limit must be 1-128\"}");
+            return;
+        }
+
+        List<String> exact = request == null || request.exact() == null ? List.of() : request.exact();
+        List<String> contains = request == null || request.contains() == null ? List.of() : request.contains();
+        if (exact.isEmpty() && contains.isEmpty()) {
+            sendJson(exchange, 400, "{\"error\":\"provide exact block ids or contains patterns\"}");
+            return;
+        }
+
+        try {
+            Map<String, Object> result = withCompanion(context -> {
+                CompanionEntity companion = context.companion();
+                ServerLevel world = context.world();
+                BlockPos origin = companion.blockPosition();
+                List<Map<String, Object>> matches = new ArrayList<>();
+
+                int minY = Math.max(world.getMinBuildHeight(), origin.getY() - radius);
+                int maxY = Math.min(world.getMaxBuildHeight() - 1, origin.getY() + radius);
+
+                for (int x = origin.getX() - radius; x <= origin.getX() + radius; x++) {
+                    for (int y = minY; y <= maxY; y++) {
+                        for (int z = origin.getZ() - radius; z <= origin.getZ() + radius; z++) {
+                            BlockPos pos = new BlockPos(x, y, z);
+                            if (!world.hasChunkAt(pos)) continue;
+                            BlockState state = world.getBlockState(pos);
+                            if (state.isAir()) continue;
+
+                            String id = BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString();
+                            boolean matched = exact.contains(id);
+                            if (!matched) {
+                                for (String pattern : contains) {
+                                    if (pattern != null && !pattern.isBlank() && id.contains(pattern)) {
+                                        matched = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (!matched) continue;
+
+                            Map<String, Object> block = new LinkedHashMap<>();
+                            block.put("type", id);
+                            block.put("x", pos.getX());
+                            block.put("y", pos.getY());
+                            block.put("z", pos.getZ());
+                            block.put("distance", companion.position().distanceTo(Vec3.atCenterOf(pos)));
+                            matches.add(block);
+                        }
+                    }
+                }
+
+                matches.sort(Comparator.comparingDouble(item -> ((Number) item.get("distance")).doubleValue()));
+                if (matches.size() > limit) {
+                    matches = new ArrayList<>(matches.subList(0, limit));
+                }
+
+                return Map.of(
+                        "radius", radius,
+                        "count", matches.size(),
+                        "blocks", matches);
+            });
+            sendJson(exchange, 200, GSON.toJson(result));
         } catch (Exception failure) {
             sendFailure(exchange, failure);
         }
@@ -1210,6 +1295,7 @@ public final class LocalAgentBridge {
     private record AttackRequest(String entity_id) {}
     private record CraftRequest(int width, int height, List<String> grid, Integer times) {}
     private record EquipRequest(int slot) {}
+    private record FindBlocksRequest(List<String> exact, List<String> contains, Integer radius, Integer limit) {}
 
     private static final class BlockAggregate {
         private int count;
