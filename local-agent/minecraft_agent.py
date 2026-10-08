@@ -1,4 +1,5 @@
 import asyncio
+import math
 import random
 import sys
 import time
@@ -458,9 +459,9 @@ async def autonomy_sensor(input_queue, runtime):
                         _post,
                         "/look-at",
                         {
-                            "x": int(round(state.get("x", 0) + distance * __import__("math").cos(angle))),
+                            "x": int(round(state.get("x", 0) + distance * math.cos(angle))),
                             "y": int(round(state.get("y", 0) + random.uniform(-1.0, 2.0))),
-                            "z": int(round(state.get("z", 0) + distance * __import__("math").sin(angle))),
+                            "z": int(round(state.get("z", 0) + distance * math.sin(angle))),
                         },
                     )
                 except Exception:
@@ -475,9 +476,9 @@ async def autonomy_sensor(input_queue, runtime):
                         _post,
                         "/move-to",
                         {
-                            "x": state.get("x", 0) + distance * __import__("math").cos(angle),
+                            "x": state.get("x", 0) + distance * math.cos(angle),
                             "y": state.get("y", 0),
-                            "z": state.get("z", 0) + distance * __import__("math").sin(angle),
+                            "z": state.get("z", 0) + distance * math.sin(angle),
                         },
                     )
                 except Exception:
