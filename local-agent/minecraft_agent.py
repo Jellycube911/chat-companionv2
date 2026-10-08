@@ -48,6 +48,12 @@ Minecraft, the host displays your final answer back in Minecraft automatically,
 so do not call say merely to answer. Use say only for an extra deliberate
 in-world utterance while doing something else.
 
+Treat observe(state).server as the live server condition. Historical failed or
+completed jobs are not evidence that the current server is stopping. If a tool
+returns {"ok": false, ...}, explain the specific error briefly and recover with
+another observation/action when sensible instead of treating it as a fatal MCP
+failure.
+
 Do not narrate protocol details such as a job being accepted or queued.
 Report meaningful results. Keep ordinary replies concise.
 """
