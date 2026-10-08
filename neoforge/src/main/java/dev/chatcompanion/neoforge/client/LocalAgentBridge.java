@@ -25,6 +25,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.network.chat.Component;
@@ -450,6 +451,7 @@ public final class LocalAgentBridge {
 
         List<String> exact = request == null || request.exact() == null ? List.of() : request.exact();
         List<String> contains = request == null || request.contains() == null ? List.of() : request.contains();
+        boolean exposedOnly = request != null && Boolean.TRUE.equals(request.exposed_only());
         if (exact.isEmpty() && contains.isEmpty()) {
             sendJson(exchange, 400, "{\"error\":\"provide exact block ids or contains patterns\"}");
             return;
@@ -484,6 +486,19 @@ public final class LocalAgentBridge {
                                 }
                             }
                             if (!matched) continue;
+
+                            if (exposedOnly) {
+                                boolean exposed = false;
+                                for (Direction direction : Direction.values()) {
+                                    BlockPos neighbor = pos.relative(direction);
+                                    BlockState neighborState = world.getBlockState(neighbor);
+                                    if (neighborState.isAir() || neighborState.canBeReplaced()) {
+                                        exposed = true;
+                                        break;
+                                    }
+                                }
+                                if (!exposed) continue;
+                            }
 
                             Map<String, Object> block = new LinkedHashMap<>();
                             block.put("type", id);
@@ -1295,7 +1310,7 @@ public final class LocalAgentBridge {
     private record AttackRequest(String entity_id) {}
     private record CraftRequest(int width, int height, List<String> grid, Integer times) {}
     private record EquipRequest(int slot) {}
-    private record FindBlocksRequest(List<String> exact, List<String> contains, Integer radius, Integer limit) {}
+    private record FindBlocksRequest(List<String> exact, List<String> contains, Integer radius, Integer limit, Boolean exposed_only) {}
 
     private static final class BlockAggregate {
         private int count;
