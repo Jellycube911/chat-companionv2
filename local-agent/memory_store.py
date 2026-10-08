@@ -1,3 +1,4 @@
+import json
 import math
 import re
 import sqlite3
@@ -76,6 +77,20 @@ class MemoryStore:
                 """
             )
             db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    skill TEXT NOT NULL,
+                    args_json TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    progress TEXT NOT NULL DEFAULT '',
+                    error TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """
+            )
+            db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_memories_updated ON memories(updated_at DESC)"
             )
             db.execute(
@@ -86,6 +101,9 @@ class MemoryStore:
             )
             db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at DESC)"
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status, created_at ASC)"
             )
 
             now = time.time()
@@ -394,6 +412,130 @@ class MemoryStore:
             for row in reversed(rows)
         ]
 
+    def create_task(self, skill, args=None):
+        skill = str(skill).strip().lower()[:80]
+        if not skill:
+            raise ValueError("skill is required")
+        payload = json.dumps(args or {}, separators=(",", ":"))
+        now = time.time()
+        with self._connect() as db:
+            cursor = db.execute(
+                """
+                INSERT INTO tasks(skill, args_json, status, progress, error, created_at, updated_at)
+                VALUES (?, ?, 'queued', '', '', ?, ?)
+                """,
+                (skill, payload, now, now),
+            )
+            task_id = cursor.lastrowid
+        return {"ok": True, "id": task_id, "skill": skill, "status": "queued"}
+
+    def task(self, task_id):
+        with self._connect() as db:
+            row = db.execute(
+                """
+                SELECT id, skill, args_json, status, progress, error, created_at, updated_at
+                FROM tasks WHERE id=?
+                """,
+                (int(task_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "skill": row["skill"],
+            "args": json.loads(row["args_json"]),
+            "status": row["status"],
+            "progress": row["progress"],
+            "error": row["error"],
+        }
+
+    def list_tasks(self, limit=8):
+        limit = max(1, min(20, int(limit)))
+        with self._connect() as db:
+            rows = db.execute(
+                """
+                SELECT id, skill, args_json, status, progress, error
+                FROM tasks
+                ORDER BY
+                    CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,
+                    updated_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "skill": row["skill"],
+                "args": json.loads(row["args_json"]),
+                "status": row["status"],
+                "progress": row["progress"],
+                "error": row["error"],
+            }
+            for row in rows
+        ]
+
+    def next_queued_task(self):
+        with self._connect() as db:
+            row = db.execute(
+                """
+                SELECT id FROM tasks
+                WHERE status='queued'
+                ORDER BY created_at ASC
+                LIMIT 1
+                """
+            ).fetchone()
+            if row is None:
+                return None
+            task_id = row["id"]
+            changed = db.execute(
+                """
+                UPDATE tasks
+                SET status='running', progress='starting', updated_at=?
+                WHERE id=? AND status='queued'
+                """,
+                (time.time(), task_id),
+            ).rowcount
+        return self.task(task_id) if changed == 1 else None
+
+    def update_task(self, task_id, status=None, progress=None, error=None):
+        fields = []
+        values = []
+        if status is not None:
+            if status not in {"queued", "running", "completed", "failed", "cancelled"}:
+                raise ValueError("invalid task status")
+            fields.append("status=?")
+            values.append(status)
+        if progress is not None:
+            fields.append("progress=?")
+            values.append(str(progress).strip()[:1200])
+        if error is not None:
+            fields.append("error=?")
+            values.append(str(error).strip()[:2000])
+        if not fields:
+            return {"ok": True, "id": int(task_id)}
+        fields.append("updated_at=?")
+        values.append(time.time())
+        values.append(int(task_id))
+        with self._connect() as db:
+            changed = db.execute(
+                f"UPDATE tasks SET {', '.join(fields)} WHERE id=?",
+                values,
+            ).rowcount
+        return {"ok": changed == 1, "id": int(task_id)}
+
+    def cancel_tasks(self):
+        with self._connect() as db:
+            count = db.execute(
+                """
+                UPDATE tasks
+                SET status='cancelled', progress='cancelled by user', updated_at=?
+                WHERE status IN ('queued', 'running')
+                """,
+                (time.time(),),
+            ).rowcount
+        return {"ok": True, "cancelled": count}
+
     def stats(self):
         with self._connect() as db:
             memory_count = db.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
@@ -402,11 +544,15 @@ class MemoryStore:
                 "SELECT COUNT(*) FROM goals WHERE status='active'"
             ).fetchone()[0]
             event_count = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+            active_tasks = db.execute(
+                "SELECT COUNT(*) FROM tasks WHERE status IN ('queued','running')"
+            ).fetchone()[0]
         return {
             "memories": memory_count,
             "episodes": episode_count,
             "active_goals": active_goals,
             "events": event_count,
+            "active_tasks": active_tasks,
             "database": str(self.path),
         }
 
