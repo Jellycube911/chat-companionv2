@@ -207,11 +207,15 @@ def navigate(
     if action == "move_to":
         if x is None or y is None or z is None:
             return {"ok": False, "error": "move_to requires x, y and z"}
-        _post("/move-to", {"x": x, "y": y, "z": z})
+        started = _post("/move-to", {"x": x, "y": y, "z": z})
+        if _failed(started):
+            return started
         return _wait_for_job(12)
 
     if action == "move_forward":
-        _post("/move-forward")
+        started = _post("/move-forward")
+        if _failed(started):
+            return started
         return _wait_for_job(8)
 
     if action == "follow":
@@ -220,7 +224,9 @@ def navigate(
     if action == "stop":
         return _post("/stop-action")
 
-    _post("/resume-action")
+    started = _post("/resume-action")
+    if _failed(started):
+        return started
     return _wait_for_job(8)
 
 
