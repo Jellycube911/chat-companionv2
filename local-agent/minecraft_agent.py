@@ -484,6 +484,7 @@ async def autonomy_sensor(input_queue, runtime):
                 except Exception:
                     pass
                 last_ambient_wander = now
+                continue
 
         interval = (
             AUTONOMY_GOAL_INTERVAL
