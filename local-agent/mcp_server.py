@@ -269,7 +269,7 @@ def observe(view: Literal["state", "entities", "blocks", "inventory", "vision"])
 @mcp.tool()
 @_tool_guard
 def navigate(
-    action: Literal["move_to", "move_forward", "follow", "stop", "resume"],
+    action: Literal["move_to", "move_forward", "look_at", "follow", "stop", "resume"],
     x: float | None = None,
     y: float | None = None,
     z: float | None = None,
@@ -288,6 +288,14 @@ def navigate(
         if _failed(started):
             return started
         return _wait_for_job(8)
+
+    if action == "look_at":
+        if x is None or y is None or z is None:
+            return {"ok": False, "error": "look_at requires x, y and z"}
+        return _post(
+            "/look-at",
+            {"x": int(round(x)), "y": int(round(y)), "z": int(round(z))},
+        )
 
     if action == "follow":
         return _post("/follow-owner")
