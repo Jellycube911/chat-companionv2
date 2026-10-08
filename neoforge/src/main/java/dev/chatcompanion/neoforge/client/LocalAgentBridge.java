@@ -41,6 +41,9 @@ import net.minecraft.world.item.crafting.CraftingInput;
 import net.minecraft.world.item.crafting.RecipeType;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
@@ -91,6 +94,7 @@ public final class LocalAgentBridge {
             created.createContext("/state", LocalAgentBridge::handleState);
             created.createContext("/nearby-entities", LocalAgentBridge::handleNearbyEntities);
             created.createContext("/nearby-blocks", LocalAgentBridge::handleNearbyBlocks);
+            created.createContext("/vision", LocalAgentBridge::handleVision);
             created.createContext("/inventory", LocalAgentBridge::handleInventory);
             created.createContext("/say", LocalAgentBridge::handleSay);
             created.createContext("/move-forward", LocalAgentBridge::handleMoveForward);
@@ -303,6 +307,117 @@ public final class LocalAgentBridge {
                 result.put("verticalRadius", BLOCK_VERTICAL_RADIUS);
                 result.put("uniqueTypes", aggregates.size());
                 result.put("blocks", blocks);
+                return result;
+            });
+            sendJson(exchange, 200, GSON.toJson(observation));
+        } catch (Exception failure) {
+            sendFailure(exchange, failure);
+        }
+    }
+
+    private static void handleVision(HttpExchange exchange) throws IOException {
+        if (!requireMethod(exchange, "GET")) {
+            return;
+        }
+
+        try {
+            Map<String, Object> observation = withCompanion(context -> {
+                CompanionEntity companion = context.companion();
+                ServerPlayer owner = context.owner();
+                ServerLevel world = context.world();
+
+                final double range = 18.0;
+                final double horizontalFov = 100.0;
+                final double verticalFov = 60.0;
+                double[] yawOffsets = {-50, -35, -20, -10, 0, 10, 20, 35, 50};
+                double[] pitchOffsets = {-25, -12, 0, 12, 25};
+
+                Vec3 eye = companion.getEyePosition();
+                List<Map<String, Object>> rays = new ArrayList<>();
+                java.util.Set<BlockPos> seenBlocks = new java.util.HashSet<>();
+
+                for (double pitchOffset : pitchOffsets) {
+                    for (double yawOffset : yawOffsets) {
+                        float yaw = (float) (companion.getYRot() + yawOffset);
+                        float pitch = (float) (companion.getXRot() + pitchOffset);
+                        double yawRad = Math.toRadians(-yaw - 180.0);
+                        double pitchRad = Math.toRadians(-pitch);
+                        double cosPitch = Math.cos(pitchRad);
+                        Vec3 direction = new Vec3(
+                                Math.sin(yawRad) * cosPitch,
+                                Math.sin(pitchRad),
+                                Math.cos(yawRad) * cosPitch);
+                        Vec3 end = eye.add(direction.scale(range));
+
+                        BlockHitResult hit = world.clip(new ClipContext(
+                                eye,
+                                end,
+                                ClipContext.Block.OUTLINE,
+                                ClipContext.Fluid.NONE,
+                                companion));
+
+                        if (hit.getType() != HitResult.Type.BLOCK) continue;
+                        BlockPos pos = hit.getBlockPos();
+                        if (!seenBlocks.add(pos)) continue;
+
+                        BlockState state = world.getBlockState(pos);
+                        Map<String, Object> ray = new LinkedHashMap<>();
+                        ray.put("type", BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString());
+                        ray.put("x", pos.getX());
+                        ray.put("y", pos.getY());
+                        ray.put("z", pos.getZ());
+                        ray.put("distance", eye.distanceTo(hit.getLocation()));
+                        ray.put("yawOffset", yawOffset);
+                        ray.put("pitchOffset", pitchOffset);
+                        rays.add(ray);
+                    }
+                }
+
+                List<Map<String, Object>> visibleEntities = new ArrayList<>();
+                Vec3 forward = companion.getViewVector(1.0F).normalize();
+                List<Entity> nearby = new ArrayList<>(world.getEntities(
+                        companion,
+                        companion.getBoundingBox().inflate(range),
+                        Entity::isAlive));
+                nearby.sort(Comparator.comparingDouble(companion::distanceToSqr));
+
+                for (Entity entity : nearby) {
+                    if (visibleEntities.size() >= 12) break;
+                    Vec3 toEntity = entity.getEyePosition().subtract(eye);
+                    double distance = toEntity.length();
+                    if (distance <= 0.001 || distance > range) continue;
+                    double dot = forward.dot(toEntity.normalize());
+                    if (dot < Math.cos(Math.toRadians(horizontalFov / 2.0))) continue;
+                    if (!companion.hasLineOfSight(entity)) continue;
+
+                    Map<String, Object> item = new LinkedHashMap<>();
+                    item.put("uuid", entity.getUUID().toString());
+                    item.put("type", BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).toString());
+                    item.put("distance", distance);
+                    item.put("x", entity.getX());
+                    item.put("y", entity.getY());
+                    item.put("z", entity.getZ());
+                    item.put("owner", entity.getUUID().equals(owner.getUUID()));
+                    item.put("hostile", entity instanceof Enemy);
+                    if (entity instanceof LivingEntity living) {
+                        item.put("health", living.getHealth());
+                    }
+                    if (entity instanceof ItemEntity dropped) {
+                        ItemStack stack = dropped.getItem();
+                        item.put("item", BuiltInRegistries.ITEM.getKey(stack.getItem()).toString());
+                        item.put("count", stack.getCount());
+                    }
+                    visibleEntities.add(item);
+                }
+
+                Map<String, Object> result = new LinkedHashMap<>();
+                result.put("range", range);
+                result.put("horizontalFov", horizontalFov);
+                result.put("verticalFov", verticalFov);
+                result.put("yaw", companion.getYRot());
+                result.put("pitch", companion.getXRot());
+                result.put("blocks", rays);
+                result.put("entities", visibleEntities);
                 return result;
             });
             sendJson(exchange, 200, GSON.toJson(observation));
