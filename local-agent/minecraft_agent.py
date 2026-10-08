@@ -135,6 +135,14 @@ def build_turn_input(message, source):
                 parts.append(f"Alik: {_trim(episode['user'])}")
                 parts.append(f"Chat: {_trim(episode['assistant'])}")
 
+    recent_events = store.recent_events(3)
+    if recent_events:
+        parts.append("RECENT BODY/BRAIN EVENTS:")
+        for event in recent_events:
+            parts.append(
+                f"- [{event['kind']}] {_trim(event['summary'], 260)}"
+            )
+
     if goals:
         parts.append("ACTIVE PERSISTENT GOALS:")
         for goal in goals:
@@ -204,6 +212,70 @@ async def run_turn(agent, message, source, reply_in_game):
     return answer
 
 
+async def fast_chat_reflex(text):
+    normalized = text.lower().strip().rstrip(".!?")
+
+    try:
+        if normalized in {
+            "come here",
+            "come to me",
+            "can you come here",
+            "can u come here",
+            "can you come to me",
+            "can u come to me",
+        }:
+            state = await asyncio.to_thread(_get, "/state")
+            owner = state.get("owner", {})
+            result = await asyncio.to_thread(
+                _post,
+                "/move-to",
+                {
+                    "x": owner.get("x"),
+                    "y": owner.get("y"),
+                    "z": owner.get("z"),
+                },
+            )
+            store.record_event(
+                "motor_reflex",
+                f"Alik asked Chat to come to him; movement started immediately: {result}",
+            )
+            return
+
+        if normalized in {"follow me", "follow"}:
+            result = await asyncio.to_thread(_post, "/follow-owner")
+            store.record_event(
+                "motor_reflex",
+                f"Alik asked Chat to follow; follow started immediately: {result}",
+            )
+            return
+
+        if normalized in {"stop", "stop moving", "stay here", "wait here"}:
+            result = await asyncio.to_thread(_post, "/stop-action")
+            store.record_event(
+                "motor_reflex",
+                f"Alik asked Chat to stop; body stopped immediately: {result}",
+            )
+            return
+
+        if normalized in {
+            "pick that up",
+            "pick it up",
+            "pick up the items",
+            "collect that",
+            "collect the items",
+        }:
+            result = await asyncio.to_thread(_post, "/collect-items")
+            store.record_event(
+                "motor_reflex",
+                f"Alik asked Chat to collect nearby items; collection started immediately: {result}",
+            )
+    except Exception as error:
+        store.record_event(
+            "motor_reflex_error",
+            f"Fast chat reflex failed: {type(error).__name__}: {error}",
+        )
+
+
 async def poll_minecraft_chat(input_queue, runtime):
     while True:
         try:
@@ -212,6 +284,7 @@ async def poll_minecraft_chat(input_queue, runtime):
                 text = str(message.get("text", "")).strip()
                 if text:
                     runtime["last_user_activity"] = time.monotonic()
+                    await fast_chat_reflex(text)
                     await enqueue(input_queue, runtime, 0, "minecraft", text)
         except Exception:
             pass
