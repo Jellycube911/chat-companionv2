@@ -170,6 +170,29 @@ public final class CompanionService implements AutoCloseable {
                 message(owner, "Action rejected: " + entry.outcome().reasonCode());
         }));
     }
+
+    /**
+     * Direct local action path for the localhost MCP bridge.
+     * This intentionally bypasses the legacy CompanionActor/remote workflow.
+     */
+    public ActionOutcome localAction(ServerPlayer owner, String name, JsonObject arguments) {
+        assertServer();
+        if (closed) return ActionOutcome.rejected("server_stopping");
+        CompanionEntity companion = find(owner.getUUID());
+        if (companion == null) return ActionOutcome.rejected("companion_unavailable");
+
+        ActionRequest request = new ActionRequest(
+                new ToolCallKey("local:mcp", UUID.randomUUID().toString(), UUID.randomUUID().toString()),
+                name,
+                arguments,
+                runtimeEpoch,
+                -1L);
+        try {
+            return new Bridge(owner.getUUID(), companion.getUUID()).dispatch(companion, owner, request);
+        } catch (RuntimeException failure) {
+            return ActionOutcome.rejected("invalid_arguments");
+        }
+    }
     public void stop(ServerPlayer owner) {
         commandSequences.merge(owner.getUUID(), 1L, Long::sum);
         CompanionEntity companion = find(owner.getUUID());
@@ -300,7 +323,9 @@ public final class CompanionService implements AutoCloseable {
         for (var entry : new ArrayList<>(work.entrySet())) {
             UUID owner = entry.getKey(); PhysicalJob job = entry.getValue(); CompanionEntity companion = find(owner);
             Session session = sessions.get(owner); ServerPlayer player = server.getPlayerList().getPlayer(owner);
-            if (companion == null || session == null || player == null || session.actor.controlGeneration() != job.generation()
+            boolean generationValid = job.generation() < 0
+                    || (session != null && session.actor.controlGeneration() == job.generation());
+            if (companion == null || player == null || !generationValid
                     || companion.jobState() != CompanionEntity.JobState.RUNNING || !job.jobId().equals(companion.jobId())) {
                 work.remove(owner); placements.remove(owner);
                 if (companion != null) companion.stop("job_invalidated");
