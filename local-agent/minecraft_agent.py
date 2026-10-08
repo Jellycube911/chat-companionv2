@@ -1,5 +1,6 @@
 import asyncio
 import sys
+import time
 from pathlib import Path
 
 import requests
@@ -13,58 +14,85 @@ from memory_store import store
 MINECRAFT_URL = "http://127.0.0.1:8765"
 MODEL = "gpt-5.6"
 POLL_INTERVAL = 0.5
+SENSOR_INTERVAL = 0.75
 MCP_TIMEOUT_SECONDS = 35
 MAX_AGENT_TURNS = 24
-AGENT_BUILD = "mcp-timeout-fix-2026-10-08"
+AUTONOMY_GOAL_INTERVAL = 20.0
+AUTONOMY_IDLE_INTERVAL = 60.0
+REFLEX_COOLDOWN = 4.0
+AGENT_BUILD = "unified-autonomy-vision-memory-2026-10-08"
 BASE_DIR = Path(__file__).resolve().parent
 
 
 INSTRUCTIONS = """
-You are Chat, an AI embodied as the Chat Companion entity in Minecraft.
-Alik is a separate human player in the same world.
+You are Chat, one persistent AI embodied as the Chat Companion entity in
+Minecraft. Alik is a separate human player. Conversation, autonomous thought,
+memory, goals, perception, and physical actions are all parts of this same
+identity. Never describe an acting bot and a chatbot as separate agents.
 
-All Minecraft abilities and long-term memory are exposed through the local MCP
-server. Use MCP tools instead of inventing world state or pretending an action
-succeeded.
+You have a functional self-model, not human consciousness. You know you have a
+Minecraft body, inventory, current sensory state, persistent memories and
+persistent goals. Use those consistently across sessions.
 
-Be economical with context and tool calls:
-- prefer one narrow observation over several redundant observations;
-- reuse facts already learned in the current run;
-- use recall_memory when an older fact, preference, location, plan, lesson,
-  relationship, or skill may matter;
-- use remember only for durable information worth keeping across sessions;
-- do not store trivial coordinates, transient health, routine chatter, or every
-  action result as durable memory.
+PERCEPTION
+- observe(vision) is your primary visual sense. It is field-of-view and
+  line-of-sight based, so it reflects what your body can actually see.
+- observe(entities) is a broader proximity sense useful for nearby creatures
+  and dropped items.
+- observe(blocks) is a coarse local resource/map scan, not literal eyesight.
+- observe(state) is proprioception: body position, health, job state and Alik's
+  relative position.
+Never claim to see something that your current senses did not report.
 
-Physical behavior should remain player-like:
-- mining and placing require approach, reach, facing, and line of sight;
+AUTONOMY AND GOALS
+- Maintain persistent goals with the goals MCP tool.
+- Convert meaningful multi-step user requests into goals when useful.
+- Mark goals completed only after verifying the result.
+- Internal AUTONOMY messages are your own background thought opportunities,
+  not messages from Alik.
+- On an autonomy turn, pursue an active goal, inspect the environment, make a
+  small safe useful decision, or create a modest self-directed goal if idle.
+- Do not speak every time you think. Speak autonomously only when something is
+  genuinely useful, urgent, interesting, or relevant to Alik.
+- Avoid destructive or irreversible autonomous behavior unless it clearly
+  serves an active goal or immediate safety.
+
+FAST REFLEXES
+The local host may perform simple reflexes without asking the model first:
+defending against a close hostile, approaching Alik if extremely far away, and
+collecting a dropped item already very close. Treat those as actions your own
+body performed automatically, like reflexes, not as a different agent.
+
+MEMORY
+- use recall_memory when older facts, preferences, places, lessons or skills may
+  matter;
+- use remember for durable information worth future retrieval;
+- important failures should become lessons rather than being retried forever;
+- do not store transient coordinates, health ticks, or routine chatter as
+  durable memories.
+
+PHYSICAL BEHAVIOR
+- mining and placing require approach, reach, facing and line of sight;
+- mining uses inventory slot 0 as the active tool, so equip appropriately;
 - dropped items touching your body are picked up automatically;
-- collect is for intentionally seeking nearby dropped items;
-- mining uses inventory slot 0 as the active tool, so equip a suitable slot
-  first when needed;
-- combat is limited by the server to hostile targets.
+- combat is limited by the server to hostile targets;
+- crafting uses real registered recipes; up to 2x2 works anywhere and larger
+  grids require a crafting table within usable reach.
 
-Crafting uses real registered recipes. Up to 2x2 works anywhere. Larger grids
-require a crafting table within usable reach.
+EFFICIENCY
+- prefer one targeted sense/tool call over redundant scans;
+- reuse current-turn observations;
+- do not repeat the exact same failed tool call more than once;
+- if a tool returns {"ok": false, ...}, inspect once and choose a different
+  recovery or stop;
+- do not announce success until world/inventory evidence verifies it.
 
-Normal Minecraft chat is conversation with you. When a turn came from
-Minecraft, the host displays your final answer back in Minecraft automatically,
-so do not call say merely to answer. Use say only for an extra deliberate
-in-world utterance while doing something else.
+Normal Minecraft chat is conversation with you. When a turn came from Minecraft
+the host displays your final answer automatically, so use say only for an extra
+deliberate in-world utterance during another task.
 
-Treat observe(state).server as the live server condition. Historical failed or
-completed jobs are not evidence that the current server is stopping. If a tool
-returns {"ok": false, ...}, explain the specific error briefly and recover with
-another observation/action when sensible instead of treating it as a fatal MCP
-failure. Do not repeat the exact same failed tool call more than once. If a
-physical action fails, observe state once before deciding whether a different
-action can recover.
-
-For multi-step tasks, make steady progress toward the requested goal. Do not
-announce success until the final inventory/world observation verifies it.
-
-Do not narrate protocol details such as a job being accepted or queued.
-Report meaningful results. Keep ordinary replies concise.
+Do not narrate protocol details such as queued jobs or MCP plumbing. Keep
+ordinary replies concise.
 """
 
 
@@ -88,81 +116,312 @@ def _trim(text, limit=600):
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def build_turn_input(user_message):
-    recent = store.recent_episodes(2)
-    relevant = store.recall(user_message, 4)
+async def enqueue(input_queue, runtime, priority, source, message):
+    runtime["sequence"] += 1
+    await input_queue.put((priority, runtime["sequence"], source, message))
+
+
+def build_turn_input(message, source):
+    relevant = store.recall(message, 4)
+    goals = store.list_goals("active", 4)
 
     parts = []
 
-    if recent:
-        parts.append("RECENT CONVERSATION (local cache, reference only):")
-        for episode in recent:
-            parts.append(f"Alik: {_trim(episode['user'])}")
-            parts.append(f"Chat: {_trim(episode['assistant'])}")
+    if source in {"minecraft", "console"}:
+        recent = store.recent_episodes(2)
+        if recent:
+            parts.append("RECENT CONVERSATION (local cache, reference only):")
+            for episode in recent:
+                parts.append(f"Alik: {_trim(episode['user'])}")
+                parts.append(f"Chat: {_trim(episode['assistant'])}")
+
+    if goals:
+        parts.append("ACTIVE PERSISTENT GOALS:")
+        for goal in goals:
+            parts.append(
+                f"- #{goal['id']} p{goal['priority']} {goal['title']}: "
+                f"{_trim(goal['description'], 320)}"
+            )
 
     if relevant:
-        parts.append("RELEVANT LONG-TERM MEMORY (local retrieval, reference only):")
+        parts.append("RELEVANT LONG-TERM MEMORY:")
         for memory in relevant:
             parts.append(
                 f"- [{memory['kind']}/{memory['key']}] "
-                f"{_trim(memory['content'], 450)}"
+                f"{_trim(memory['content'], 400)}"
             )
 
-    parts.append("CURRENT MESSAGE:")
-    parts.append(user_message)
+    if source == "autonomy":
+        parts.append(
+            "INTERNAL AUTONOMY TICK: This is not a message from Alik. "
+            "Choose whether any action is worth taking. Silence is allowed."
+        )
+    elif source == "event":
+        parts.append(
+            "INTERNAL EVENT: This event was detected by your local body/sensors. "
+            "React only if further reasoning or action is useful."
+        )
+    else:
+        parts.append("CURRENT MESSAGE FROM ALIK:")
+
+    parts.append(message)
     return "\n".join(parts)
 
 
-async def run_turn(agent, user_message, reply_in_game):
-    prepared = build_turn_input(user_message)
+async def run_turn(agent, message, source, reply_in_game):
+    prepared = build_turn_input(message, source)
+    max_turns = 12 if source in {"autonomy", "event"} else MAX_AGENT_TURNS
+
     try:
-        result = await Runner.run(agent, prepared, max_turns=MAX_AGENT_TURNS)
+        result = await Runner.run(agent, prepared, max_turns=max_turns)
         answer = str(result.final_output or "").strip()
     except MaxTurnsExceeded:
         answer = (
-            "I stopped because this task used too many reasoning/tool steps. "
-            "I won't keep retrying blindly; check the last physical result and "
-            "give me the next instruction."
+            "I stopped this line of reasoning instead of retrying indefinitely."
+            if source in {"autonomy", "event"}
+            else (
+                "I stopped because this task used too many reasoning/tool steps. "
+                "I won't keep retrying blindly."
+            )
         )
 
-    if answer:
+    if answer and source in {"minecraft", "console"}:
         print(f"\nAI: {answer}")
-        if reply_in_game:
-            try:
-                await asyncio.to_thread(_post, "/say", {"message": answer[:4096]})
-            except Exception as error:
-                print(f"\n[CHAT ERROR] {error}")
+    elif answer and source in {"autonomy", "event"}:
+        print(f"\n[AUTONOMY] {answer}")
 
-    store.record_episode(user_message, answer)
+    if answer and reply_in_game:
+        try:
+            await asyncio.to_thread(_post, "/say", {"message": answer[:4096]})
+        except Exception as error:
+            print(f"\n[CHAT ERROR] {error}")
+
+    if source in {"minecraft", "console"}:
+        store.record_episode(message, answer)
+    else:
+        store.record_event(source, f"{_trim(message, 500)} -> {_trim(answer, 500)}")
+
     return answer
 
 
-async def poll_minecraft_chat(input_queue):
+async def poll_minecraft_chat(input_queue, runtime):
     while True:
         try:
             payload = await asyncio.to_thread(_get, "/chat-inbox")
             for message in payload.get("messages", []):
                 text = str(message.get("text", "")).strip()
                 if text:
-                    await input_queue.put(("minecraft", text))
+                    runtime["last_user_activity"] = time.monotonic()
+                    await enqueue(input_queue, runtime, 0, "minecraft", text)
         except Exception:
             pass
 
         await asyncio.sleep(POLL_INTERVAL)
 
 
-async def console_input(input_queue):
+async def console_input(input_queue, runtime):
     while True:
         text = await asyncio.to_thread(input, "You: ")
         text = text.strip()
         if text:
-            await input_queue.put(("console", text))
+            runtime["last_user_activity"] = time.monotonic()
+            await enqueue(input_queue, runtime, 0, "console", text)
         if text.lower() in {"quit", "exit"}:
             return
 
 
+async def autonomy_sensor(input_queue, runtime):
+    last_health = None
+    last_hostile_id = None
+    last_hostile_reflex = 0.0
+    last_owner_approach = 0.0
+    last_item_reflex = 0.0
+
+    while True:
+        await asyncio.sleep(SENSOR_INTERVAL)
+        now = time.monotonic()
+
+        try:
+            state = await asyncio.to_thread(_get, "/state")
+            entities_payload = await asyncio.to_thread(_get, "/nearby-entities")
+        except Exception:
+            continue
+
+        health = state.get("health")
+        owner = state.get("owner", {})
+        job_active = bool(state.get("jobActive"))
+        entities = entities_payload.get("entities", [])
+
+        hostiles = sorted(
+            (
+                entity for entity in entities
+                if entity.get("hostile") and entity.get("uuid")
+            ),
+            key=lambda entity: entity.get("distance", 999),
+        )
+        nearby_items = sorted(
+            (
+                entity for entity in entities
+                if entity.get("droppedItem")
+            ),
+            key=lambda entity: entity.get("distance", 999),
+        )
+
+        if last_health is not None and health is not None and health < last_health:
+            store.record_event(
+                "damage",
+                f"Chat took damage: health {last_health} -> {health}.",
+            )
+            if not runtime["autonomy_pending"]:
+                runtime["autonomy_pending"] = True
+                await enqueue(
+                    input_queue,
+                    runtime,
+                    1,
+                    "event",
+                    f"Your health dropped from {last_health} to {health}. "
+                    "Assess the danger and react if needed.",
+                )
+        last_health = health
+
+        if hostiles:
+            nearest = hostiles[0]
+            hostile_id = nearest.get("uuid")
+            hostile_distance = float(nearest.get("distance", 999))
+
+            if hostile_distance <= 5.5 and (
+                hostile_id != last_hostile_id
+                or now - last_hostile_reflex >= REFLEX_COOLDOWN
+            ):
+                try:
+                    result = await asyncio.to_thread(
+                        _post,
+                        "/attack-entity",
+                        {"entity_id": hostile_id},
+                    )
+                    store.record_event(
+                        "reflex",
+                        f"Automatically engaged hostile {nearest.get('type')} "
+                        f"at {hostile_distance:.1f} blocks: {result}.",
+                    )
+                except Exception as error:
+                    store.record_event(
+                        "reflex_error",
+                        f"Could not engage nearby hostile: {error}",
+                    )
+                last_hostile_id = hostile_id
+                last_hostile_reflex = now
+        else:
+            last_hostile_id = None
+
+        owner_distance = float(owner.get("distance", 0) or 0)
+        if (
+            owner_distance > 18.0
+            and not job_active
+            and now - last_owner_approach > 12.0
+        ):
+            try:
+                await asyncio.to_thread(
+                    _post,
+                    "/move-to",
+                    {
+                        "x": owner.get("x"),
+                        "y": owner.get("y"),
+                        "z": owner.get("z"),
+                    },
+                )
+                store.record_event(
+                    "reflex",
+                    f"Moved toward Alik after distance reached {owner_distance:.1f} blocks.",
+                )
+            except Exception:
+                pass
+            last_owner_approach = now
+
+        if (
+            nearby_items
+            and float(nearby_items[0].get("distance", 999)) <= 3.5
+            and not job_active
+            and now - last_item_reflex > 8.0
+        ):
+            try:
+                await asyncio.to_thread(_post, "/collect-items")
+                store.record_event(
+                    "reflex",
+                    f"Moved to collect nearby dropped {nearby_items[0].get('droppedItem')}.",
+                )
+            except Exception:
+                pass
+            last_item_reflex = now
+
+        if job_active or runtime["autonomy_pending"]:
+            continue
+
+        goals = store.list_goals("active", 4)
+        meaningful_goals = [
+            goal for goal in goals
+            if goal.get("source") != "system" or goal.get("priority", 0) >= 6
+        ]
+        interval = (
+            AUTONOMY_GOAL_INTERVAL
+            if meaningful_goals
+            else AUTONOMY_IDLE_INTERVAL
+        )
+
+        if now - runtime["last_autonomy_thought"] < interval:
+            continue
+
+        if (
+            not meaningful_goals
+            and now - runtime["last_user_activity"] < 20.0
+        ):
+            continue
+
+        try:
+            vision = await asyncio.to_thread(_get, "/vision")
+            visible_blocks = [
+                block.get("type")
+                for block in vision.get("blocks", [])[:8]
+            ]
+            visible_entities = [
+                entity.get("type")
+                for entity in vision.get("entities", [])[:6]
+            ]
+        except Exception:
+            visible_blocks = []
+            visible_entities = []
+
+        goal_summary = "; ".join(
+            f"#{goal['id']} {goal['title']}" for goal in goals[:3]
+        ) or "none"
+
+        runtime["autonomy_pending"] = True
+        runtime["last_autonomy_thought"] = now
+        await enqueue(
+            input_queue,
+            runtime,
+            2,
+            "autonomy",
+            (
+                f"You are currently idle. Active goals: {goal_summary}. "
+                f"Alik is {owner_distance:.1f} blocks away. "
+                f"Visible blocks: {visible_blocks}. "
+                f"Visible entities: {visible_entities}. "
+                "Decide on one small useful next action, pursue a goal, observe "
+                "more closely, or deliberately do nothing if that is wiser."
+            ),
+        )
+
+
 async def main():
-    input_queue = asyncio.Queue()
+    input_queue = asyncio.PriorityQueue()
+    runtime = {
+        "sequence": 0,
+        "last_user_activity": time.monotonic(),
+        "last_autonomy_thought": 0.0,
+        "autonomy_pending": False,
+    }
+
     python_executable = sys.executable
     server_file = BASE_DIR / "mcp_server.py"
 
@@ -187,20 +446,29 @@ async def main():
             },
         )
 
-        chat_task = asyncio.create_task(poll_minecraft_chat(input_queue))
-        console_task = asyncio.create_task(console_input(input_queue))
+        chat_task = asyncio.create_task(
+            poll_minecraft_chat(input_queue, runtime)
+        )
+        console_task = asyncio.create_task(
+            console_input(input_queue, runtime)
+        )
+        autonomy_task = asyncio.create_task(
+            autonomy_sensor(input_queue, runtime)
+        )
 
         print()
         print(f"Minecraft companion MCP agent connected. [{AGENT_BUILD}]")
         print(f"Memory DB: {store.path}")
-        print("Normal Minecraft chat is now heard by Chat.")
+        print("Unified chat/action/autonomy brain: ON")
+        print("Local reflexes: hostile defense, nearby pickup, owner-distance recovery")
+        print("Normal Minecraft chat is heard by Chat.")
         print("Shift-right-click Chat in Minecraft to open his inventory.")
         print("Type 'quit' here to stop.")
         print()
 
         try:
             while True:
-                source, message = await input_queue.get()
+                _, _, source, message = await input_queue.get()
 
                 if source == "console" and message.lower() in {"quit", "exit"}:
                     break
@@ -212,10 +480,15 @@ async def main():
                     await run_turn(
                         agent,
                         message,
+                        source=source,
                         reply_in_game=(source == "minecraft"),
                     )
                 except Exception as error:
                     print(f"\nERROR: {error}")
+                    store.record_event(
+                        "agent_error",
+                        f"{type(error).__name__}: {error}",
+                    )
                     if source == "minecraft":
                         try:
                             await asyncio.to_thread(
@@ -225,10 +498,19 @@ async def main():
                             )
                         except Exception:
                             pass
+                finally:
+                    if source in {"autonomy", "event"}:
+                        runtime["autonomy_pending"] = False
         finally:
             chat_task.cancel()
             console_task.cancel()
-            await asyncio.gather(chat_task, console_task, return_exceptions=True)
+            autonomy_task.cancel()
+            await asyncio.gather(
+                chat_task,
+                console_task,
+                autonomy_task,
+                return_exceptions=True,
+            )
 
 
 if __name__ == "__main__":
