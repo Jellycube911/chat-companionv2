@@ -22,7 +22,7 @@ jobs:
         run: |
           python -m py_compile local-agent/minecraft_agent.py local-agent/mcp_server.py local-agent/memory_store.py
           cd local-agent
-          python -c "import agents, mcp, requests, memory_store, mcp_server"
+          python -c "import agents, mcp, requests, memory_store, mcp_server; assert memory_store.store.list_goals('active', 5)"
           python - <<'PY'
           import asyncio
           import sys
@@ -44,7 +44,7 @@ jobs:
                   names = {tool.name for tool in await server.list_tools()}
                   expected = {
                       "observe", "navigate", "world_action", "craft",
-                      "say", "remember", "recall_memory", "memory_status",
+                      "say", "remember", "recall_memory", "goals", "memory_status",
                   }
                   missing = expected - names
                   assert not missing, f"Missing MCP tools: {sorted(missing)}"
