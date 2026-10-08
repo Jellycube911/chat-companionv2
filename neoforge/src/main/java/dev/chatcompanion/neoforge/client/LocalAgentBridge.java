@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import dev.chatcompanion.core.ActionOutcome;
 import dev.chatcompanion.neoforge.ChatCompanion;
 import dev.chatcompanion.neoforge.CompanionEntity;
 import dev.chatcompanion.neoforge.CompanionService;
@@ -481,7 +482,8 @@ public final class LocalAgentBridge {
                 JsonObject args = new JsonObject();
                 args.addProperty("player_id", context.owner().getUUID().toString());
                 args.addProperty("stop_distance", stopDistance);
-                context.service().action(context.owner(), "follow_player", args);
+                ActionOutcome outcome = context.service().localAction(context.owner(), "follow_player", args);
+                requireSuccess(outcome);
                 return queued("follow_player");
             });
             sendJson(exchange, 202, GSON.toJson(result));
@@ -547,7 +549,8 @@ public final class LocalAgentBridge {
                 JsonObject args = new JsonObject();
                 args.addProperty("radius", radius);
                 args.addProperty("max_items", maxItems);
-                context.service().action(context.owner(), "collect_items", args);
+                ActionOutcome outcome = context.service().localAction(context.owner(), "collect_items", args);
+                requireSuccess(outcome);
                 return queued("collect_items");
             });
             sendJson(exchange, 202, GSON.toJson(result));
@@ -572,7 +575,8 @@ public final class LocalAgentBridge {
         try {
             Map<String, Object> result = withCompanion(context -> {
                 JsonObject args = blockArgs(context.companion(), request.x(), request.y(), request.z());
-                context.service().action(context.owner(), "mine_block", args);
+                ActionOutcome outcome = context.service().localAction(context.owner(), "mine_block", args);
+                requireSuccess(outcome);
                 return queued("mine_block");
             });
             sendJson(exchange, 202, GSON.toJson(result));
@@ -609,7 +613,8 @@ public final class LocalAgentBridge {
                 JsonObject args = blockArgs(context.companion(), request.x(), request.y(), request.z());
                 args.addProperty("inventory_slot", request.inventory_slot());
                 args.addProperty("face", face);
-                context.service().action(context.owner(), "place_block", args);
+                ActionOutcome outcome = context.service().localAction(context.owner(), "place_block", args);
+                requireSuccess(outcome);
                 return queued("place_block");
             });
             sendJson(exchange, 202, GSON.toJson(result));
@@ -636,7 +641,8 @@ public final class LocalAgentBridge {
             Map<String, Object> result = withCompanion(context -> {
                 JsonObject args = new JsonObject();
                 args.addProperty("entity_id", request.entity_id());
-                context.service().action(context.owner(), "attack_entity", args);
+                ActionOutcome outcome = context.service().localAction(context.owner(), "attack_entity", args);
+                requireSuccess(outcome);
                 return queued("attack_entity");
             });
             sendJson(exchange, 202, GSON.toJson(result));
@@ -880,6 +886,12 @@ public final class LocalAgentBridge {
             if (companion.getEyePosition().distanceToSqr(Vec3.atCenterOf(pos)) <= 4.5 * 4.5) return true;
         }
         return false;
+    }
+
+    private static void requireSuccess(ActionOutcome outcome) {
+        if (!outcome.success()) {
+            throw new IllegalStateException(outcome.reasonCode());
+        }
     }
 
     private static Map<String, Object> queued(String action) {
