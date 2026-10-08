@@ -125,6 +125,14 @@ class MemoryStore:
                     now,
                 ),
             )
+            db.execute(
+                """
+                UPDATE tasks
+                SET status='queued', progress='resuming after restart', updated_at=?
+                WHERE status='running'
+                """,
+                (now,),
+            )
             goal_count = db.execute("SELECT COUNT(*) FROM goals").fetchone()[0]
             if goal_count == 0:
                 db.execute(
