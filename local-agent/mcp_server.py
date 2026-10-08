@@ -11,19 +11,54 @@ MINECRAFT_URL = "http://127.0.0.1:8765"
 mcp = MCPServer("minecraft-companion")
 
 
+def _request(method, path, payload=None):
+    try:
+        kwargs = {"timeout": 5}
+        if payload is not None:
+            kwargs["json"] = payload
+        response = requests.request(
+            method,
+            f"{MINECRAFT_URL}{path}",
+            **kwargs,
+        )
+        try:
+            body = response.json()
+        except ValueError:
+            body = {"message": response.text[:500]}
+
+        if response.ok:
+            return body
+
+        message = (
+            body.get("error")
+            if isinstance(body, dict)
+            else None
+        ) or f"Minecraft bridge returned HTTP {response.status_code}"
+
+        return {
+            "ok": False,
+            "error": message,
+            "status": response.status_code,
+            "path": path,
+        }
+    except requests.RequestException as error:
+        return {
+            "ok": False,
+            "error": f"Minecraft bridge unavailable: {error}",
+            "path": path,
+        }
+
+
 def _get(path):
-    response = requests.get(f"{MINECRAFT_URL}{path}", timeout=5)
-    response.raise_for_status()
-    return response.json()
+    return _request("GET", path)
 
 
 def _post(path, payload=None):
-    kwargs = {"timeout": 5}
-    if payload is not None:
-        kwargs["json"] = payload
-    response = requests.post(f"{MINECRAFT_URL}{path}", **kwargs)
-    response.raise_for_status()
-    return response.json()
+    return _request("POST", path, payload)
+
+
+def _failed(value):
+    return isinstance(value, dict) and value.get("ok") is False
 
 
 def _wait_for_job(timeout=10.0):
@@ -32,7 +67,22 @@ def _wait_for_job(timeout=10.0):
 
     while time.time() < deadline:
         state = _get("/state")
+        if _failed(state):
+            return state
+
         last = state
+        if not state.get("jobActive", False):
+            last_job = state.get("lastJob") or {}
+            return {
+                "state": last_job.get("state", "IDLE"),
+                "reason": last_job.get("reason", "idle"),
+                "pos": [
+                    round(state.get("x", 0), 2),
+                    round(state.get("y", 0), 2),
+                    round(state.get("z", 0), 2),
+                ],
+            }
+
         if state.get("jobState") != "RUNNING":
             return {
                 "state": state.get("jobState"),
@@ -56,8 +106,12 @@ def observe(view: Literal["state", "entities", "blocks", "inventory"]):
     """Read one compact Minecraft observation. Prefer the narrowest useful view."""
     if view == "state":
         state = _get("/state")
+        if _failed(state):
+            return state
+
         owner = state.get("owner", {})
-        return {
+        result = {
+            "server": state.get("serverState", "running"),
             "pos": [
                 round(state.get("x", 0), 2),
                 round(state.get("y", 0), 2),
@@ -65,11 +119,6 @@ def observe(view: Literal["state", "entities", "blocks", "inventory"]):
             ],
             "hp": [state.get("health"), state.get("maxHealth")],
             "facing": state.get("facing"),
-            "job": [
-                state.get("jobType"),
-                state.get("jobState"),
-                state.get("jobReason"),
-            ],
             "owner": {
                 "distance": round(owner.get("distance", 0), 2),
                 "delta": [
@@ -80,8 +129,18 @@ def observe(view: Literal["state", "entities", "blocks", "inventory"]):
             },
         }
 
+        if state.get("jobActive"):
+            result["job"] = [
+                state.get("jobType"),
+                state.get("jobState"),
+                state.get("jobReason"),
+            ]
+        return result
+
     if view == "entities":
         result = _get("/nearby-entities")
+        if _failed(result):
+            return result
         compact = []
         for entity in result.get("entities", []):
             item = {
@@ -108,6 +167,8 @@ def observe(view: Literal["state", "entities", "blocks", "inventory"]):
 
     if view == "blocks":
         result = _get("/nearby-blocks")
+        if _failed(result):
+            return result
         return [
             {
                 "type": block["type"],
@@ -123,6 +184,8 @@ def observe(view: Literal["state", "entities", "blocks", "inventory"]):
         ]
 
     result = _get("/inventory")
+    if _failed(result):
+        return result
     return [
         {
             "slot": item["slot"],
@@ -143,7 +206,7 @@ def navigate(
     """Move the companion body or control its current navigation job."""
     if action == "move_to":
         if x is None or y is None or z is None:
-            raise ValueError("move_to requires x, y and z")
+            return {"ok": False, "error": "move_to requires x, y and z"}
         _post("/move-to", {"x": x, "y": y, "z": z})
         return _wait_for_job(12)
 
@@ -187,7 +250,7 @@ def world_action(
 
     if action == "mine":
         if x is None or y is None or z is None:
-            raise ValueError("mine requires x, y and z")
+            return {"ok": False, "error": "mine requires x, y and z"}
         _post("/mine-block", {"x": x, "y": y, "z": z})
         result = _wait_for_job(15)
         result["inventory"] = observe("inventory")
@@ -195,7 +258,7 @@ def world_action(
 
     if action == "place":
         if x is None or y is None or z is None or slot is None:
-            raise ValueError("place requires x, y, z and slot")
+            return {"ok": False, "error": "place requires x, y, z and slot"}
         _post(
             "/place-block",
             {
@@ -210,7 +273,7 @@ def world_action(
 
     if action == "attack":
         if not entity_id:
-            raise ValueError("attack requires entity_id")
+            return {"ok": False, "error": "attack requires entity_id"}
         _post("/attack-entity", {"entity_id": entity_id})
         return _wait_for_job(15)
 
@@ -219,7 +282,7 @@ def world_action(
         return {"ok": True, "inventory": observe("inventory")}
 
     if slot is None:
-        raise ValueError("equip requires slot")
+        return {"ok": False, "error": "equip requires slot"}
     return _post("/equip-slot", {"slot": slot})
 
 
