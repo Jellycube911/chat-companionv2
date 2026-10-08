@@ -362,9 +362,13 @@ async def autonomy_sensor(input_queue, runtime):
             hostile_id = nearest.get("uuid")
             hostile_distance = float(nearest.get("distance", 999))
 
-            if hostile_distance <= 5.5 and (
-                hostile_id != last_hostile_id
-                or now - last_hostile_reflex >= REFLEX_COOLDOWN
+            if (
+                hostile_distance <= 5.5
+                and state.get("jobType") != "DEFEND"
+                and (
+                    hostile_id != last_hostile_id
+                    or now - last_hostile_reflex >= REFLEX_COOLDOWN
+                )
             ):
                 try:
                     result = await asyncio.to_thread(
