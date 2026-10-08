@@ -213,23 +213,24 @@ public final class CompanionService implements AutoCloseable {
     }
     public void status(ServerPlayer owner) {
         CompanionEntity companion = find(owner.getUUID());
-        if (companion == null) { message(owner, "Companion unavailable. Use /chat spawn or return to its loaded chunk."); return; }
+        if (companion == null) {
+            message(owner, "Companion unavailable. Use /chat spawn or return to its loaded chunk.");
+            return;
+        }
+
+        String job;
+        if (companion.jobState() == CompanionEntity.JobState.RUNNING
+                || companion.jobState() == CompanionEntity.JobState.SUSPENDED) {
+            job = companion.jobType() + " " + companion.jobState() + " (" + companion.reason() + ")";
+        } else {
+            job = "IDLE";
+        }
+
         message(owner, "NeoForge 1.21.1 | health " + companion.getHealth() + "/" + companion.getMaxHealth()
-                + " | " + companion.jobType() + " " + companion.jobState() + " (" + companion.reason() + ")"
+                + " | " + job
                 + " | distance " + String.format(Locale.ROOT, "%.1f", companion.distanceTo(owner))
-                + " | navigation " + (!companion.getNavigation().isDone() ? "ACTIVE" : "IDLE")
-                + " | remote consent " + companion.remoteConsent() + " | speech " + companion.speechConsent());
-        message(owner, serverCredentialVisibility());
-        Session current = sessions.get(owner.getUUID());
-        if (current == null) { message(owner, "AI workflow not started; local movement works. Use /chat remote on to start remote conversation."); return; }
-        message(owner, "Speech pipeline " + current.speechState + " | generated voice is artificial");
-        current.actor.snapshot().thenAccept(snapshot -> server.execute(() -> {
-            if (closed) return;
-            JsonObject protocolStatus = current.remote == null ? null : snapshot.protocolRecords().get("agents/status");
-            message(owner, "AI " + (protocolStatus == null ? current.remoteState : protocolStatus) + " | session " + snapshot.remoteSessionId() + " | queue " + snapshot.messages().stream().filter(m -> m.state() == MessageState.QUEUED).count()
-                    + " | generation " + snapshot.controlGeneration() + " | storage " + (snapshot.storageHealthy() ? "HEALTHY" : snapshot.storageProblem()));
-            snapshot.tools().stream().skip(Math.max(0, snapshot.tools().size() - 3)).forEach(tool -> message(owner, tool.name() + " | execution " + tool.executionState() + " | result " + tool.resultDeliveryState()));
-        }));
+                + " | navigation " + (!companion.getNavigation().isDone() ? "ACTIVE" : "IDLE"));
+        message(owner, "Conversation, memory, and AI tools are handled by the local MCP Python agent.");
     }
     public void consent(ServerPlayer owner, String kind, boolean enabled) {
         CompanionEntity companion = find(owner.getUUID());
