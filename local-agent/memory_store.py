@@ -88,6 +88,41 @@ class MemoryStore:
                 "CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at DESC)"
             )
 
+            now = time.time()
+            db.execute(
+                """
+                INSERT OR IGNORE INTO memories(
+                    kind, memory_key, content, importance,
+                    created_at, updated_at, last_used
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "fact",
+                    "self.identity",
+                    "I am Chat, a persistent Minecraft companion with my own body, inventory, senses, memories, goals, and relationship with Alik. I am not Alik's player character.",
+                    10,
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            goal_count = db.execute("SELECT COUNT(*) FROM goals").fetchone()[0]
+            if goal_count == 0:
+                db.execute(
+                    """
+                    INSERT INTO goals(title, description, status, priority, source, created_at, updated_at)
+                    VALUES (?, ?, 'active', ?, 'system', ?, ?)
+                    """,
+                    (
+                        "Stay aware and useful",
+                        "Stay aware of Alik and the surroundings. React to immediate danger, remain nearby enough to help, and when safely idle observe or explore the nearby area instead of behaving like a statue.",
+                        4,
+                        now,
+                        now,
+                    ),
+                )
+
     def remember(self, kind, key, content, importance=5):
         kind = str(kind).strip().lower()[:40] or "fact"
         key = str(key).strip().lower()[:120]
