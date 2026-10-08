@@ -4,6 +4,7 @@ from pathlib import Path
 
 import requests
 from agents import Agent, Runner
+from agents.exceptions import MaxTurnsExceeded
 from agents.mcp import MCPServerStdio
 
 from memory_store import store
@@ -12,6 +13,9 @@ from memory_store import store
 MINECRAFT_URL = "http://127.0.0.1:8765"
 MODEL = "gpt-5.6"
 POLL_INTERVAL = 0.5
+MCP_TIMEOUT_SECONDS = 35
+MAX_AGENT_TURNS = 24
+AGENT_BUILD = "mcp-timeout-fix-2026-10-08"
 BASE_DIR = Path(__file__).resolve().parent
 
 
@@ -52,7 +56,12 @@ Treat observe(state).server as the live server condition. Historical failed or
 completed jobs are not evidence that the current server is stopping. If a tool
 returns {"ok": false, ...}, explain the specific error briefly and recover with
 another observation/action when sensible instead of treating it as a fatal MCP
-failure.
+failure. Do not repeat the exact same failed tool call more than once. If a
+physical action fails, observe state once before deciding whether a different
+action can recover.
+
+For multi-step tasks, make steady progress toward the requested goal. Do not
+announce success until the final inventory/world observation verifies it.
 
 Do not narrate protocol details such as a job being accepted or queued.
 Report meaningful results. Keep ordinary replies concise.
@@ -106,8 +115,15 @@ def build_turn_input(user_message):
 
 async def run_turn(agent, user_message, reply_in_game):
     prepared = build_turn_input(user_message)
-    result = await Runner.run(agent, prepared, max_turns=10)
-    answer = str(result.final_output or "").strip()
+    try:
+        result = await Runner.run(agent, prepared, max_turns=MAX_AGENT_TURNS)
+        answer = str(result.final_output or "").strip()
+    except MaxTurnsExceeded:
+        answer = (
+            "I stopped because this task used too many reasoning/tool steps. "
+            "I won't keep retrying blindly; check the last physical result and "
+            "give me the next instruction."
+        )
 
     if answer:
         print(f"\nAI: {answer}")
@@ -158,6 +174,7 @@ async def main():
             "cwd": str(BASE_DIR),
         },
         cache_tools_list=True,
+        client_session_timeout_seconds=MCP_TIMEOUT_SECONDS,
         require_approval="never",
     ) as mcp_server:
         agent = Agent(
@@ -171,7 +188,7 @@ async def main():
         console_task = asyncio.create_task(console_input(input_queue))
 
         print()
-        print("Minecraft companion MCP agent connected.")
+        print(f"Minecraft companion MCP agent connected. [{AGENT_BUILD}]")
         print(f"Memory DB: {store.path}")
         print("Normal Minecraft chat is now heard by Chat.")
         print("Shift-right-click Chat in Minecraft to open his inventory.")
