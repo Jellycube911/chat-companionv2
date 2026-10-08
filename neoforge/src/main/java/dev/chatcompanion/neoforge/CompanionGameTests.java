@@ -1,6 +1,7 @@
 package dev.chatcompanion.neoforge;
 
 import com.google.gson.JsonObject;
+import dev.chatcompanion.core.ActionOutcome;
 import java.util.UUID;
 import net.minecraft.core.BlockPos;
 import net.minecraft.gametest.framework.GameTest;
@@ -76,6 +77,38 @@ public final class CompanionGameTests {
                     "Mining must break the actual target block without an approval toggle");
             helper.assertTrue(companion.jobState() == CompanionEntity.JobState.COMPLETED,
                     "Mining should complete only after the block is actually changed");
+            owner.connection.disconnect(net.minecraft.network.chat.Component.literal("test complete"));
+            helper.succeed();
+        });
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 260)
+    public static void localMcpMiningNeedsNoLegacySession(GameTestHelper helper) {
+        floor(helper);
+        ServerPlayer owner = helper.makeMockServerPlayerInLevel();
+        Vec3 pos = Vec3.atBottomCenterOf(helper.absolutePos(new BlockPos(2, 2, 2)));
+        owner.setPos(pos.x, pos.y, pos.z);
+
+        CompanionEntity companion = ChatCompanion.service.spawn(owner);
+        companion.companionInventory().setItem(0, new ItemStack(Items.DIAMOND_PICKAXE));
+
+        BlockPos target = companion.blockPosition().offset(5, 0, 0);
+        helper.getLevel().setBlockAndUpdate(target, Blocks.STONE.defaultBlockState());
+
+        JsonObject args = new JsonObject();
+        args.addProperty("dimension", owner.level().dimension().location().toString());
+        args.addProperty("x", target.getX());
+        args.addProperty("y", target.getY());
+        args.addProperty("z", target.getZ());
+
+        ActionOutcome outcome = ChatCompanion.service.localAction(owner, "mine_block", args);
+        helper.assertTrue(outcome.success(), "Local MCP action should be admitted without starting a legacy remote session");
+
+        helper.runAfterDelay(160, () -> {
+            helper.assertTrue(!helper.getLevel().getBlockState(target).is(Blocks.STONE),
+                    "Direct local MCP mining must complete without /chat remote on");
+            helper.assertTrue(companion.jobState() == CompanionEntity.JobState.COMPLETED,
+                    "Direct local MCP job should reach a terminal completed state");
             owner.connection.disconnect(net.minecraft.network.chat.Component.literal("test complete"));
             helper.succeed();
         });
