@@ -20,9 +20,9 @@ jobs:
         run: python -m pip install -r local-agent/requirements.txt
       - name: Check local Python agent
         run: |
-          python -m py_compile local-agent/minecraft_agent.py local-agent/mcp_server.py local-agent/memory_store.py
+          python -m py_compile local-agent/minecraft_agent.py local-agent/mcp_server.py local-agent/memory_store.py local-agent/skill_executor.py
           cd local-agent
-          python -c "import agents, mcp, requests, memory_store, mcp_server; assert memory_store.store.list_goals('active', 5)"
+          python -c "import agents, mcp, requests, memory_store, mcp_server, skill_executor; assert memory_store.store.list_goals('active', 5)"
           python - <<'PY'
           import asyncio
           import sys
@@ -44,7 +44,7 @@ jobs:
                   names = {tool.name for tool in await server.list_tools()}
                   expected = {
                       "observe", "navigate", "world_action", "craft",
-                      "say", "remember", "recall_memory", "goals", "memory_status",
+                      "say", "remember", "recall_memory", "goals", "skills", "memory_status",
                   }
                   missing = expected - names
                   assert not missing, f"Missing MCP tools: {sorted(missing)}"
@@ -68,4 +68,5 @@ jobs:
             local-agent/minecraft_agent.py
             local-agent/mcp_server.py
             local-agent/memory_store.py
+            local-agent/skill_executor.py
             local-agent/requirements.txt
