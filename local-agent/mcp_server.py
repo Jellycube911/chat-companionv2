@@ -1,14 +1,41 @@
+import functools
 import time
+import traceback
 from typing import Literal
 
 import requests
 from mcp.server import MCPServer
 
-from memory_store import store
+from memory_store import DATA_DIR, store
 
 
 MINECRAFT_URL = "http://127.0.0.1:8765"
+ERROR_LOG = DATA_DIR / "mcp_errors.log"
 mcp = MCPServer("minecraft-companion")
+
+
+def _tool_guard(fn):
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as error:
+            try:
+                DATA_DIR.mkdir(parents=True, exist_ok=True)
+                with ERROR_LOG.open("a", encoding="utf-8") as handle:
+                    handle.write(
+                        f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
+                        f"{fn.__name__}: {type(error).__name__}: {error}\n"
+                    )
+                    handle.write(traceback.format_exc())
+            except Exception:
+                pass
+            return {
+                "ok": False,
+                "error": f"{fn.__name__} failed: {type(error).__name__}: {error}",
+            }
+
+    return wrapped
 
 
 def _request(method, path, payload=None):
@@ -102,6 +129,7 @@ def _wait_for_job(timeout=10.0):
 
 
 @mcp.tool()
+@_tool_guard
 def observe(view: Literal["state", "entities", "blocks", "inventory"]):
     """Read one compact Minecraft observation. Prefer the narrowest useful view."""
     if view == "state":
@@ -197,6 +225,7 @@ def observe(view: Literal["state", "entities", "blocks", "inventory"]):
 
 
 @mcp.tool()
+@_tool_guard
 def navigate(
     action: Literal["move_to", "move_forward", "follow", "stop", "resume"],
     x: float | None = None,
@@ -231,6 +260,7 @@ def navigate(
 
 
 @mcp.tool()
+@_tool_guard
 def world_action(
     action: Literal[
         "collect",
@@ -303,6 +333,7 @@ def world_action(
 
 
 @mcp.tool()
+@_tool_guard
 def craft(
     width: int,
     height: int,
@@ -322,12 +353,14 @@ def craft(
 
 
 @mcp.tool()
+@_tool_guard
 def say(message: str):
     """Say a deliberate extra message in Minecraft chat."""
     return _post("/say", {"message": message[:4096]})
 
 
 @mcp.tool()
+@_tool_guard
 def remember(
     kind: Literal["fact", "preference", "location", "lesson", "plan", "relationship", "skill"],
     key: str,
@@ -339,12 +372,14 @@ def remember(
 
 
 @mcp.tool()
+@_tool_guard
 def recall_memory(query: str, limit: int = 6):
     """Retrieve a few locally stored memories relevant to the current situation."""
     return store.recall(query, limit)
 
 
 @mcp.tool()
+@_tool_guard
 def memory_status():
     """Return counts and local database location without dumping memory contents."""
     return store.stats()
