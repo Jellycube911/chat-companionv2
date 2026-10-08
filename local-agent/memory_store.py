@@ -52,10 +52,40 @@ class MemoryStore:
                 """
             )
             db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS goals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    priority INTEGER NOT NULL DEFAULT 5,
+                    source TEXT NOT NULL DEFAULT 'self',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """
+            )
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                )
+                """
+            )
+            db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_memories_updated ON memories(updated_at DESC)"
             )
             db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_episodes_created ON episodes(created_at DESC)"
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_goals_status ON goals(status, priority DESC, updated_at DESC)"
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at DESC)"
             )
 
     def remember(self, kind, key, content, importance=5):
@@ -201,13 +231,147 @@ class MemoryStore:
             for row in reversed(rows)
         ]
 
+    def create_goal(self, title, description="", priority=5, source="self"):
+        title = str(title).strip()[:160]
+        description = str(description).strip()[:1200]
+        priority = max(1, min(10, int(priority)))
+        source = str(source).strip()[:40] or "self"
+        if not title:
+            raise ValueError("goal title is required")
+        now = time.time()
+        with self._connect() as db:
+            cursor = db.execute(
+                """
+                INSERT INTO goals(title, description, status, priority, source, created_at, updated_at)
+                VALUES (?, ?, 'active', ?, ?, ?, ?)
+                """,
+                (title, description, priority, source, now, now),
+            )
+            goal_id = cursor.lastrowid
+        return {
+            "ok": True,
+            "id": goal_id,
+            "title": title,
+            "status": "active",
+            "priority": priority,
+        }
+
+    def list_goals(self, status="active", limit=6):
+        status = str(status).strip().lower()
+        limit = max(1, min(20, int(limit)))
+        with self._connect() as db:
+            if status == "all":
+                rows = db.execute(
+                    """
+                    SELECT id, title, description, status, priority, source, updated_at
+                    FROM goals
+                    ORDER BY
+                        CASE status WHEN 'active' THEN 0 WHEN 'paused' THEN 1 ELSE 2 END,
+                        priority DESC, updated_at DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    """
+                    SELECT id, title, description, status, priority, source, updated_at
+                    FROM goals
+                    WHERE status=?
+                    ORDER BY priority DESC, updated_at DESC
+                    LIMIT ?
+                    """,
+                    (status, limit),
+                ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "title": row["title"],
+                "description": row["description"],
+                "status": row["status"],
+                "priority": row["priority"],
+                "source": row["source"],
+            }
+            for row in rows
+        ]
+
+    def update_goal(self, goal_id, status=None, description=None, priority=None):
+        goal_id = int(goal_id)
+        fields = []
+        values = []
+        if status is not None:
+            status = str(status).strip().lower()
+            if status not in {"active", "paused", "completed", "cancelled"}:
+                raise ValueError("invalid goal status")
+            fields.append("status=?")
+            values.append(status)
+        if description is not None:
+            fields.append("description=?")
+            values.append(str(description).strip()[:1200])
+        if priority is not None:
+            fields.append("priority=?")
+            values.append(max(1, min(10, int(priority))))
+        if not fields:
+            raise ValueError("no goal changes supplied")
+        fields.append("updated_at=?")
+        values.append(time.time())
+        values.append(goal_id)
+        with self._connect() as db:
+            changed = db.execute(
+                f"UPDATE goals SET {', '.join(fields)} WHERE id=?",
+                values,
+            ).rowcount
+        return {"ok": changed == 1, "id": goal_id}
+
+    def record_event(self, kind, summary):
+        kind = str(kind).strip().lower()[:40] or "event"
+        summary = str(summary).strip()[:1200]
+        if not summary:
+            return
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO events(kind, summary, created_at) VALUES (?, ?, ?)",
+                (kind, summary, time.time()),
+            )
+            db.execute(
+                """
+                DELETE FROM events
+                WHERE id NOT IN (
+                    SELECT id FROM events ORDER BY created_at DESC LIMIT 1000
+                )
+                """
+            )
+
+    def recent_events(self, limit=8):
+        limit = max(1, min(20, int(limit)))
+        with self._connect() as db:
+            rows = db.execute(
+                """
+                SELECT kind, summary, created_at
+                FROM events
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [
+            {"kind": row["kind"], "summary": row["summary"]}
+            for row in reversed(rows)
+        ]
+
     def stats(self):
         with self._connect() as db:
             memory_count = db.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
             episode_count = db.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
+            active_goals = db.execute(
+                "SELECT COUNT(*) FROM goals WHERE status='active'"
+            ).fetchone()[0]
+            event_count = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
         return {
             "memories": memory_count,
             "episodes": episode_count,
+            "active_goals": active_goals,
+            "events": event_count,
             "database": str(self.path),
         }
 
