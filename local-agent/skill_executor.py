@@ -211,10 +211,15 @@ def _gather_logs(task_id, target_total):
                 break
             try:
                 _mine(task_id, block)
-                _collect(task_id)
+                time.sleep(0.35)
                 after = _count_matching(
                     lambda item: any(pattern in item for pattern in LOG_PATTERNS)
                 )
+                if after <= before:
+                    _collect(task_id)
+                    after = _count_matching(
+                        lambda item: any(pattern in item for pattern in LOG_PATTERNS)
+                    )
                 if after > before:
                     before = after
                     progress_made = True
@@ -450,8 +455,11 @@ def make_stone_pickaxe(task_id, args):
                 break
             try:
                 _mine(task_id, block)
-                _collect(task_id)
+                time.sleep(0.35)
                 after = _item_counts().get("minecraft:cobblestone", 0)
+                if after <= before:
+                    _collect(task_id)
+                    after = _item_counts().get("minecraft:cobblestone", 0)
                 if after > before:
                     before = after
                     progress_made = True
