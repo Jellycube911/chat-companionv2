@@ -70,3 +70,4 @@ jobs:
             local-agent/memory_store.py
             local-agent/skill_executor.py
             local-agent/requirements.txt
+            local-agent/README.md
