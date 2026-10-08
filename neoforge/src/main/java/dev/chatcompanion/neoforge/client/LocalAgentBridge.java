@@ -151,9 +151,23 @@ public final class LocalAgentBridge {
                 result.put("yaw", companion.getYRot());
                 result.put("pitch", companion.getXRot());
                 result.put("facing", facingName(companion.getYRot()));
-                result.put("jobType", companion.jobType().name());
-                result.put("jobState", companion.jobState().name());
-                result.put("jobReason", companion.reason());
+                result.put("serverState", "running");
+
+                boolean jobActive = companion.jobState() == CompanionEntity.JobState.RUNNING
+                        || companion.jobState() == CompanionEntity.JobState.SUSPENDED;
+                result.put("jobActive", jobActive);
+
+                if (jobActive) {
+                    result.put("jobType", companion.jobType().name());
+                    result.put("jobState", companion.jobState().name());
+                    result.put("jobReason", companion.reason());
+                } else {
+                    Map<String, Object> lastJob = new LinkedHashMap<>();
+                    lastJob.put("type", companion.jobType().name());
+                    lastJob.put("state", companion.jobState().name());
+                    lastJob.put("reason", companion.reason());
+                    result.put("lastJob", lastJob);
+                }
 
                 Map<String, Object> ownerState = new LinkedHashMap<>();
                 ownerState.put("x", owner.getX());
