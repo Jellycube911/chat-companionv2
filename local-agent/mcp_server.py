@@ -470,6 +470,7 @@ def skills(
     width: int | None = None,
     length: int | None = None,
     height: int | None = None,
+    goal_id: int | None = None,
 ):
     """Start or inspect persistent local motor-skill tasks that continue without LLM babysitting."""
     if action == "list":
@@ -505,6 +506,8 @@ def skills(
         args["length"] = length
     if height is not None:
         args["height"] = height
+    if goal_id is not None:
+        args["goal_id"] = goal_id
 
     return store.create_task(skill, args)
 
