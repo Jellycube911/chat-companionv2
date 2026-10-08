@@ -182,6 +182,9 @@ async def main():
             model=MODEL,
             instructions=INSTRUCTIONS,
             mcp_servers=[mcp_server],
+            mcp_config={
+                "convert_schemas_to_strict": True,
+            },
         )
 
         chat_task = asyncio.create_task(poll_minecraft_chat(input_queue))
