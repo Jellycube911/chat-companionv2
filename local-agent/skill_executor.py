@@ -602,6 +602,18 @@ def execute_task(task):
         progress=result,
         error="",
     )
+    store.remember(
+        "skill",
+        f"skill.{skill}",
+        f"Local executor successfully completed {skill}. Latest result: {result}",
+        6,
+    )
+    goal_id = args.get("goal_id")
+    if goal_id is not None:
+        try:
+            store.update_goal(int(goal_id), status="completed")
+        except Exception:
+            pass
     store.record_event("skill_complete", f"Task #{task_id}: {result}")
     return result
 
@@ -618,14 +630,21 @@ def run_task(task):
         store.record_event("skill_cancel", f"Task #{task['id']} cancelled")
         return None
     except Exception as error:
+        message = f"{type(error).__name__}: {error}"
         store.update_task(
             task["id"],
             status="failed",
             progress="failed",
-            error=f"{type(error).__name__}: {error}",
+            error=message,
+        )
+        store.remember(
+            "lesson",
+            f"failure.{task['skill']}",
+            f"Most recent {task['skill']} failure: {message}. Do not blindly repeat the same approach; change the environment, prerequisites, or plan first.",
+            7,
         )
         store.record_event(
             "skill_failed",
-            f"Task #{task['id']} {task['skill']} failed: {type(error).__name__}: {error}",
+            f"Task #{task['id']} {task['skill']} failed: {message}",
         )
         return None
