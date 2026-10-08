@@ -70,7 +70,6 @@ def _task(task_id):
 def _progress(task_id, message):
     _task(task_id)
     store.update_task(task_id, progress=message)
-    store.record_event("skill_progress", f"Task #{task_id}: {message}")
 
 
 def _wait_job(task_id, timeout=25):
