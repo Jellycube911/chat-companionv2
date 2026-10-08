@@ -462,6 +462,55 @@ def goals(
 
 @mcp.tool()
 @_tool_guard
+def skills(
+    action: Literal["start", "status", "list", "cancel"],
+    skill: Literal["gather_logs", "make_stone_pickaxe", "build_basic_house"] | None = None,
+    task_id: int | None = None,
+    count: int | None = None,
+    width: int | None = None,
+    length: int | None = None,
+    height: int | None = None,
+):
+    """Start or inspect persistent local motor-skill tasks that continue without LLM babysitting."""
+    if action == "list":
+        return store.list_tasks(8)
+
+    if action == "status":
+        if task_id is None:
+            return {"ok": False, "error": "status requires task_id"}
+        task = store.task(task_id)
+        return task or {"ok": False, "error": "task not found"}
+
+    if action == "cancel":
+        if task_id is None:
+            return store.cancel_tasks()
+        task = store.task(task_id)
+        if task is None:
+            return {"ok": False, "error": "task not found"}
+        return store.update_task(
+            task_id,
+            status="cancelled",
+            progress="cancelled by brain",
+        )
+
+    if not skill:
+        return {"ok": False, "error": "start requires skill"}
+
+    args = {}
+    if count is not None:
+        args["count"] = count
+    if width is not None:
+        args["width"] = width
+    if length is not None:
+        args["length"] = length
+    if height is not None:
+        args["height"] = height
+
+    return store.create_task(skill, args)
+
+
+@mcp.tool()
+@_tool_guard
 def memory_status():
     """Return counts and local database location without dumping memory contents."""
     return store.stats()
