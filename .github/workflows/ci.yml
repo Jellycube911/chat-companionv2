@@ -88,6 +88,14 @@ jobs:
           assert minecraft_agent._simple_chat_reply("Hello, how are you doing") == "good lol, you?"
           feedback = minecraft_agent._feedback_reply("Yes, you are standing near a lot of them")
           assert feedback and feedback[1] is True
+          feedback = minecraft_agent._feedback_reply(
+              "you are just directly moving between trees, not actually mining them"
+          )
+          assert feedback and feedback[1] is True
+          feedback = minecraft_agent._feedback_reply(
+              "also the right tool to cut trees is an axe"
+          )
+          assert feedback and feedback[1] is True
           assert minecraft_agent._looks_like_action_request(
               "can u put the crafting table"
           )
@@ -142,6 +150,10 @@ jobs:
           assert 'QUICK CHAT CONTEXT' in source
           assert 'run_planned_action' in source
           assert 'practice_planner = Agent(' in source
+          assert 'PLAYER_CHAT_INSTRUCTIONS' in source
+          assert '_native_local_completion' in source
+          assert 'physical_action_active' in source
+          assert 'mine already' in source
 
           plan = practice_engine.parse_plan(
               '{"intent":"approach log","hypothesis":"moving closer reduces distance","action":"move_to","x":10,"y":64,"z":10}'
@@ -165,6 +177,33 @@ jobs:
           assert not practice_engine._objective_success(
               plan, before, farther, {"state": "COMPLETED"}
           )
+          generalized = practice_engine._generalized_procedure(plan)
+          assert '"x":' not in generalized
+          assert '"y":' not in generalized
+          assert '"z":' not in generalized
+
+          original_post = practice_engine._post
+          try:
+              def no_move_post(path, payload=None):
+                  raise AssertionError("nearby move_to should be rejected before HTTP")
+              practice_engine._post = no_move_post
+              nearby_before = {
+                  "state": {"pos": [10.0, 64.0, 10.0]},
+                  "inventory": [],
+              }
+              rejected = practice_engine._execute_action(
+                  {
+                      "action": "move_to",
+                      "x": 12.0,
+                      "y": 64.0,
+                      "z": 10.0,
+                  },
+                  nearby_before,
+              )
+              assert rejected["ok"] is False
+              assert "interaction range" in rejected["error"]
+          finally:
+              practice_engine._post = original_post
           assert 'chat_agent = Agent(' in source
           assert 'prefer experiment(...)' in source
           PY
