@@ -1,4 +1,5 @@
 import asyncio
+import json
 import math
 import os
 import random
@@ -21,6 +22,7 @@ from agents.mcp import MCPServerStdio
 from memory_store import store
 from skill_executor import run_task
 from action_log import DEFAULT_LOG, log_event, log_exception, start_session
+from practice_engine import execute_plan, parse_plan
 
 
 MINECRAFT_URL = "http://127.0.0.1:8765"
@@ -37,10 +39,48 @@ AMBIENT_WANDER_INTERVAL = 22.0
 REFLEX_COOLDOWN = 4.0
 LEARNING_COOLDOWN_SECONDS = 1800
 TEACHER_MAX_OUTPUT_TOKENS = 700
-AGENT_BUILD = "self-learning-local-brain-v5-action-practice-2026-10-09"
+AGENT_BUILD = "self-learning-local-brain-v6-host-practice-2026-10-09"
 BASE_DIR = Path(__file__).resolve().parent
 
 set_tracing_disabled(True)
+
+
+PRACTICE_PLANNER_INSTRUCTIONS = """
+You are the planning part of Chat, the same Minecraft companion identity.
+You do NOT execute tools yourself in this mode. Choose exactly ONE safe next
+primitive action. The Python host will validate and physically execute it.
+
+Return ONLY one JSON object. No markdown, prose, comments, function-call syntax,
+or invented results.
+
+Allowed actions:
+- scan_blocks: contains/exact, radius 1-20, limit 1-32, exposed_only
+- move_to: x,y,z
+- move_forward: only for a deliberate short test; prefer move_to when a target
+  coordinate is known
+- look_at: x,y,z
+- mine: x,y,z
+- collect
+- place: item or slot, optional x,y,z, optional face
+- equip: item or slot
+- craft: width,height,grid,times
+- idle: only if no useful safe action exists
+
+Required fields for every non-idle action:
+- intent: a short stable capability name
+- hypothesis: what this action is expected to accomplish
+- action
+
+Examples of syntax only:
+{"intent":"locate logs","hypothesis":"nearby loaded logs can be found by scanning","action":"scan_blocks","contains":["_log"],"radius":20,"limit":12}
+{"intent":"approach target block","hypothesis":"moving to the known log coordinate will reduce distance","action":"move_to","x":100,"y":64,"z":100}
+{"intent":"harvest reachable log","hypothesis":"the reachable target block can be physically mined","action":"mine","x":100,"y":64,"z":100}
+
+Never claim success. Never output experiment(...), scan_blocks(...), or any
+pseudo-call as text. Output JSON only. The host decides whether the action
+actually succeeded from Minecraft evidence.
+/no_think
+"""
 
 
 INSTRUCTIONS = """
@@ -422,6 +462,122 @@ def _chat_awareness_text(runtime):
         f"- activity={_current_activity_text()}\n"
         f"- inventory={items or ['empty']}"
     )
+
+
+def build_practice_plan_input(runtime, directive=None):
+    goals = store.list_goals("active", 4)
+    trials = store.recent_trials(4)
+    events = store.recent_events(5)
+
+    learning_query = " ".join(
+        [directive or ""]
+        + [f"{goal['title']} {goal['description']}" for goal in goals[:3]]
+    )
+    learned = store.find_learned_skills(learning_query, 3)
+
+    parts = [_awareness_text(runtime)]
+    if directive:
+        parts.append(f"CURRENT USER DIRECTIVE: {directive}")
+
+    if goals:
+        parts.append("ACTIVE GOALS:")
+        for goal in goals:
+            parts.append(
+                f"- #{goal['id']} p{goal['priority']} {goal['title']}: "
+                f"{_trim(goal['description'], 220)}"
+            )
+
+    if learned:
+        parts.append("RELEVANT LEARNED PROCEDURES:")
+        for skill in learned:
+            parts.append(
+                f"- {skill['name']} confidence={skill['confidence']}: "
+                f"{_trim(skill['procedure'], 420)}"
+            )
+
+    if trials:
+        parts.append("RECENT EXPERIMENT EVIDENCE:")
+        for trial in trials:
+            parts.append(
+                f"- intent={trial['intent']} success={trial['success']} "
+                f"hypothesis={_trim(trial['hypothesis'], 180)} "
+                f"outcome={_trim(trial['outcome'], 280)}"
+            )
+
+    if events:
+        parts.append("RECENT EVENTS/OBSERVATIONS:")
+        for event in events:
+            parts.append(
+                f"- [{event['kind']}] {_trim(event['summary'], 360)}"
+            )
+
+    parts.append(
+        "Choose ONE next primitive that best advances the current user directive "
+        "or, if there is none, the highest-priority active goal. If a specific "
+        "resource location is unknown, scan first. If target coordinates are "
+        "known, use move_to rather than guessing compass movement. Output JSON only."
+    )
+    return "\n".join(parts)
+
+
+async def run_planned_action(planner_agent, runtime, directive=None, source="practice"):
+    started = time.monotonic()
+    prompt = build_practice_plan_input(runtime, directive=directive)
+    log_event(
+        "practice_host",
+        "planner_start",
+        source=source,
+        directive=directive,
+        active_goals=store.list_goals("active", 4),
+    )
+
+    try:
+        result = await asyncio.wait_for(
+            Runner.run(planner_agent, prompt, max_turns=1),
+            timeout=30.0,
+        )
+        raw = str(result.final_output or "").strip()
+    except asyncio.TimeoutError as error:
+        log_exception(
+            "practice_host",
+            "planner_timeout",
+            error,
+            source=source,
+            directive=directive,
+        )
+        store.record_event(
+            "practice_error",
+            "Local planner timed out before proposing an action.",
+        )
+        return None
+
+    plan = parse_plan(raw)
+    if plan is None:
+        log_event(
+            "practice_host",
+            "invalid_plan",
+            source=source,
+            directive=directive,
+            raw=raw,
+        )
+        store.record_event(
+            "practice_error",
+            f"Planner returned invalid action JSON: {_trim(raw, 500)}",
+        )
+        return None
+
+    execution = await asyncio.to_thread(execute_plan, plan)
+    await update_awareness(runtime)
+    log_event(
+        "practice_host",
+        "planner_end",
+        source=source,
+        directive=directive,
+        elapsed_ms=round((time.monotonic() - started) * 1000),
+        plan=plan,
+        execution=execution,
+    )
+    return execution
 
 
 def build_turn_input(message, source, runtime):
@@ -839,6 +995,17 @@ def _feedback_reply(text):
     if normalized.startswith(negative):
         return "yea, you're right", True
 
+    if any(
+        phrase in normalized
+        for phrase in (
+            "you are close enough",
+            "you're close enough",
+            "ur close enough",
+            "close enough",
+        )
+    ):
+        return "got it", True
+
     if (
         any(word in normalized for word in ("tree", "trees", "log", "logs"))
         and any(
@@ -870,6 +1037,9 @@ def _feedback_reply(text):
 
 def _looks_like_action_request(text):
     normalized = text.lower().strip().rstrip(".!?")
+    for prefix in ("come on ", "cmon ", "c'mon ", "mate ", "hey "):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix):].lstrip()
     if any(
         phrase in normalized
         for phrase in ("explain", "tell me how", "how do", "how can", "what is", "why ")
@@ -1732,6 +1902,11 @@ async def main():
             model=model,
             instructions=INSTRUCTIONS,
         )
+        practice_planner = Agent(
+            name="Chat",
+            model=model,
+            instructions=PRACTICE_PLANNER_INSTRUCTIONS,
+        )
 
         tasks = [
             asyncio.create_task(poll_minecraft_chat(input_queue, runtime)),
@@ -1779,20 +1954,31 @@ async def main():
                     if source == "task":
                         reply_in_game = "completed" in message or "failed" in message
 
-                    turn_agent = (
-                        chat_agent
-                        if source in {"minecraft", "console"}
-                        else agent
-                    )
-                    reasoning = asyncio.create_task(
-                        run_turn(
-                            turn_agent,
-                            message,
-                            source=source,
-                            reply_in_game=reply_in_game,
-                            runtime=runtime,
+                    if source in {"practice", "command"}:
+                        directive = message if source == "command" else None
+                        reasoning = asyncio.create_task(
+                            run_planned_action(
+                                practice_planner,
+                                runtime,
+                                directive=directive,
+                                source=source,
+                            )
                         )
-                    )
+                    else:
+                        turn_agent = (
+                            chat_agent
+                            if source in {"minecraft", "console"}
+                            else agent
+                        )
+                        reasoning = asyncio.create_task(
+                            run_turn(
+                                turn_agent,
+                                message,
+                                source=source,
+                                reply_in_game=reply_in_game,
+                                runtime=runtime,
+                            )
+                        )
                     runtime["reasoning_task"] = reasoning
                     runtime["reasoning_source"] = source
                     try:
