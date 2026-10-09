@@ -103,12 +103,54 @@ jobs:
           import minecraft_agent
           import mcp_server
           import practice_engine
+          import memory_store
 
           assert hasattr(minecraft_agent, "INSTRUCTIONS")
           assert hasattr(minecraft_agent, "PLAYER_CHAT_INSTRUCTIONS")
           assert hasattr(minecraft_agent, "PRACTICE_PLANNER_INSTRUCTIONS")
           assert minecraft_agent.PLAYER_CHAT_INSTRUCTIONS
           assert minecraft_agent.PRACTICE_PLANNER_INSTRUCTIONS
+
+          assert minecraft_agent._looks_like_direct_request(
+              "yeah so can u make a crafting table now"
+          )
+          assert minecraft_agent._looks_like_action_request(
+              "yeah so can u make a crafting table now"
+          )
+          runtime = {
+              "awareness": {
+                  "inventory": [
+                      {"slot": 5, "item": "minecraft:jungle_planks", "count": 6},
+                      {"slot": 7, "item": "minecraft:crafting_table", "count": 2},
+                      {"slot": 9, "item": "minecraft:jungle_log", "count": 12},
+                      {"slot": 10, "item": "minecraft:oak_log", "count": 2},
+                  ]
+              }
+          }
+          inventory_reply = minecraft_agent._inventory_fact_reply(
+              "you do have wood tho",
+              runtime,
+          )
+          assert "14 logs" in inventory_reply
+          assert "6 planks" in inventory_reply
+
+          parsed_log_plan = practice_engine.parse_plan(
+              '{"intent":"mine reachable log","hypothesis":"test","action":"mine","x":1,"y":2,"z":3}'
+          )
+          assert parsed_log_plan["expected_contains"] == "_log"
+
+          self_goal = memory_store.store.create_goal(
+              "CI self priority clamp",
+              "test",
+              10,
+              "self",
+          )
+          created = next(
+              goal for goal in memory_store.store.list_goals("active", 20)
+              if goal["id"] == self_goal["id"]
+          )
+          assert created["priority"] == 4
+          memory_store.store.update_goal(self_goal["id"], status="cancelled")
 
           assert minecraft_agent._simple_chat_reply("hey") == "hey"
           assert minecraft_agent._simple_chat_reply("whats up") is not None
@@ -192,6 +234,10 @@ jobs:
           assert 'PERSISTENT EFFICIENCY REWARD MEMORY' in source
           assert '_report_planned_outcome' in source
           assert '_reconcile_user_goals' in source
+          assert 'goal_satisfied_before_planning' in source
+          assert 'physical_job_in_progress' in source
+          assert 'post_goal_pause_until' in source
+          assert '_inventory_fact_reply' in source
 
           service_source = open(
               "../neoforge/src/main/java/dev/chatcompanion/neoforge/CompanionService.java",
@@ -208,8 +254,11 @@ jobs:
           assert "destroyBlockProgress" in service_source
           assert "break_ticks=" in service_source
           assert "companion.swing(InteractionHand.MAIN_HAND)" in service_source
+          assert "companion.setYHeadRot(yaw)" in service_source
           assert "jobProgress()" in entity_source
           assert 'result.put("jobProgress", companion.jobProgress())' in bridge_source
+          assert 'created.createContext("/block-at", LocalAgentBridge::handleBlockAt)' in bridge_source
+          assert "private static void handleBlockAt" in bridge_source
 
           plan = practice_engine.parse_plan(
               '{"intent":"approach log","hypothesis":"moving closer reduces distance","action":"move_to","x":10,"y":64,"z":10}'
@@ -270,6 +319,40 @@ jobs:
               assert "interaction range" in rejected["error"]
           finally:
               practice_engine._post = original_post
+
+          original_post = practice_engine._post
+          try:
+              calls = []
+              def block_guard_post(path, payload=None):
+                  calls.append((path, payload))
+                  if path == "/block-at":
+                      return {
+                          "ok": True,
+                          "type": "minecraft:jungle_leaves",
+                          "air": False,
+                      }
+                  raise AssertionError(
+                      "mismatched block must be rejected before mine request"
+                  )
+              practice_engine._post = block_guard_post
+              mismatch = practice_engine._execute_action(
+                  {
+                      "action": "mine",
+                      "intent": "mine reachable log",
+                      "expected_contains": "_log",
+                      "x": 1,
+                      "y": 64,
+                      "z": 1,
+                  },
+                  {"state": {"pos": [1, 64, 3]}, "inventory": []},
+              )
+              assert mismatch["ok"] is False
+              assert mismatch["error"] == "target_block_mismatch"
+              assert mismatch["observed_block"] == "minecraft:jungle_leaves"
+              assert calls[0][0] == "/block-at"
+          finally:
+              practice_engine._post = original_post
+
           assert 'chat_agent = Agent(' in source
           assert 'prefer experiment(...)' in source
           PY
