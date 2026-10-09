@@ -46,6 +46,25 @@ def _tool_guard(fn):
                 result=result,
                 **snapshot,
             )
+            failed_result = (
+                isinstance(result, dict)
+                and (
+                    result.get("ok") is False
+                    or result.get("state") in {"FAILED", "CANCELLED"}
+                )
+            )
+            if failed_result and fn.__name__ in {
+                "navigate",
+                "world_action",
+                "craft",
+            }:
+                store.record_event(
+                    "tool_failure",
+                    (
+                        f"{fn.__name__} failed with args={kwargs}: "
+                        f"{result}"
+                    )[:1200],
+                )
             return result
         except Exception as error:
             log_exception(
