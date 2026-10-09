@@ -326,6 +326,49 @@ class MemoryStore:
                 """
             )
 
+            bad_skill_ids = [
+                row["id"]
+                for row in db.execute(
+                    """
+                    SELECT id FROM learned_skills
+                    WHERE lower(intent)='navigate towards log coordinates'
+                    """
+                ).fetchall()
+            ]
+            if bad_skill_ids:
+                placeholders = ",".join("?" for _ in bad_skill_ids)
+                db.execute(
+                    f"DELETE FROM skill_edges WHERE parent_skill_id IN ({placeholders}) OR child_skill_id IN ({placeholders})",
+                    [*bad_skill_ids, *bad_skill_ids],
+                )
+                db.execute(
+                    f"DELETE FROM skill_trials WHERE skill_id IN ({placeholders})",
+                    bad_skill_ids,
+                )
+                db.execute(
+                    f"DELETE FROM learned_skills WHERE id IN ({placeholders})",
+                    bad_skill_ids,
+                )
+            db.execute(
+                """
+                DELETE FROM skill_trials
+                WHERE lower(intent)='navigate towards log coordinates'
+                """
+            )
+            db.execute(
+                """
+                UPDATE goals
+                SET description='Gather 8 logs for Alik.', updated_at=?
+                WHERE status='active'
+                  AND lower(title)='gather 8 logs'
+                  AND (
+                    lower(description) LIKE '%didnt get%'
+                    OR lower(description) LIKE '%did not get%'
+                  )
+                """,
+                (now,),
+            )
+
             goal_count = db.execute("SELECT COUNT(*) FROM goals").fetchone()[0]
             if goal_count == 0:
                 db.execute(
