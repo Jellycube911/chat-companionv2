@@ -37,7 +37,7 @@ AMBIENT_WANDER_INTERVAL = 22.0
 REFLEX_COOLDOWN = 4.0
 LEARNING_COOLDOWN_SECONDS = 1800
 TEACHER_MAX_OUTPUT_TOKENS = 700
-AGENT_BUILD = "self-learning-local-brain-v4-player-chat-2026-10-09"
+AGENT_BUILD = "self-learning-local-brain-v5-action-practice-2026-10-09"
 BASE_DIR = Path(__file__).resolve().parent
 
 set_tracing_disabled(True)
@@ -568,16 +568,16 @@ def build_turn_input(message, source, runtime):
     elif source == "practice":
         parts.append(
             "INTERNAL PRACTICE TURN: not a message from Alik. Never chat, ask "
-            "questions, or explain observations. Advance the "
-            "highest-priority active goal through one small evidence-producing "
-            "experiment or one verified step of an already learned procedure. "
-            "Search skill_memory first. Use primitive actions, observe the "
-            "result, and record the trial. A PRACTICE turn is incomplete until "
-            "skill_memory(action='trial', ...) records the attempted hypothesis "
-            "and actual observed outcome, unless no physical experiment was safe "
-            "or possible. When the goal is visibly achieved, update the goal to "
-            "completed. Keep this turn focused. End with a tiny internal status "
-            "only after recording the experiment."
+            "questions, or explain observations. Advance the highest-priority "
+            "active goal through ONE small evidence-producing action. Prefer "
+            "experiment(...) because it performs the physical action and records "
+            "verified learning evidence automatically. Use scan_blocks(...) when "
+            "you need to locate a resource. IMPORTANT: never output tool arguments "
+            "or an action object as JSON/text. If you want an action to happen, "
+            "CALL the MCP tool. A text description of an action does nothing. "
+            "If no safe useful physical action is possible, inspect once and stop. "
+            "When the goal is visibly achieved, update the goal to completed. "
+            "After the tool result, end with at most 8 words of internal status."
         )
         parts.append("/no_think")
     elif source == "command":
@@ -643,8 +643,20 @@ async def run_turn(agent, message, source, reply_in_game, runtime):
 
     if answer and source in {"minecraft", "console"}:
         print(f"\nAI: {answer}")
+    elif answer and source == "task":
+        print(f"\n[TASK] {_format_ingame_reply(answer)}")
+    elif answer and source == "learning":
+        print(f"\n[LEARNING] {_trim(answer, 240)}")
     elif answer:
-        print(f"\n[{source.upper()}] {answer}")
+        # Internal autonomy/practice/command output belongs in the action log.
+        # Printing raw model output here caused tool arguments to look like
+        # actions even when the local model had merely emitted JSON as text.
+        log_event(
+            "agent",
+            "internal_output",
+            source=source,
+            reply=answer,
+        )
 
     if ack_task is not None and not ack_task.done():
         ack_task.cancel()
