@@ -142,6 +142,22 @@ class PracticeRegressions(unittest.TestCase):
         self.assertFalse(agent._plan_matches_user_goal(plan, goal))
         self.assertTrue(agent._plan_matches_user_goal(plan, goal, text))
 
+    def test_mining_occlusion_is_cached_but_not_falsely_successful(self):
+        blocked = {"ok": False, "result": {
+            "state": "FAILED",
+            "reason": "mining_blocked|block=minecraft:vine|at=225,71,-81",
+        }}
+        self.assertTrue(agent._target_failure_needs_replan(blocked))
+        self.assertTrue(agent._target_failure_needs_replan({
+            "ok": False, "result": {"state": "FAILED", "reason": "mining_alignment_timeout"}
+        }))
+        self.assertFalse(agent._target_failure_needs_replan({
+            "ok": True, "result": {
+                "state": "COMPLETED",
+                "reason": "block_mined|block=minecraft:jungle_log|tool=minecraft:wooden_axe|break_ticks=6",
+            }
+        }))
+
     def test_target_key_ignores_hypothesis_wording(self):
         a = {"action": "mine", "x": 205, "y": 71, "z": -120, "hypothesis": "A"}
         b = dict(a, hypothesis="B", tool="minecraft:string")

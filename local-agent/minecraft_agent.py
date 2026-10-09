@@ -844,6 +844,12 @@ async def _report_planned_outcome(runtime, execution, source):
 
     streaks[streak_key] = int(streaks.get(streak_key, 0)) + 1
     reason = _execution_failure_reason(execution)
+    if reason.startswith("mining_blocked|"):
+        parts = dict(
+            field.split("=", 1) for field in reason.split("|")[1:] if "=" in field
+        )
+        block = str(parts.get("block") or "something").removeprefix("minecraft:")
+        reason = f"{block} blocks my view"
     short_reasons = {
         "target_block_mismatch": "wrong block, rechecking",
         "target_block_is_air": "block is already gone",
@@ -897,6 +903,16 @@ def _current_user_subgoal(runtime):
     if time.monotonic() - float(subgoal.get("at", 0.0)) >= 120.0:
         return ""
     return str(subgoal.get("text") or "")
+
+
+def _target_failure_needs_replan(execution):
+    """Quarantine invalid target coordinates after observed physical failures."""
+    result = (execution or {}).get("result") or {}
+    reason = str(result.get("error") or result.get("reason") or "")
+    return reason in {
+        "target_block_mismatch", "target_block_is_air", "destination_occupied",
+        "mining_alignment_timeout",
+    } or reason.startswith("mining_blocked|")
 
 
 def _plan_target_key(plan):
@@ -1081,13 +1097,18 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         execution = await asyncio.to_thread(execute_plan, plan)
     finally:
         runtime["physical_action_active"] = False
-    reason = str((execution.get("result") or {}).get("error") or "")
-    if target_key and reason in {
-        "target_block_mismatch", "target_block_is_air", "destination_occupied"
-    }:
+    result = execution.get("result") or {}
+    reason = str(result.get("error") or result.get("reason") or "")
+    if target_key and _target_failure_needs_replan(execution):
         invalid[target_key] = (time.monotonic(), reason)
     elif target_key and execution.get("ok"):
         invalid.pop(target_key, None)
+        if plan.get("action") == "mine":
+            # Mining changes the physical scene. Previously occluded targets
+            # may now be reachable, so let the brain revisit them.
+            for key, (_, why) in list(invalid.items()):
+                if why.startswith("mining_blocked|"):
+                    invalid.pop(key, None)
     await update_awareness(runtime)
     log_event(
         "practice_host",
