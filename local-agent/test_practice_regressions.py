@@ -134,6 +134,14 @@ class PracticeRegressions(unittest.TestCase):
                 post.assert_called_once_with("/follow-owner")
         asyncio.run(run())
 
+    def test_natural_user_instruction_is_actionable(self):
+        text = "which spot? u need to place a crafting table and craft it"
+        self.assertTrue(agent._looks_like_action_request(text))
+        goal = {"title": "Obtain an axe"}
+        plan = {"action": "place", "intent": "place crafting table", "hypothesis": "test placement"}
+        self.assertFalse(agent._plan_matches_user_goal(plan, goal))
+        self.assertTrue(agent._plan_matches_user_goal(plan, goal, text))
+
     def test_target_key_ignores_hypothesis_wording(self):
         a = {"action": "mine", "x": 205, "y": 71, "z": -120, "hypothesis": "A"}
         b = dict(a, hypothesis="B", tool="minecraft:string")

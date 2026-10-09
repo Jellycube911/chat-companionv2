@@ -604,6 +604,9 @@ def build_practice_plan_input(runtime, directive=None):
     parts = [_awareness_text(runtime)]
     if directive:
         parts.append(f"CURRENT USER DIRECTIVE: {directive}")
+    recent_subgoal = _current_user_subgoal(runtime)
+    if recent_subgoal:
+        parts.append(f"RECENT USER INSTRUCTION (temporary subgoal): {recent_subgoal}")
 
     if goals:
         parts.append("ACTIVE GOALS:")
@@ -865,7 +868,7 @@ async def _report_planned_outcome(runtime, execution, source):
         )
 
 
-def _plan_matches_user_goal(plan, goal):
+def _plan_matches_user_goal(plan, goal, subgoal=""):
     """Guard against objective drift without prescribing Minecraft recipes."""
     if not goal or plan.get("action") in {"idle", "scan_blocks"}:
         return True
@@ -877,7 +880,23 @@ def _plan_matches_user_goal(plan, goal):
     rationale = " ".join(
         str(plan.get(key) or "").lower() for key in ("intent", "hypothesis")
     )
-    return any(word in rationale for word in keywords)
+    if any(word in rationale for word in keywords):
+        return True
+    if subgoal:
+        subgoal_words = set(re.findall(r"[a-z]{3,}", subgoal.lower())) - {
+            "which", "what", "where", "spot", "need", "should", "you",
+            "craft", "make", "will", "and", "the", "with", "that", "this",
+            "said", "please", "have", "your"
+        }
+        return bool(subgoal_words & set(re.findall(r"[a-z]{3,}", rationale)))
+    return False
+
+
+def _current_user_subgoal(runtime):
+    subgoal = runtime.get("user_subgoal") or {}
+    if time.monotonic() - float(subgoal.get("at", 0.0)) >= 120.0:
+        return ""
+    return str(subgoal.get("text") or "")
 
 
 def _plan_target_key(plan):
@@ -1037,7 +1056,7 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         (goal for goal in store.list_goals("active", 20) if goal.get("source") == "user"),
         None,
     )
-    if not _plan_matches_user_goal(plan, user_goal):
+    if not _plan_matches_user_goal(plan, user_goal, directive or _current_user_subgoal(runtime)):
         message = f"plan_unrelated_to_user_goal:{user_goal['title']}"
         store.record_event("practice_error", message)
         log_event("practice_host", "goal_drift_rejected", plan=plan, goal=user_goal["title"])
@@ -1722,7 +1741,10 @@ def _looks_like_action_request(text):
         return True
     if normalized.startswith(("can you ", "can u ", "please ")):
         return any(verb in normalized for verb in verbs)
-    return False
+    return bool(re.search(
+        r"\b(?:u|you)\s+(?:need|should)\s+to\s+(?:place|put|mine|break|craft|gather|collect|build|make|chop|cut|move|equip)\b",
+        normalized,
+    ))
 
 
 async def fast_chat_reflex(text, runtime=None):
@@ -1875,6 +1897,8 @@ async def fast_chat_reflex(text, runtime=None):
         }
 
     if _looks_like_action_request(text):
+        if runtime is not None:
+            runtime["user_subgoal"] = {"at": time.monotonic(), "text": text}
         store.record_event(
             "user_instruction",
             f"Alik asked: {text}",
