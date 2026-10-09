@@ -79,6 +79,55 @@ jobs:
           PY
           COMPANION_MODEL_PROVIDER=openai COMPANION_OPENAI_MODEL=gpt-5.6-luna python -c "import minecraft_agent; _, label = minecraft_agent.choose_model(); assert label == 'openai:gpt-5.6-luna', label; assert 'sol' not in label.lower(), label; print('brain model fallback:', label)"
           python - <<'PY'
+          import minecraft_agent
+          import mcp_server
+
+          assert minecraft_agent._simple_chat_reply("hey") == "hey"
+          assert minecraft_agent._looks_like_action_request(
+              "can u put the crafting table"
+          )
+          assert not minecraft_agent._looks_like_action_request(
+              "can you explain how to craft a table"
+          )
+
+          original_observe = mcp_server._observe
+          original_get = mcp_server._get
+          original_post = mcp_server._post
+          original_wait = mcp_server._wait_for_job
+          try:
+              mcp_server._observe = lambda view: (
+                  [{"slot": 7, "item": "minecraft:crafting_table", "count": 2}]
+                  if view == "inventory"
+                  else {}
+              )
+              assert mcp_server._inventory_slot_for_item(
+                  "minecraft:crafting_table"
+              ) == 7
+
+              mcp_server._get = lambda path: {
+                  "x": 10.2,
+                  "y": 64.0,
+                  "z": -3.8,
+                  "serverState": "running",
+              }
+              mcp_server._post = lambda path, payload=None: {"ok": True}
+              mcp_server._wait_for_job = lambda timeout=10: {
+                  "state": "COMPLETED",
+                  "reason": "ok",
+              }
+              placed = mcp_server._place_slot_nearby(7)
+              assert placed["state"] == "COMPLETED"
+              assert placed["slot"] == 7
+          finally:
+              mcp_server._observe = original_observe
+              mcp_server._get = original_get
+              mcp_server._post = original_post
+              mcp_server._wait_for_job = original_wait
+
+          source = open("minecraft_agent.py", encoding="utf-8").read()
+          assert 'source in {"autonomy", "event", "task", "learning", "practice"}' in source
+          PY
+          python - <<'PY'
           import asyncio
           import sys
           from pathlib import Path
