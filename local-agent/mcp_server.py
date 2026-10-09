@@ -472,7 +472,7 @@ def skills(
     height: int | None = None,
     goal_id: int | None = None,
 ):
-    """Start or inspect persistent local motor-skill tasks that continue without LLM babysitting."""
+    """Legacy deterministic fallback skills. Prefer self-learning through primitive tools and skill_memory for normal high-level goals."""
     if action == "list":
         return store.list_tasks(8)
 
