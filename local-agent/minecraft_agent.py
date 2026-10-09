@@ -1436,8 +1436,13 @@ def _inventory_fact_reply(text, runtime):
             "you have",
             "u have",
             "got any",
+            "got some",
+            "you got",
+            "u got",
             "do you got",
             "do u got",
+            "dont u",
+            "don't you",
         )
     )
 
