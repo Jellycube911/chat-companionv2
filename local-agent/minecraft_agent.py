@@ -622,6 +622,40 @@ def _simple_chat_reply(text):
     return None
 
 
+def _looks_like_action_request(text):
+    normalized = text.lower().strip().rstrip(".!?")
+    if any(
+        phrase in normalized
+        for phrase in ("explain", "tell me how", "how do", "how can", "what is", "why ")
+    ):
+        return False
+
+    verbs = (
+        "place",
+        "put",
+        "mine",
+        "break",
+        "craft",
+        "gather",
+        "collect",
+        "build",
+        "make",
+        "chop",
+        "cut",
+        "attack",
+        "pick up",
+        "move",
+        "go ",
+        "look at",
+        "equip",
+    )
+    if any(normalized.startswith(verb) for verb in verbs):
+        return True
+    if normalized.startswith(("can you ", "can u ", "please ")):
+        return any(verb in normalized for verb in verbs)
+    return False
+
+
 async def fast_chat_reflex(text):
     normalized = text.lower().strip().rstrip(".!?")
 
@@ -697,6 +731,13 @@ async def fast_chat_reflex(text):
             f"Fast chat reflex failed: {type(error).__name__}: {error}",
         )
         return None
+
+    if _looks_like_action_request(text):
+        return {
+            "handled": True,
+            "reply": "yep, on it",
+            "background": True,
+        }
 
     return None
 
