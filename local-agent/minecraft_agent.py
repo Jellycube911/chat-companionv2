@@ -808,6 +808,18 @@ async def _report_planned_outcome(runtime, execution, source):
 
 async def run_planned_action(planner_agent, runtime, directive=None, source="practice"):
     started = time.monotonic()
+
+    awareness_inventory = (runtime.get("awareness") or {}).get("inventory") or []
+    for message in _reconcile_user_goals(
+        {"after": {"inventory": awareness_inventory}}
+    ):
+        await _notify_once(
+            runtime,
+            "goal_complete:" + message,
+            message,
+            cooldown=2.0,
+        )
+
     prompt = build_practice_plan_input(runtime, directive=directive)
     log_event(
         "practice_host",
