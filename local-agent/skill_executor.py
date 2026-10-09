@@ -171,7 +171,7 @@ def _collect(task_id):
     return _wait_job(task_id, 18)
 
 
-def _mine(task_id, block):
+def _mine(task_id, block, timeout=20):
     _progress(
         task_id,
         f"mining {block['type']} at {block['x']} {block['y']} {block['z']}",
@@ -180,7 +180,7 @@ def _mine(task_id, block):
         task_id,
         "/mine-block",
         {"x": block["x"], "y": block["y"], "z": block["z"]},
-        30,
+        timeout,
     )
 
 
@@ -239,7 +239,7 @@ def _clear_foliage_around(task_id, target, max_blocks=10):
                 task_id,
                 f"clearing {block['type']} blocking access to a log",
             )
-            _mine(task_id, block)
+            _mine(task_id, block, timeout=8)
             cleared += 1
         except SkillFailure:
             continue
@@ -355,7 +355,7 @@ def _gather_logs(task_id, target_total, use_axe=True):
                     _clear_foliage_around(task_id, block, max_blocks=8)
 
                 try:
-                    _mine(task_id, block)
+                    _mine(task_id, block, timeout=9)
                 except SkillFailure:
                     cleared = _clear_foliage_around(
                         task_id,
@@ -364,9 +364,9 @@ def _gather_logs(task_id, target_total, use_axe=True):
                     )
                     if cleared <= 0:
                         continue
-                    _mine(task_id, block)
+                    _mine(task_id, block, timeout=12)
 
-                time.sleep(0.25)
+                time.sleep(0.2)
                 after = _count_matching(
                     lambda item: any(pattern in item for pattern in LOG_PATTERNS)
                 )
