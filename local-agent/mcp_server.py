@@ -514,6 +514,62 @@ def skills(
 
 @mcp.tool()
 @_tool_guard
+def skill_memory(
+    action: Literal["search", "save", "trial", "history", "list"],
+    query: str | None = None,
+    name: str | None = None,
+    intent: str | None = None,
+    procedure: str | None = None,
+    skill_id: int | None = None,
+    hypothesis: str | None = None,
+    actions: str | None = None,
+    outcome: str | None = None,
+    success: bool | None = None,
+):
+    """Persistent self-learned skills and experiment evidence. Procedures are plans over safe MCP primitives, never executable code."""
+    if action == "list":
+        return store.list_learned_skills(12)
+
+    if action == "search":
+        return store.find_learned_skills(query or intent or "", 6)
+
+    if action == "save":
+        if not name or not intent or not procedure:
+            return {
+                "ok": False,
+                "error": "save requires name, intent and procedure",
+            }
+        return store.save_learned_skill(
+            name,
+            intent,
+            procedure,
+            source="self",
+        )
+
+    if action == "history":
+        if not intent:
+            return {"ok": False, "error": "history requires intent"}
+        return store.recent_skill_trials(intent, 8)
+
+    if not intent or not hypothesis or not actions or outcome is None or success is None:
+        return {
+            "ok": False,
+            "error": (
+                "trial requires intent, hypothesis, actions, outcome and success"
+            ),
+        }
+    return store.record_skill_trial(
+        intent,
+        hypothesis,
+        actions,
+        outcome,
+        success,
+        skill_id=skill_id,
+    )
+
+
+@mcp.tool()
+@_tool_guard
 def learn(
     action: Literal["request", "status", "list"],
     topic: str | None = None,
