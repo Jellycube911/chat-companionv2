@@ -205,6 +205,18 @@ class PracticeRegressions(unittest.TestCase):
             "haven't confirmed any movement yet",
         )
 
+    def test_multistep_goal_allows_linked_prerequisites(self):
+        goal = {"id": 9, "title": "Obtain an axe", "source": "user"}
+        step = {
+            "action": "craft",
+            "intent": "make wooden planks",
+            "hypothesis": "turn available wood into a usable material",
+            "goal_id": 9,
+            "goal_reason": "preparing an intermediate material for the active user goal",
+        }
+        self.assertTrue(agent._plan_matches_user_goal(step, goal))
+        self.assertFalse(agent._plan_matches_user_goal(dict(step, goal_id=42), goal))
+
     def test_target_key_ignores_hypothesis_wording(self):
         a = {"action": "mine", "x": 205, "y": 71, "z": -120, "hypothesis": "A"}
         b = dict(a, hypothesis="B", tool="minecraft:string")

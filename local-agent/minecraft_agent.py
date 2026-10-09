@@ -668,7 +668,12 @@ def build_practice_plan_input(runtime, directive=None):
 
     parts.append(
         "Choose ONE next primitive that best advances the current user directive "
-        "or, if there is none, the highest-priority active goal. If a resource "
+        "or, if there is none, the highest-priority active goal. "
+        "For every action supporting the active USER goal, include numeric goal_id "
+        "and a short goal_reason saying WHY this experiment is a prerequisite. "
+        "An action like crafting an intermediate material can support a goal "
+        "without naming the final item in its action intent. "
+        "If a resource "
         "location is unknown, scan first. IMPORTANT API SEMANTICS: mine already "
         "approaches/faces/reaches the target block. Never move_to the coordinate "
         "of a solid block you intend to mine. move_to is only for a standable "
@@ -878,6 +883,15 @@ def _plan_matches_user_goal(plan, goal, subgoal=""):
     """Guard against objective drift without prescribing Minecraft recipes."""
     if not goal or plan.get("action") in {"idle", "scan_blocks"}:
         return True
+    # A tool-building prerequisite does not have to name the finished item.
+    # Require an explicit link to the real active goal, not a Minecraft recipe.
+    if goal.get("id") is not None:
+        try:
+            linked = int(plan.get("goal_id")) == int(goal["id"])
+        except (TypeError, ValueError):
+            linked = False
+        if linked and len(str(plan.get("goal_reason") or "").strip()) >= 8:
+            return True
     keywords = set(re.findall(r"[a-z]{3,}", str(goal.get("title") or "").lower())) - {
         "obtain", "make", "craft", "gather", "build", "some", "with", "from", "your"
     }
@@ -1104,7 +1118,25 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         message = f"plan_unrelated_to_user_goal:{user_goal['title']}"
         store.record_event("practice_error", message)
         log_event("practice_host", "goal_drift_rejected", plan=plan, goal=user_goal["title"])
-        return {"ok": False, "status": "goal_drift", "plan": plan, "error": message}
+        # One extra local attempt gives the planner a chance to explain a real
+        # prerequisite instead of silently losing this entire practice tick.
+        revision = await _local_fast_completion(
+            runtime,
+            PRACTICE_PLANNER_INSTRUCTIONS,
+            prompt + "\nREJECTED ACTION: " + json.dumps(plan, ensure_ascii=False)
+            + f"\nACTIVE USER GOAL: #{user_goal['id']} {user_goal['title']}. "
+            "Choose a real prerequisite experiment, provide goal_id and "
+            "goal_reason linking it to this goal, or scan. Return JSON only.",
+            json_mode=True,
+            max_tokens=180,
+        )
+        revised_plan = parse_plan(revision)
+        if revised_plan is None or not _plan_matches_user_goal(
+            revised_plan, user_goal, directive or _current_user_subgoal(runtime)
+        ):
+            return {"ok": False, "status": "goal_drift", "plan": plan, "error": message}
+        log_event("practice_host", "goal_drift_replanned", plan=revised_plan)
+        plan = revised_plan
 
     target_key = _plan_target_key(plan)
     invalid = runtime.setdefault("invalid_targets", {})
