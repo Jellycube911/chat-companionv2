@@ -174,3 +174,36 @@ to test, not trusted knowledge by itself.
 
 User chat preempts background PRACTICE reasoning. Physical Minecraft jobs are
 allowed to finish their current action before another practice turn starts.
+
+
+## Shareable recent-action diagnostics
+
+Each brain startup creates a fresh diagnostic log at:
+
+```text
+data/recent_actions.jsonl
+```
+
+The previous run is preserved at:
+
+```text
+data/recent_actions.previous.jsonl
+```
+
+Send `recent_actions.jsonl` when a session behaves strangely. It is structured
+JSON Lines and records meaningful behavior rather than every sensor poll:
+
+- user messages and agent replies
+- queued autonomy/practice events
+- MCP tool calls and results
+- navigation, mining, placing, combat and crafting
+- compact state/inventory snapshots after physical MCP actions
+- learned-skill experiments and memory-tool calls
+- legacy fallback-skill HTTP actions
+- teacher activity, task failures and timing/errors
+
+Fields whose names look like API keys, tokens, passwords, authorization headers
+or secrets are automatically replaced with `<redacted>`.
+
+The logger is best-effort: a logging failure never stops the companion.
+Set `COMPANION_ACTION_LOG` to override the current-log path.
