@@ -27,14 +27,14 @@ POLL_INTERVAL = 0.35
 SENSOR_INTERVAL = 0.75
 MCP_TIMEOUT_SECONDS = 35
 MAX_AGENT_TURNS = 24
-AUTONOMY_GOAL_INTERVAL = 12.0
+AUTONOMY_GOAL_INTERVAL = 6.0
 AUTONOMY_IDLE_INTERVAL = 45.0
 AMBIENT_LOOK_INTERVAL = 7.0
 AMBIENT_WANDER_INTERVAL = 22.0
 REFLEX_COOLDOWN = 4.0
 LEARNING_COOLDOWN_SECONDS = 1800
 TEACHER_MAX_OUTPUT_TOKENS = 700
-AGENT_BUILD = "hybrid-local-brain-cloud-teacher-2026-10-09"
+AGENT_BUILD = "self-learning-local-brain-v1-2026-10-09"
 BASE_DIR = Path(__file__).resolve().parent
 
 set_tracing_disabled(True)
@@ -58,22 +58,35 @@ by your local host. Treat it as your present perceptual state. observe(vision)
 can inspect your literal field of view in more detail. observe(blocks) is a
 coarse resource/map sense, not eyesight.
 
-LOCAL TASK EXECUTIVE
-Long physical jobs should use the skills MCP tool whenever a matching local
-skill exists. Local skill tasks continue on their own without another model
-turn. Available skills include gathering logs, making a stone pickaxe and
-building a basic house. If ACTIVE LOCAL TASKS shows that a task is already
-running, do not duplicate its individual mining/crafting/placing steps. You can
-keep talking while your body continues the task.
+SELF-LEARNING SKILLS
+High-level Minecraft behavior is learned, not assumed. The skills MCP tool
+contains legacy deterministic scaffolding only; do not use it by default for
+goals such as gathering resources, making tools, exploring, or building.
 
-When Alik asks for a multi-step goal such as "build a house", create/maintain a
-persistent goal and start the matching local skill. Do not merely announce an
-intention like "I will gather trees" and then stop.
+For a high-level goal:
+1. search skill_memory for relevant learned skills and inspect confidence;
+2. if a sufficiently tested procedure exists, reuse it but still verify results;
+3. otherwise form a small hypothesis using only safe primitive MCP actions;
+4. execute a short experiment, normally 1-3 physical actions;
+5. observe the resulting world/inventory state;
+6. record the trial with skill_memory(trial, ...), including what actually
+   happened rather than what you expected;
+7. change the approach after failure instead of repeating blindly;
+8. once a procedure has evidence behind it, save or refine it with
+   skill_memory(save, ...).
+
+A learned procedure is descriptive knowledge over safe MCP tools, never code.
+Do not claim that something was learned until an observed trial supports it.
+Repeated success should increase confidence; failures should reduce it.
+
+When Alik gives a multi-step request, maintain it as a persistent goal and
+continue advancing it on internal PRACTICE turns. Do not merely announce an
+intention and stop.
 
 AUTONOMY
-When Alik is silent, maintain goals and pursue useful tasks. A standing goal is
-not decoration: convert actionable goals into local tasks. Safe self-directed
-priorities are:
+When Alik is silent, maintain goals and pursue useful work. A standing goal is
+not decoration: continue experimenting or applying learned skills until it is
+completed, blocked, unsafe, or superseded. Safe self-directed priorities are:
 1. survive immediate danger;
 2. honor Alik's current instructions;
 3. finish active tasks/goals;
@@ -91,11 +104,12 @@ or skills. Use remember for durable information only. Local skills themselves
 write persistent success/failure lessons. Retrieve relevant lessons before
 repeating a previously failed strategy.
 
-You also have a learn MCP tool. Use learn(request, topic, problem) only when you
-have a genuine knowledge/strategy gap, not for ordinary decisions. It queues a
-rare OpenAI teacher consultation. The cloud teacher cannot control your body;
-it returns a compact lesson that is stored locally and should be reused later.
-Do not request cloud learning repeatedly for the same topic.
+You also have a learn MCP tool. It is a last-resort teacher, not the normal
+source of Minecraft knowledge. First search prior trials and try multiple
+distinct local hypotheses yourself. Use learn(request, topic, problem) only
+after a genuine knowledge/strategy gap remains. The cloud teacher cannot
+control your body and its answer is only a hypothesis until you test it
+yourself. Do not treat an untested teacher answer as a learned skill.
 
 PHYSICAL BEHAVIOR
 - mining and placing physically approach, face and reach the target;
@@ -107,10 +121,11 @@ PHYSICAL BEHAVIOR
   a direction or object.
 
 EFFICIENCY
-Use a local skill instead of dozens of model-mediated motor calls whenever
-possible. Prefer one targeted observation over redundant scans. Do not repeat
-the exact same failed tool call more than once. Never claim a goal succeeded
-without world/inventory/task evidence.
+Once a learned skill has good evidence, reuse its procedure instead of
+rediscovering it. During discovery, keep experiments small and informative.
+Prefer one targeted observation over redundant scans. Do not repeat the exact
+same failed action without a changed hypothesis. Never claim a goal succeeded
+without world/inventory evidence.
 
 Normal Minecraft chat is conversation with you. The host displays your final
 answer back in Minecraft automatically. Use say only for an extra deliberate
@@ -264,6 +279,14 @@ def _awareness_text(runtime):
 def build_turn_input(message, source, runtime):
     relevant = store.recall(message, 4)
     goals = store.list_goals("active", 4)
+    learning_query = " ".join(
+        [message]
+        + [
+            f"{goal['title']} {goal['description']}"
+            for goal in goals[:3]
+        ]
+    )
+    learned_skills = store.find_learned_skills(learning_query, 4)
     tasks = [
         task
         for task in store.list_tasks(8)
@@ -279,6 +302,21 @@ def build_turn_input(message, source, runtime):
                 f"- task #{task['id']} {task['skill']} "
                 f"{task['status']}: {_trim(task['progress'], 260)}"
             )
+
+    if learned_skills:
+        parts.append("RELEVANT SELF-LEARNED SKILLS:")
+        for skill in learned_skills:
+            parts.append(
+                f"- #{skill['id']} {skill['name']} "
+                f"confidence={skill['confidence']} "
+                f"successes={skill['successes']} failures={skill['failures']}: "
+                f"{_trim(skill['procedure'], 700)}"
+            )
+            if skill.get("last_outcome"):
+                parts.append(
+                    f"  last observed outcome: "
+                    f"{_trim(skill['last_outcome'], 260)}"
+                )
 
     if goals:
         parts.append("ACTIVE PERSISTENT GOALS:")
@@ -331,8 +369,16 @@ def build_turn_input(message, source, runtime):
     elif source == "learning":
         parts.append(
             "INTERNAL LEARNING EVENT: not a message from Alik. "
-            "A cloud teacher lesson was stored locally. Use it to improve the "
-            "next plan, and do not request the same lesson again immediately."
+            "A cloud teacher hypothesis was stored locally. Test it in the "
+            "world before promoting it into a learned skill."
+        )
+    elif source == "practice":
+        parts.append(
+            "INTERNAL PRACTICE TURN: not a message from Alik. Advance the "
+            "highest-priority active goal through one small evidence-producing "
+            "experiment or one verified step of an already learned procedure. "
+            "Search skill_memory first. Use primitive actions, observe the "
+            "result, and record the trial. Keep this turn focused."
         )
     else:
         parts.append("CURRENT MESSAGE FROM ALIK:")
@@ -343,7 +389,7 @@ def build_turn_input(message, source, runtime):
 
 async def run_turn(agent, message, source, reply_in_game, runtime):
     prepared = build_turn_input(message, source, runtime)
-    max_turns = 12 if source in {"autonomy", "event", "task", "learning"} else MAX_AGENT_TURNS
+    max_turns = 10 if source in {"autonomy", "event", "task", "learning", "practice"} else MAX_AGENT_TURNS
 
     try:
         result = await Runner.run(agent, prepared, max_turns=max_turns)
@@ -351,7 +397,7 @@ async def run_turn(agent, message, source, reply_in_game, runtime):
     except MaxTurnsExceeded:
         answer = (
             ""
-            if source in {"autonomy", "event", "task", "learning"}
+            if source in {"autonomy", "event", "task", "learning", "practice"}
             else "I stopped that reasoning loop instead of retrying indefinitely."
         )
 
@@ -381,37 +427,27 @@ async def run_turn(agent, message, source, reply_in_game, runtime):
     return answer
 
 
-def _active_task_for_skill(skill):
-    return next(
-        (
-            task
-            for task in store.list_tasks(12)
-            if task["skill"] == skill
-            and task["status"] in {"queued", "running"}
-        ),
-        None,
-    )
+def _ensure_user_goal(title, description, priority=8):
+    normalized = title.strip().lower()
+    for goal in store.list_goals("active", 20):
+        if goal["title"].strip().lower() == normalized:
+            if description and description != goal["description"]:
+                try:
+                    store.update_goal(
+                        goal["id"],
+                        description=description,
+                        priority=priority,
+                    )
+                except Exception:
+                    pass
+            return goal
 
-
-def _start_goal_task(skill, title, description, priority=8, args=None):
-    existing = _active_task_for_skill(skill)
-    if existing is not None:
-        return existing
-
-    goal = store.create_goal(
+    return store.create_goal(
         title,
         description,
         priority,
         "user",
     )
-    payload = dict(args or {})
-    payload["goal_id"] = goal["id"]
-    task = store.create_task(skill, payload)
-    store.record_event(
-        "goal_to_task",
-        f"Created goal #{goal['id']} and local task #{task['id']} ({skill}).",
-    )
-    return task
 
 
 def _extract_count(text, default):
@@ -428,43 +464,34 @@ async def fast_task_intent(text):
         "build" in normalized
         and any(word in normalized for word in ("house", "shelter", "hut"))
     ):
-        task = _start_goal_task(
-            "build_basic_house",
-            "Build a basic house",
+        return _ensure_user_goal(
+            "Build a house",
             text,
             9,
-            {"width": 5, "length": 5, "height": 3},
         )
-        return task
 
     if (
         ("stone pickaxe" in normalized or "stone pick" in normalized)
         and any(word in normalized for word in ("make", "craft", "get", "build"))
     ):
-        task = _start_goal_task(
-            "make_stone_pickaxe",
-            "Make a stone pickaxe",
+        return _ensure_user_goal(
+            "Obtain a stone pickaxe",
             text,
             8,
         )
-        return task
 
     if (
         any(word in normalized for word in ("wood", "logs", "tree"))
         and any(word in normalized for word in ("gather", "collect", "get", "chop", "cut"))
     ):
         count = _extract_count(normalized, 8)
-        task = _start_goal_task(
-            "gather_logs",
+        return _ensure_user_goal(
             f"Gather {count} logs",
             text,
-            7,
-            {"count": count},
+            8,
         )
-        return task
 
     return None
-
 
 async def fast_chat_reflex(text):
     normalized = text.lower().strip().rstrip(".!?")
@@ -838,34 +865,10 @@ def _goal_has_task_history(goal_id):
 
 
 def _schedule_actionable_goal():
-    for goal in store.list_goals("active", 8):
-        if _goal_has_task_history(goal["id"]):
-            continue
-
-        text = f"{goal['title']} {goal['description']}".lower()
-        if any(word in text for word in ("house", "shelter", "hut")):
-            payload = {
-                "width": 5,
-                "length": 5,
-                "height": 3,
-                "goal_id": goal["id"],
-            }
-            return store.create_task("build_basic_house", payload)
-
-        if "stone pick" in text:
-            return store.create_task(
-                "make_stone_pickaxe",
-                {"goal_id": goal["id"]},
-            )
-
-        if any(word in text for word in ("gather logs", "gather wood", "collect wood")):
-            return store.create_task(
-                "gather_logs",
-                {"count": 8, "goal_id": goal["id"]},
-            )
-
+    # High-level goals are intentionally NOT converted into hardcoded Python
+    # skills. The local model advances them through evidence-producing practice
+    # turns and stores any successful procedure in skill_memory.
     return None
-
 
 async def update_awareness(runtime):
     state_result, entities_result, vision_result, inventory_result = await asyncio.gather(
@@ -991,14 +994,6 @@ async def autonomy_sensor(input_queue, runtime):
         if task_active:
             continue
 
-        scheduled = _schedule_actionable_goal()
-        if scheduled is not None:
-            store.record_event(
-                "drive",
-                f"Persistent goal activated local task #{scheduled['id']} {scheduled['skill']}.",
-            )
-            continue
-
         owner_distance = float(owner.get("distance", 0) or 0)
 
         if (
@@ -1042,32 +1037,22 @@ async def autonomy_sensor(input_queue, runtime):
             last_item_reflex = now
             continue
 
-        inventory_ids = {
-            item.get("item")
-            for item in awareness.get("inventory", [])
-        }
         if (
-            "minecraft:stone_pickaxe" not in inventory_ids
-            and now - runtime["last_user_activity"] > 45.0
+            now - runtime["last_user_activity"] > 60.0
             and not runtime["self_improvement_attempted"]
             and owner_distance <= 20.0
         ):
             goal = store.create_goal(
-                "Improve basic tools",
-                "Acquire a stone pickaxe so future gathering and building are more capable.",
-                5,
+                "Improve practical capability",
+                "Discover and test one useful way to become more capable in the current environment.",
+                4,
                 "self",
-            )
-            task = store.create_task(
-                "make_stone_pickaxe",
-                {"goal_id": goal["id"]},
             )
             runtime["self_improvement_attempted"] = True
             store.record_event(
                 "drive",
-                f"Self-improvement drive created task #{task['id']} for a stone pickaxe.",
+                f"Self-improvement drive created exploratory goal #{goal['id']}.",
             )
-            continue
 
         meaningful_goals = [
             goal
@@ -1133,17 +1118,23 @@ async def autonomy_sensor(input_queue, runtime):
 
         runtime["autonomy_pending"] = True
         runtime["last_autonomy_thought"] = now
+        source = "practice" if meaningful_goals else "autonomy"
+        message = (
+            "Continue learning or applying a procedure toward the highest-priority "
+            "active goal. Produce evidence from the world, record the trial, and "
+            "update learned skill knowledge when justified."
+            if meaningful_goals
+            else
+            "You are safely idle with no urgent user goal. Review awareness and "
+            "decide whether one small exploratory observation or experiment would "
+            "be useful; otherwise remain idle."
+        )
         await enqueue(
             input_queue,
             runtime,
             2,
-            "autonomy",
-            (
-                "You are safely idle with no local skill currently running. "
-                "Review your current awareness and active goals. Start a useful "
-                "local skill if a goal can be advanced, inspect something if it "
-                "matters, or deliberately remain idle."
-            ),
+            source,
+            message,
         )
 
 
@@ -1245,7 +1236,7 @@ async def main():
                     try:
                         await reasoning
                     except asyncio.CancelledError:
-                        if source in {"autonomy", "event", "task", "learning"}:
+                        if source in {"autonomy", "event", "task", "learning", "practice"}:
                             print(
                                 f"\n[{source.upper()}] Reasoning interrupted for Alik."
                             )
