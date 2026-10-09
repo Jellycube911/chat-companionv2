@@ -609,7 +609,7 @@ def _preempt_background_reasoning(runtime):
     if (
         task is not None
         and not task.done()
-        and source in {"autonomy", "event", "task", "learning"}
+        and source in {"autonomy", "event", "task", "learning", "practice"}
     ):
         task.cancel()
         store.record_event(
@@ -692,22 +692,22 @@ async def _ask_cloud_teacher(request):
         + "\n\nPROBLEM / FAILURE:\n"
         + request["problem"]
         + "\n\n"
-        "You are the occasional teacher for a local Minecraft companion. "
-        "The normal brain is local and should remain local. Teach a reusable "
-        "strategy, not conversational filler. Do not propose teleportation, "
-        "cheats, arbitrary code execution, or bypassing physical reach. "
-        "The companion can observe state/vision/entities/blocks/inventory, "
-        "navigate, mine/place/collect/attack/equip, craft real recipes, use "
-        "persistent goals/memory, and run deterministic local skills.\n\n"
-        "Return a compact lesson with exactly these headings:\n"
-        "DIAGNOSIS\nPROCEDURE\nRECOVERY\nSUCCESS_CHECK\n"
-        "Prefer robust rules that generalize to future similar situations."
+        "You are the occasional teacher for a local Minecraft companion that "
+        "learns primarily by experimenting. The normal brain is local and must "
+        "remain the learner. Give principles and one or two testable hypotheses, "
+        "not a full walkthrough or authoritative solution. Do not propose "
+        "teleportation, cheats, arbitrary code execution, or bypassing physical "
+        "reach. The companion can observe state/vision/entities/blocks/inventory "
+        "and use safe movement/world/crafting primitives.\n\n"
+        "Return a compact hint with exactly these headings:\n"
+        "LIKELY_GAP\nHYPOTHESES_TO_TEST\nEVIDENCE_TO_WATCH\n"
+        "The local companion must test your advice before treating it as learned."
     )
     response = await client.responses.create(
         model=model,
         instructions=(
             "Be a concise Minecraft robotics/agent teacher. "
-            "Return only the requested reusable lesson."
+            "Teach principles and testable hypotheses, not step-by-step play."
         ),
         input=prompt,
         reasoning={"effort": "medium"},
