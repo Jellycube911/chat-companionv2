@@ -83,6 +83,12 @@ jobs:
           import mcp_server
           import practice_engine
 
+          assert hasattr(minecraft_agent, "INSTRUCTIONS")
+          assert hasattr(minecraft_agent, "PLAYER_CHAT_INSTRUCTIONS")
+          assert hasattr(minecraft_agent, "PRACTICE_PLANNER_INSTRUCTIONS")
+          assert minecraft_agent.PLAYER_CHAT_INSTRUCTIONS
+          assert minecraft_agent.PRACTICE_PLANNER_INSTRUCTIONS
+
           assert minecraft_agent._simple_chat_reply("hey") == "hey"
           assert minecraft_agent._simple_chat_reply("whats up") is not None
           assert minecraft_agent._simple_chat_reply("Hello, how are you doing") == "good lol, you?"
@@ -151,6 +157,9 @@ jobs:
           assert 'QUICK CHAT CONTEXT' in source
           assert 'run_planned_action' in source
           assert 'practice_planner = Agent(' in source
+          assert 'instructions=PRACTICE_PLANNER_INSTRUCTIONS' in source
+          assert 'instructions=PLAYER_CHAT_INSTRUCTIONS' in source
+          assert 'PRACTICE_PLANNER_PLAYER_CHAT_INSTRUCTIONS' not in source
           assert 'PLAYER_CHAT_INSTRUCTIONS' in source
           assert '_native_local_completion' in source
           assert 'physical_action_active' in source
