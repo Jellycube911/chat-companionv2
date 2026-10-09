@@ -32,7 +32,9 @@ AUTONOMY_IDLE_INTERVAL = 45.0
 AMBIENT_LOOK_INTERVAL = 7.0
 AMBIENT_WANDER_INTERVAL = 22.0
 REFLEX_COOLDOWN = 4.0
-AGENT_BUILD = "local-first-executive-awareness-2026-10-08"
+LEARNING_COOLDOWN_SECONDS = 1800
+TEACHER_MAX_OUTPUT_TOKENS = 700
+AGENT_BUILD = "hybrid-local-brain-cloud-teacher-2026-10-09"
 BASE_DIR = Path(__file__).resolve().parent
 
 set_tracing_disabled(True)
@@ -88,6 +90,12 @@ Use recall_memory for older facts, places, preferences, relationships, lessons
 or skills. Use remember for durable information only. Local skills themselves
 write persistent success/failure lessons. Retrieve relevant lessons before
 repeating a previously failed strategy.
+
+You also have a learn MCP tool. Use learn(request, topic, problem) only when you
+have a genuine knowledge/strategy gap, not for ordinary decisions. It queues a
+rare OpenAI teacher consultation. The cloud teacher cannot control your body;
+it returns a compact lesson that is stored locally and should be reused later.
+Do not request cloud learning repeatedly for the same topic.
 
 PHYSICAL BEHAVIOR
 - mining and placing physically approach, face and reach the target;
@@ -320,6 +328,12 @@ def build_turn_input(message, source, runtime):
             "INTERNAL TASK EVENT: not a message from Alik. "
             "A local skill changed state. Re-plan or notify Alik if meaningful."
         )
+    elif source == "learning":
+        parts.append(
+            "INTERNAL LEARNING EVENT: not a message from Alik. "
+            "A cloud teacher lesson was stored locally. Use it to improve the "
+            "next plan, and do not request the same lesson again immediately."
+        )
     else:
         parts.append("CURRENT MESSAGE FROM ALIK:")
 
@@ -329,7 +343,7 @@ def build_turn_input(message, source, runtime):
 
 async def run_turn(agent, message, source, reply_in_game, runtime):
     prepared = build_turn_input(message, source, runtime)
-    max_turns = 12 if source in {"autonomy", "event", "task"} else MAX_AGENT_TURNS
+    max_turns = 12 if source in {"autonomy", "event", "task", "learning"} else MAX_AGENT_TURNS
 
     try:
         result = await Runner.run(agent, prepared, max_turns=max_turns)
@@ -337,7 +351,7 @@ async def run_turn(agent, message, source, reply_in_game, runtime):
     except MaxTurnsExceeded:
         answer = (
             ""
-            if source in {"autonomy", "event", "task"}
+            if source in {"autonomy", "event", "task", "learning"}
             else "I stopped that reasoning loop instead of retrying indefinitely."
         )
 
@@ -550,6 +564,123 @@ async def console_input(input_queue, runtime):
             return
 
 
+def _teacher_model_name():
+    model = os.getenv("COMPANION_TEACHER_MODEL", "gpt-6-luna").strip() or "gpt-6-luna"
+    if "sol" in model.lower():
+        print("[TEACHER] Refusing Sol; using gpt-6-luna instead.")
+        return "gpt-6-luna"
+    return model
+
+
+def _cloud_teacher_enabled():
+    value = os.getenv("COMPANION_CLOUD_TEACHER", "on").strip().lower()
+    return value not in {"0", "false", "off", "no"}
+
+
+async def _ask_cloud_teacher(request):
+    if not _cloud_teacher_enabled():
+        raise RuntimeError("cloud teacher is disabled")
+    if not os.getenv("OPENAI_API_KEY", "").strip():
+        raise RuntimeError("OPENAI_API_KEY is not set")
+
+    model = _teacher_model_name()
+    client = AsyncOpenAI(timeout=40.0)
+    prompt = (
+        "TOPIC:\n"
+        + request["topic"]
+        + "\n\nPROBLEM / FAILURE:\n"
+        + request["problem"]
+        + "\n\n"
+        "You are the occasional teacher for a local Minecraft companion. "
+        "The normal brain is local and should remain local. Teach a reusable "
+        "strategy, not conversational filler. Do not propose teleportation, "
+        "cheats, arbitrary code execution, or bypassing physical reach. "
+        "The companion can observe state/vision/entities/blocks/inventory, "
+        "navigate, mine/place/collect/attack/equip, craft real recipes, use "
+        "persistent goals/memory, and run deterministic local skills.\n\n"
+        "Return a compact lesson with exactly these headings:\n"
+        "DIAGNOSIS\nPROCEDURE\nRECOVERY\nSUCCESS_CHECK\n"
+        "Prefer robust rules that generalize to future similar situations."
+    )
+    response = await client.responses.create(
+        model=model,
+        instructions=(
+            "Be a concise Minecraft robotics/agent teacher. "
+            "Return only the requested reusable lesson."
+        ),
+        input=prompt,
+        reasoning={"effort": "medium"},
+        max_output_tokens=TEACHER_MAX_OUTPUT_TOKENS,
+        store=False,
+    )
+    lesson = str(response.output_text or "").strip()
+    if not lesson:
+        raise RuntimeError("teacher returned no lesson")
+
+    usage = getattr(response, "usage", None)
+    input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+    output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+    return model, lesson, input_tokens, output_tokens
+
+
+async def cloud_learning_worker(input_queue, runtime):
+    while True:
+        request = await asyncio.to_thread(store.next_learning_request)
+        if request is None:
+            await asyncio.sleep(0.8)
+            continue
+
+        print(
+            f"\n[TEACHER] Learning request #{request['id']}: "
+            f"{request['topic']}"
+        )
+        try:
+            model, lesson, input_tokens, output_tokens = await _ask_cloud_teacher(request)
+            store.finish_learning(
+                request["id"],
+                status="completed",
+                lesson=lesson,
+                model=model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            )
+            safe_key = re.sub(r"[^a-z0-9_.-]+", ".", request["topic"].lower()).strip(".")
+            store.remember(
+                "skill",
+                f"teacher.{safe_key[:100] or request['id']}",
+                lesson,
+                9,
+            )
+            store.record_event(
+                "learning_complete",
+                f"Teacher #{request['id']} ({model}) learned {request['topic']} "
+                f"using {input_tokens} input / {output_tokens} output tokens.",
+            )
+            print(
+                f"[TEACHER] Stored lesson from {model} "
+                f"({input_tokens} in / {output_tokens} out)."
+            )
+            await enqueue(
+                input_queue,
+                runtime,
+                1,
+                "learning",
+                f"Teacher lesson completed for {request['topic']}: {lesson}",
+            )
+        except Exception as error:
+            store.finish_learning(
+                request["id"],
+                status="failed",
+                error=f"{type(error).__name__}: {error}",
+                model=_teacher_model_name(),
+            )
+            store.record_event(
+                "learning_failed",
+                f"Teacher request #{request['id']} failed: {type(error).__name__}: {error}",
+            )
+            print(f"[TEACHER] Failed: {error}")
+
+
 async def local_task_worker(input_queue, runtime):
     while True:
         task = await asyncio.to_thread(store.next_queued_task)
@@ -573,6 +704,26 @@ async def local_task_worker(input_queue, runtime):
             f"{finished['progress'] or finished['error']}"
         )
         print(f"\n[SKILL] {summary}")
+
+        if finished["status"] == "failed":
+            failures = store.recent_task_failures(finished["skill"], 2)
+            if len(failures) >= 2:
+                problem = (
+                    f"Local skill {finished['skill']} failed repeatedly. "
+                    f"Latest failure: {finished['error']}. "
+                    f"Previous failure: {failures[1]['error']}"
+                )
+                learning = store.request_learning(
+                    f"skill:{finished['skill']}",
+                    problem,
+                    cooldown_seconds=LEARNING_COOLDOWN_SECONDS,
+                )
+                if learning.get("ok"):
+                    print(
+                        f"[TEACHER] Repeated failure queued learning request "
+                        f"#{learning.get('id')}."
+                    )
+
         await enqueue(input_queue, runtime, 1, "task", summary)
 
 
@@ -938,6 +1089,7 @@ async def main():
             asyncio.create_task(console_input(input_queue, runtime)),
             asyncio.create_task(autonomy_sensor(input_queue, runtime)),
             asyncio.create_task(local_task_worker(input_queue, runtime)),
+            asyncio.create_task(cloud_learning_worker(input_queue, runtime)),
         ]
 
         print()
@@ -952,6 +1104,13 @@ async def main():
         print("Persistent task executive: ON")
         print("Unified chat/action/autonomy identity: ON")
         print("No Sol model will be selected by this agent.")
+        if _cloud_teacher_enabled():
+            print(
+                f"Cloud teacher: {_teacher_model_name()} - ON-DEMAND ONLY "
+                f"(30 min/topic cooldown; local brain remains default)."
+            )
+        else:
+            print("Cloud teacher: OFF")
         print("Type 'quit' here to stop.")
         print()
 
@@ -993,7 +1152,7 @@ async def main():
                         except Exception:
                             pass
                 finally:
-                    if source in {"autonomy", "event", "task"}:
+                    if source in {"autonomy", "event", "task", "learning"}:
                         runtime["autonomy_pending"] = False
         finally:
             for task in tasks:
