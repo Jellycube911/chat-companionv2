@@ -418,7 +418,7 @@ public final class CompanionService implements AutoCloseable {
     }
 
     private void moveNearBlock(CompanionEntity companion, BlockPos block, ServerLevel world) {
-        if (world.getGameTime() % 10 != 0) return;
+        if (world.getGameTime() % 4 != 0) return;
         BlockPos best = null;
         double bestDistance = Double.POSITIVE_INFINITY;
         for (Direction direction : Direction.Plane.HORIZONTAL) {
@@ -440,7 +440,7 @@ public final class CompanionService implements AutoCloseable {
     }
 
     private void lookAtPoint(CompanionEntity companion, Vec3 target) {
-        companion.getLookControl().setLookAt(target.x, target.y, target.z, 30.0F, 30.0F);
+        companion.getLookControl().setLookAt(target.x, target.y, target.z, 90.0F, 90.0F);
     }
 
     private boolean canInteractWithBlock(CompanionEntity companion, BlockPos block, ServerLevel world) {
@@ -462,7 +462,7 @@ public final class CompanionService implements AutoCloseable {
         if (items.isEmpty() || job.changed() >= job.limit()) { companion.complete("collection_complete:" + job.changed()); work.remove(owner); return; }
         ItemEntity target = items.getFirst();
         if (!companion.getBoundingBox().inflate(1.0, 0.5, 1.0).intersects(target.getBoundingBox())) {
-            if (world.getGameTime() % 10 == 0) companion.getNavigation().moveTo(target, 1.28);
+            if (world.getGameTime() % 4 == 0) companion.getNavigation().moveTo(target, 1.28);
             return;
         }
         ItemStack original = target.getItem(); int before = original.getCount(); ItemStack remainder = companion.companionInventory().addItem(original.copy());
@@ -474,7 +474,7 @@ public final class CompanionService implements AutoCloseable {
         Entity target = world.getEntity(job.target());
         if (!(target instanceof LivingEntity living) || !living.isAlive()) { companion.complete("target_unavailable"); work.remove(owner); return; }
         if (!(living instanceof Enemy) || companion.isAlliedTo(living) || companion.distanceToSqr(living) > 64 * 64) { companion.failJob("combat_policy_denied"); work.remove(owner); return; }
-        if (companion.distanceToSqr(living) > 6) { if (world.getGameTime() % 15 == 0) companion.getNavigation().moveTo(living, 1.28); }
+        if (companion.distanceToSqr(living) > 6) { if (world.getGameTime() % 6 == 0) companion.getNavigation().moveTo(living, 1.28); }
         else if (world.getGameTime() % 20 == 0 && companion.hasLineOfSight(living)) companion.doHurtTarget(living);
     }
     private FakePlayer fake(CompanionEntity companion, ServerLevel world, int slot) {
