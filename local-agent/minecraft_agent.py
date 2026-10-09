@@ -903,7 +903,16 @@ async def _report_planned_outcome(runtime, execution, source):
 
 def _plan_matches_user_goal(plan, goal, subgoal=""):
     """Guard against objective drift without prescribing Minecraft recipes."""
-    if not goal or plan.get("action") in {"idle", "scan_blocks", "craft", "place"}:
+    if not goal:
+        return True
+    # An explicit goal id may not claim a different user objective.
+    if goal.get("id") is not None and plan.get("goal_id") is not None:
+        try:
+            if int(plan["goal_id"]) != int(goal["id"]):
+                return False
+        except (TypeError, ValueError):
+            return False
+    if plan.get("action") in {"idle", "scan_blocks", "craft", "place"}:
         return True
     # A tool-building prerequisite does not have to name the finished item.
     # Require an explicit link to the real active goal, not a Minecraft recipe.
