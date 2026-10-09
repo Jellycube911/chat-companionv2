@@ -917,7 +917,7 @@ async def run_turn(agent, message, source, reply_in_game, runtime):
                 json_mode=False,
                 max_tokens=48,
             )
-        if answer is None:
+        if not answer:
             result = await Runner.run(agent, prepared, max_turns=max_turns)
             answer = str(result.final_output or "").strip()
         if source in {"minecraft", "console"}:
