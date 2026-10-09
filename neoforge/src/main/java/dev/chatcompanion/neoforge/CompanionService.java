@@ -23,6 +23,7 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.core.registries.Registries;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -327,12 +328,18 @@ public final class CompanionService implements AutoCloseable {
                     || (session != null && session.actor.controlGeneration() == job.generation());
             if (companion == null || player == null || !generationValid
                     || companion.jobState() != CompanionEntity.JobState.RUNNING || !job.jobId().equals(companion.jobId())) {
+                if (companion != null && job.type() == CompanionEntity.JobType.MINE) {
+                    clearBreakProgress(companion, job, (ServerLevel) companion.level());
+                }
                 work.remove(owner); placements.remove(owner);
                 if (companion != null) companion.stop("job_invalidated");
                 continue;
             }
             ServerLevel world = (ServerLevel) companion.level();
-            if (world.getGameTime() - job.started() > 600) { companion.failJob("task_deadline"); work.remove(owner); continue; }
+            if (world.getGameTime() - job.started() > 600) {
+                if (job.type() == CompanionEntity.JobType.MINE) clearBreakProgress(companion, job, world);
+                companion.failJob("task_deadline"); work.remove(owner); continue;
+            }
             if (job.type() == CompanionEntity.JobType.MINE) tickMine(owner, companion, job, world);
             else if (job.type() == CompanionEntity.JobType.PLACE) tickPlace(owner, companion, job, world);
             else if (job.type() == CompanionEntity.JobType.COLLECT) tickCollect(owner, companion, job, world);
@@ -341,36 +348,67 @@ public final class CompanionService implements AutoCloseable {
     }
     private void tickMine(UUID owner, CompanionEntity companion, PhysicalJob job, ServerLevel world) {
         if (!world.hasChunkAt(job.block()) || !world.getBlockState(job.block()).equals(job.initial())) {
+            clearBreakProgress(companion, job, world);
             companion.failJob("block_precondition_changed"); work.remove(owner); return;
         }
 
         if (!withinBlockReach(companion, job.block())) {
+            companion.jobProgress(0.0F, "approaching_block");
             moveNearBlock(companion, job.block(), world);
             return;
         }
 
         companion.getNavigation().stop();
         lookAtBlock(companion, job.block());
-        if (!canInteractWithBlock(companion, job.block(), world)) return;
+        if (!canInteractWithBlock(companion, job.block(), world)) {
+            companion.jobProgress(job.progress(), "aligning_to_block");
+            return;
+        }
 
         FakePlayer fake = fake(companion, world, 0);
         float delta = job.initial().getDestroyProgress(fake, world, job.block());
         if (delta <= 0 || !Float.isFinite(delta)) {
+            clearBreakProgress(companion, job, world);
             companion.failJob("unbreakable_or_missing_tool"); work.remove(owner); return;
         }
 
-        float progress = job.progress() + delta;
-        if (progress >= 1) {
+        int breakingTicks = job.changed() + 1;
+        float progress = Math.min(1.0F, job.progress() + delta);
+        companion.jobProgress(progress, "breaking");
+
+        int crackStage = Math.min(9, Math.max(0, (int)Math.floor(progress * 10.0F)));
+        world.destroyBlockProgress(companion.getId(), job.block(), crackStage);
+        if ((breakingTicks - 1) % 4 == 0) companion.swing(InteractionHand.MAIN_HAND);
+
+        if (progress >= 1.0F) {
             fake.setYRot(companion.getYRot());
             fake.setXRot(companion.getXRot());
+            ItemStack usedTool = fake.getMainHandItem().copy();
+            String toolId = usedTool.isEmpty()
+                    ? "minecraft:air"
+                    : BuiltInRegistries.ITEM.getKey(usedTool.getItem()).toString();
+            String blockId = BuiltInRegistries.BLOCK.getKey(job.initial().getBlock()).toString();
+
             boolean success = fake.gameMode.destroyBlock(job.block());
             companion.companionInventory().setItem(0, fake.getMainHandItem().copy());
-            if (success && !world.getBlockState(job.block()).equals(job.initial())) companion.complete("block_mined");
-            else companion.failJob("protected_or_break_rejected");
+            clearBreakProgress(companion, job, world);
+
+            if (success && !world.getBlockState(job.block()).equals(job.initial())) {
+                companion.complete(
+                        "block_mined|block=" + blockId
+                                + "|tool=" + toolId
+                                + "|break_ticks=" + breakingTicks);
+            } else {
+                companion.failJob("protected_or_break_rejected");
+            }
             work.remove(owner);
         } else {
-            work.put(owner, job.progress(progress, 0));
+            work.put(owner, job.progress(progress, breakingTicks));
         }
+    }
+
+    private void clearBreakProgress(CompanionEntity companion, PhysicalJob job, ServerLevel world) {
+        if (job.block() != null) world.destroyBlockProgress(companion.getId(), job.block(), -1);
     }
 
     private void tickPlace(UUID owner, CompanionEntity companion, PhysicalJob job, ServerLevel world) {
