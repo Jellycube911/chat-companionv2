@@ -39,7 +39,7 @@ AMBIENT_WANDER_INTERVAL = 22.0
 REFLEX_COOLDOWN = 4.0
 LEARNING_COOLDOWN_SECONDS = 1800
 TEACHER_MAX_OUTPUT_TOKENS = 700
-AGENT_BUILD = "self-learning-local-brain-v7-grounded-fast-2026-10-09"
+AGENT_BUILD = "self-learning-local-brain-v7-grounded-fast-chat-2026-10-09"
 BASE_DIR = Path(__file__).resolve().parent
 
 set_tracing_disabled(True)
@@ -1467,10 +1467,13 @@ def _is_activity_question(text):
 def _preempt_background_reasoning(runtime):
     task = runtime.get("reasoning_task")
     source = runtime.get("reasoning_source")
+    # Host-planned PRACTICE/COMMAND turns are intentionally serialized. A
+    # blocking local-model HTTP request cannot actually be cancelled once
+    # dispatched; pretending otherwise creates overlapping Qwen generations.
     if (
         task is not None
         and not task.done()
-        and source in {"autonomy", "event", "task", "learning", "practice", "command"}
+        and source in {"autonomy", "event", "task", "learning"}
         and not runtime.get("physical_action_active", False)
     ):
         task.cancel()
@@ -1482,7 +1485,43 @@ def _preempt_background_reasoning(runtime):
     return False
 
 
-async def poll_minecraft_chat(input_queue, runtime):
+async def _background_player_chat(chat_agent, text, runtime):
+    try:
+        await run_turn(
+            chat_agent,
+            text,
+            source="minecraft",
+            reply_in_game=True,
+            runtime=runtime,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        log_exception(
+            "chat",
+            "background_chat_error",
+            error,
+            message=text,
+        )
+        await _send_ingame(
+            "something broke, gimme a sec",
+            reason="background_chat_error",
+        )
+
+
+def _spawn_player_chat(chat_agent, text, runtime):
+    task = asyncio.create_task(
+        _background_player_chat(chat_agent, text, runtime)
+    )
+    runtime["chat_tasks"].add(task)
+
+    def _done(finished):
+        runtime["chat_tasks"].discard(finished)
+
+    task.add_done_callback(_done)
+
+
+async def poll_minecraft_chat(input_queue, runtime, chat_agent):
     while True:
         try:
             payload = await asyncio.to_thread(_get, "/chat-inbox")
@@ -1567,7 +1606,11 @@ async def poll_minecraft_chat(input_queue, runtime):
                         message=text,
                         reply="sec",
                     )
-                    await enqueue(input_queue, runtime, 0, "minecraft", text)
+                    _spawn_player_chat(
+                        chat_agent,
+                        text,
+                        runtime,
+                    )
         except Exception:
             pass
         await asyncio.sleep(POLL_INTERVAL)
@@ -2086,6 +2129,7 @@ async def main():
         "reasoning_source": None,
         "physical_action_active": False,
         "model_label": None,
+        "chat_tasks": set(),
     }
 
     model, model_label = choose_model()
@@ -2133,7 +2177,9 @@ async def main():
         )
 
         tasks = [
-            asyncio.create_task(poll_minecraft_chat(input_queue, runtime)),
+            asyncio.create_task(
+                poll_minecraft_chat(input_queue, runtime, chat_agent)
+            ),
             asyncio.create_task(console_input(input_queue, runtime)),
             asyncio.create_task(autonomy_sensor(input_queue, runtime)),
             asyncio.create_task(local_task_worker(input_queue, runtime)),
@@ -2243,7 +2289,14 @@ async def main():
             log_event("agent", "session_stop")
             for task in tasks:
                 task.cancel()
+            for task in list(runtime.get("chat_tasks", ())):
+                task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            if runtime.get("chat_tasks"):
+                await asyncio.gather(
+                    *list(runtime["chat_tasks"]),
+                    return_exceptions=True,
+                )
 
 
 if __name__ == "__main__":
