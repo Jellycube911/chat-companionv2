@@ -558,7 +558,7 @@ def skill_memory(
                 "trial requires intent, hypothesis, actions, outcome and success"
             ),
         }
-    return store.record_skill_trial(
+    result = store.record_skill_trial(
         intent,
         hypothesis,
         actions,
@@ -566,6 +566,54 @@ def skill_memory(
         success,
         skill_id=skill_id,
     )
+
+    history = store.recent_skill_trials(intent, 6)
+    successes = [item for item in history if item["success"]]
+    failures = [item for item in history if not item["success"]]
+
+    promoted = None
+    if success and result.get("skill") is None and len(successes) >= 2:
+        # Two independently observed successes are enough to create a low-
+        # confidence reusable procedure. More trials adjust confidence later.
+        promoted = store.save_learned_skill(
+            name or intent[:120],
+            intent,
+            actions,
+            source="self",
+        )
+        # Link the successful evidence to the newly promoted skill.
+        store.record_skill_trial(
+            intent,
+            hypothesis,
+            actions,
+            outcome,
+            True,
+            skill_id=promoted["id"],
+        )
+
+    teacher_request = None
+    distinct_failed_hypotheses = {
+        item["hypothesis"].strip().lower()
+        for item in failures
+        if item["hypothesis"].strip()
+    }
+    if len(failures) >= 3 and len(distinct_failed_hypotheses) >= 2:
+        summary = " | ".join(
+            f"hypothesis={item['hypothesis']}; outcome={item['outcome']}"
+            for item in failures[:4]
+        )
+        teacher_request = store.request_learning(
+            f"intent:{intent}",
+            (
+                "The local companion tried multiple distinct hypotheses and "
+                f"remains blocked. Recent failed experiments: {summary}"
+            ),
+            cooldown_seconds=1800,
+        )
+
+    result["promoted_skill"] = promoted
+    result["teacher_request"] = teacher_request
+    return result
 
 
 @mcp.tool()
