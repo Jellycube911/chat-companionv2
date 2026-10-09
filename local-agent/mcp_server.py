@@ -7,6 +7,7 @@ import requests
 from mcp.server import MCPServer
 
 from memory_store import DATA_DIR, store
+from action_log import log_event, log_exception
 
 
 MINECRAFT_URL = "http://127.0.0.1:8765"
@@ -17,9 +18,44 @@ mcp = MCPServer("minecraft-companion")
 def _tool_guard(fn):
     @functools.wraps(fn)
     def wrapped(*args, **kwargs):
+        started_at = time.monotonic()
+        log_event(
+            "mcp",
+            "tool_call",
+            tool=fn.__name__,
+            args=args,
+            kwargs=kwargs,
+        )
         try:
-            return fn(*args, **kwargs)
+            result = fn(*args, **kwargs)
+            snapshot = {}
+            if fn.__name__ in {"navigate", "world_action", "craft"}:
+                try:
+                    snapshot = {
+                        "state": _observe("state"),
+                        "inventory": _observe("inventory"),
+                    }
+                except Exception as snapshot_error:
+                    snapshot = {"snapshot_error": str(snapshot_error)}
+            log_event(
+                "mcp",
+                "tool_result",
+                tool=fn.__name__,
+                elapsed_ms=round((time.monotonic() - started_at) * 1000),
+                result=result,
+                **snapshot,
+            )
+            return result
         except Exception as error:
+            log_exception(
+                "mcp",
+                "tool_error",
+                error,
+                tool=fn.__name__,
+                args=args,
+                kwargs=kwargs,
+                elapsed_ms=round((time.monotonic() - started_at) * 1000),
+            )
             try:
                 DATA_DIR.mkdir(parents=True, exist_ok=True)
                 with ERROR_LOG.open("a", encoding="utf-8") as handle:
