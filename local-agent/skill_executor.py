@@ -10,7 +10,16 @@ from memory_store import store
 MINECRAFT_URL = "http://127.0.0.1:8765"
 
 LOG_PATTERNS = ["_log", "_stem", "_hyphae"]
+FOLIAGE_PATTERNS = ["_leaves", "vine"]
 PLANK_SUFFIX = "_planks"
+AXE_ORDER = [
+    "minecraft:netherite_axe",
+    "minecraft:diamond_axe",
+    "minecraft:iron_axe",
+    "minecraft:stone_axe",
+    "minecraft:golden_axe",
+    "minecraft:wooden_axe",
+]
 
 
 class SkillCancelled(Exception):
@@ -185,19 +194,149 @@ def _equip(task_id, predicate, label):
     return item_id
 
 
-def _gather_logs(task_id, target_total):
+def _distance_sq(a, b):
+    return (
+        (float(a["x"]) - float(b["x"])) ** 2
+        + (float(a["y"]) - float(b["y"])) ** 2
+        + (float(a["z"]) - float(b["z"])) ** 2
+    )
+
+
+def _equip_best_axe(task_id):
+    counts = _item_counts()
+    for axe_id in AXE_ORDER:
+        if counts.get(axe_id, 0) <= 0:
+            continue
+        found = _slot_matching(lambda item, wanted=axe_id: item == wanted)
+        if found is None:
+            continue
+        slot, _, _ = found
+        _progress(task_id, f"equipping {axe_id}")
+        _require(_post("/equip-slot", {"slot": slot}), f"equip {axe_id}")
+        return axe_id
+    return None
+
+
+def _clear_foliage_around(task_id, target, max_blocks=10):
+    foliage = _find_blocks(
+        contains=FOLIAGE_PATTERNS,
+        radius=20,
+        limit=128,
+        exposed_only=True,
+    )
+    nearby = [
+        block
+        for block in foliage
+        if _distance_sq(block, target) <= 3.2 * 3.2
+    ]
+    nearby.sort(key=lambda block: _distance_sq(block, target))
+
+    cleared = 0
+    for block in nearby[:max_blocks]:
+        _task(task_id)
+        try:
+            _progress(
+                task_id,
+                f"clearing {block['type']} blocking access to a log",
+            )
+            _mine(task_id, block)
+            cleared += 1
+        except SkillFailure:
+            continue
+    return cleared
+
+
+def _craft_wooden_axe(task_id):
+    if _item_counts().get("minecraft:wooden_axe", 0) > 0:
+        return
+
+    _ensure_planks(task_id, 9)
+    _ensure_sticks(task_id, 2)
+    _place_crafting_table(task_id)
+
+    planks = _take_plank_ids(3)
+    if len(planks) < 3:
+        raise SkillFailure("not enough planks for wooden axe")
+
+    grid = [
+        planks[0], planks[1], "",
+        planks[2], "minecraft:stick", "",
+        "", "minecraft:stick", "",
+    ]
+    _craft(
+        task_id,
+        3,
+        3,
+        grid,
+        1,
+        "crafting a wooden axe for faster woodcutting",
+    )
+
+
+def _prepare_woodcutting(task_id):
+    if _equip_best_axe(task_id):
+        return
+
+    current_logs = _count_matching(
+        lambda item: any(pattern in item for pattern in LOG_PATTERNS)
+    )
+    if current_logs < 3:
+        _gather_logs(task_id, 3, use_axe=False)
+
+    _craft_wooden_axe(task_id)
+    if not _equip_best_axe(task_id):
+        raise SkillFailure("crafted an axe but could not equip it")
+
+
+def _gather_logs(task_id, target_total, use_axe=True):
+    if use_axe and target_total >= 5:
+        _prepare_woodcutting(task_id)
+    elif use_axe:
+        _equip_best_axe(task_id)
+
+    failed_rounds = 0
     while _count_matching(
         lambda item: any(pattern in item for pattern in LOG_PATTERNS)
     ) < target_total:
         _task(task_id)
         state = _require(_get("/state"), "read state")
-        blocks = _find_blocks(contains=LOG_PATTERNS, radius=20, limit=64, exposed_only=True)
-        max_y = float(state.get("y", 0)) + 2.5
-        blocks = [block for block in blocks if float(block["y"]) <= max_y]
+        max_y = float(state.get("y", 0)) + 4.0
 
-        if not blocks:
+        exposed = _find_blocks(
+            contains=LOG_PATTERNS,
+            radius=20,
+            limit=64,
+            exposed_only=True,
+        )
+        exposed = [
+            block for block in exposed
+            if float(block["y"]) <= max_y
+        ]
+
+        all_logs = _find_blocks(
+            contains=LOG_PATTERNS,
+            radius=20,
+            limit=96,
+            exposed_only=False,
+        )
+        all_logs = [
+            block for block in all_logs
+            if float(block["y"]) <= max_y
+        ]
+
+        candidates = exposed + [
+            block for block in all_logs
+            if not any(
+                block["x"] == seen["x"]
+                and block["y"] == seen["y"]
+                and block["z"] == seen["z"]
+                for seen in exposed
+            )
+        ]
+
+        if not candidates:
             raise SkillFailure(
-                "no reachable logs found within 20 blocks; move closer to trees and resume"
+                "no logs found within 20 blocks; move closer to trees and resume"
             )
 
         before = _count_matching(
@@ -205,14 +344,29 @@ def _gather_logs(task_id, target_total):
         )
         progress_made = False
 
-        for block in blocks[:8]:
+        for block in candidates[:12]:
             if _count_matching(
                 lambda item: any(pattern in item for pattern in LOG_PATTERNS)
             ) >= target_total:
                 break
+
             try:
-                _mine(task_id, block)
-                time.sleep(0.35)
+                if block not in exposed:
+                    _clear_foliage_around(task_id, block, max_blocks=8)
+
+                try:
+                    _mine(task_id, block)
+                except SkillFailure:
+                    cleared = _clear_foliage_around(
+                        task_id,
+                        block,
+                        max_blocks=12,
+                    )
+                    if cleared <= 0:
+                        continue
+                    _mine(task_id, block)
+
+                time.sleep(0.25)
                 after = _count_matching(
                     lambda item: any(pattern in item for pattern in LOG_PATTERNS)
                 )
@@ -224,11 +378,21 @@ def _gather_logs(task_id, target_total):
                 if after > before:
                     before = after
                     progress_made = True
+                    failed_rounds = 0
             except SkillFailure:
                 continue
 
         if not progress_made:
-            raise SkillFailure("found logs but could not harvest any reachable log blocks")
+            failed_rounds += 1
+            if failed_rounds >= 2:
+                raise SkillFailure(
+                    "logs were found but remained unreachable after clearing nearby leaves/vines"
+                )
+            _progress(
+                task_id,
+                "re-scanning tree after clearing foliage and changing approach",
+            )
+            time.sleep(0.3)
 
 
 def _craft(task_id, width, height, grid, times=1, description="crafting"):
@@ -524,6 +688,7 @@ def build_basic_house(task_id, args):
         task_id,
         f"preparing {required_planks} planks for a {width}x{length} house",
     )
+    _prepare_woodcutting(task_id)
     _ensure_planks(task_id, required_planks)
 
     state = _require(_get("/state"), "read state")
