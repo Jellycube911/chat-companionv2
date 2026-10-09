@@ -218,6 +218,8 @@ def _observe(view: Literal["state", "entities", "blocks", "inventory", "vision"]
                 state.get("jobState"),
                 state.get("jobReason"),
             ]
+            if state.get("jobProgress") is not None:
+                result["job_progress"] = round(float(state.get("jobProgress", 0)), 3)
         return result
 
     if view == "vision":
