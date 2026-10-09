@@ -399,6 +399,86 @@ class MemoryStore:
                 (now,),
             )
 
+            v9_cleanup = db.execute(
+                """
+                SELECT 1 FROM memories
+                WHERE kind='fact' AND memory_key='system.task_state_v9_cleanup'
+                LIMIT 1
+                """
+            ).fetchone()
+            if v9_cleanup is None:
+                # User work must outrank autonomous ambitions.
+                db.execute(
+                    """
+                    UPDATE goals
+                    SET priority=4, updated_at=?
+                    WHERE status='active'
+                      AND source='self'
+                      AND priority > 4
+                    """,
+                    (now,),
+                )
+                # This was an old autonomous goal, not a current user request.
+                db.execute(
+                    """
+                    UPDATE goals
+                    SET status='paused', updated_at=?
+                    WHERE status='active'
+                      AND source='self'
+                      AND lower(title)='build a simple starter house with alik'
+                    """,
+                    (now,),
+                )
+
+                polluted_ids = [
+                    row["id"]
+                    for row in db.execute(
+                        """
+                        SELECT id FROM learned_skills
+                        WHERE lower(intent)='mine reachable log'
+                        """
+                    ).fetchall()
+                ]
+                if polluted_ids:
+                    placeholders = ",".join("?" for _ in polluted_ids)
+                    db.execute(
+                        f"DELETE FROM skill_edges WHERE parent_skill_id IN ({placeholders}) OR child_skill_id IN ({placeholders})",
+                        [*polluted_ids, *polluted_ids],
+                    )
+                    db.execute(
+                        f"UPDATE skill_trials SET skill_id=NULL WHERE skill_id IN ({placeholders})",
+                        polluted_ids,
+                    )
+                    db.execute(
+                        f"DELETE FROM learned_skills WHERE id IN ({placeholders})",
+                        polluted_ids,
+                    )
+
+                # The old intent mixed logs, leaves, vines and repeated alignment
+                # timeouts. Start this capability's evidence clean under v9.
+                db.execute(
+                    """
+                    DELETE FROM skill_trials
+                    WHERE lower(intent)='mine reachable log'
+                    """
+                )
+
+                db.execute(
+                    """
+                    INSERT INTO memories(
+                        kind, memory_key, content, importance,
+                        created_at, updated_at, last_used
+                    )
+                    VALUES ('fact', 'system.task_state_v9_cleanup', ?, 8, ?, ?, ?)
+                    """,
+                    (
+                        "v9 retired polluted mining evidence, paused the obsolete autonomous starter-house goal, and capped active self-goal priority below user work.",
+                        now,
+                        now,
+                        now,
+                    ),
+                )
+
             goal_count = db.execute("SELECT COUNT(*) FROM goals").fetchone()[0]
             if goal_count == 0:
                 db.execute(
