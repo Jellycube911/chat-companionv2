@@ -24,6 +24,16 @@ def _post(path, payload=None):
     if payload is not None:
         kwargs["json"] = payload
     response = requests.post(f"{MINECRAFT_URL}{path}", **kwargs)
+    if response.status_code == 409:
+        try:
+            data = response.json()
+        except Exception:
+            data = {"error": response.text or "conflict"}
+        if not isinstance(data, dict):
+            data = {"error": str(data)}
+        data["ok"] = False
+        data["status_code"] = 409
+        return data
     response.raise_for_status()
     return response.json()
 
@@ -94,6 +104,11 @@ def _state():
         ] if isinstance(state, dict) else [0, 0, 0],
         "facing": state.get("facing") if isinstance(state, dict) else None,
         "owner_distance": round(float(owner.get("distance", 0)), 2),
+        "job_active": bool(state.get("jobActive", False)) if isinstance(state, dict) else False,
+        "job_type": state.get("jobType") if isinstance(state, dict) else None,
+        "job_state": state.get("jobState") if isinstance(state, dict) else None,
+        "job_reason": state.get("jobReason") if isinstance(state, dict) else None,
+        "job_progress": state.get("jobProgress") if isinstance(state, dict) else None,
     }
 
 
@@ -140,9 +155,13 @@ def _generalized_procedure(plan):
         procedure["verify"] = "distance to destination decreases or arrival completes"
     elif action == "mine":
         procedure["target"] = "known target block coordinate"
+        if plan.get("expected_block"):
+            procedure["expected_block"] = plan.get("expected_block")
+        if plan.get("expected_contains"):
+            procedure["expected_contains"] = plan.get("expected_contains")
         if plan.get("tool"):
             procedure["tool"] = plan.get("tool")
-        procedure["verify"] = "mining job completes and resulting world/inventory evidence changes"
+        procedure["verify"] = "target identity matches and mining job completes"
     elif action == "look_at":
         procedure["target"] = "known world coordinate"
     elif action == "collect":
@@ -227,6 +246,22 @@ def parse_plan(text):
     plan["hypothesis"] = str(
         plan.get("hypothesis") or f"{action} will advance the current goal"
     ).strip()[:1200]
+
+    if action == "mine" and not plan.get("expected_block") and not plan.get("expected_contains"):
+        intent = plan["intent"]
+        for token, expected in (
+            ("log", "_log"),
+            ("leaves", "leaves"),
+            ("leaf", "leaves"),
+            ("stone", "stone"),
+            ("dirt", "dirt"),
+            ("sand", "sand"),
+            ("ore", "_ore"),
+        ):
+            if token in intent:
+                plan["expected_contains"] = expected
+                break
+
     return plan
 
 
@@ -349,6 +384,42 @@ def _execute_action(plan, before):
         if x is None or y is None or z is None:
             return {"ok": False, "error": "mine requires x, y, z"}
 
+        target = {
+            "x": int(round(float(x))),
+            "y": int(round(float(y))),
+            "z": int(round(float(z))),
+        }
+        observed = _post("/block-at", target)
+        if _failed(observed):
+            return observed
+
+        observed_type = str(observed.get("type") or "")
+        expected_block = str(plan.get("expected_block") or "").strip()
+        expected_contains = str(plan.get("expected_contains") or "").strip()
+
+        if expected_block and observed_type != expected_block:
+            return {
+                "ok": False,
+                "error": "target_block_mismatch",
+                "expected_block": expected_block,
+                "observed_block": observed_type,
+                "target": target,
+            }
+        if expected_contains and expected_contains not in observed_type:
+            return {
+                "ok": False,
+                "error": "target_block_mismatch",
+                "expected_contains": expected_contains,
+                "observed_block": observed_type,
+                "target": target,
+            }
+        if observed.get("air"):
+            return {
+                "ok": False,
+                "error": "target_block_is_air",
+                "target": target,
+            }
+
         requested_tool = str(plan.get("tool") or "").strip()
         if requested_tool:
             slot = _slot_for_item(requested_tool, before["inventory"])
@@ -361,10 +432,7 @@ def _execute_action(plan, before):
             if _failed(equipped):
                 return equipped
 
-        started = _post(
-            "/mine-block",
-            {"x": int(round(float(x))), "y": int(round(float(y))), "z": int(round(float(z)))},
-        )
+        started = _post("/mine-block", target)
         return started if _failed(started) else _wait_for_job(30)
 
     if action == "place":
@@ -626,11 +694,37 @@ def execute_plan(plan):
             }
 
         after = _snapshot()
+        terminal = result.get("state") if isinstance(result, dict) else None
+        if terminal == "RUNNING":
+            summary = {
+                "ok": None,
+                "status": "pending",
+                "plan": plan,
+                "result": result,
+                "before": before,
+                "after": after,
+                "learning": None,
+                "efficiency": None,
+            }
+            store.record_event(
+                "practice_pending",
+                (
+                    f"intent={plan['intent']} action={plan['action']} "
+                    f"reason={result.get('reason', 'running')}"
+                )[:1200],
+            )
+            log_event(
+                "practice_host",
+                "action_pending",
+                elapsed_ms=round((time.monotonic() - started) * 1000),
+                **summary,
+            )
+            return summary
+
         success = _objective_success(plan, before, after, result)
         learning = None
         efficiency = None
         if plan["action"] != "idle":
-            terminal = result.get("state") if isinstance(result, dict) else None
             promotable = not (
                 plan["action"] in {"move_to", "mine"}
                 and terminal == "RUNNING"
