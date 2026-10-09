@@ -286,6 +286,46 @@ class MemoryStore:
                     ),
                 )
 
+            db.execute(
+                """
+                UPDATE goals
+                SET status='cancelled', updated_at=?
+                WHERE status='active'
+                  AND source='self'
+                  AND lower(title)='improve basic tools'
+                """,
+                (now,),
+            )
+            db.execute(
+                """
+                UPDATE goals
+                SET status='cancelled', updated_at=?
+                WHERE status='active'
+                  AND source='self'
+                  AND lower(title)='improve practical capability'
+                  AND id NOT IN (
+                      SELECT MIN(id)
+                      FROM goals
+                      WHERE status='active'
+                        AND source='self'
+                        AND lower(title)='improve practical capability'
+                  )
+                """,
+                (now,),
+            )
+            db.execute(
+                """
+                DELETE FROM memories
+                WHERE memory_key LIKE 'teacher.%'
+                  AND (
+                    lower(content) LIKE '%disconnected%'
+                    OR lower(content) LIKE '%integrated server%'
+                    OR lower(content) LIKE '%singleplayer world%'
+                    OR lower(content) LIKE '%world-connection%'
+                  )
+                """
+            )
+
             goal_count = db.execute("SELECT COUNT(*) FROM goals").fetchone()[0]
             if goal_count == 0:
                 db.execute(
