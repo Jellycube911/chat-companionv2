@@ -257,6 +257,81 @@ class PracticeRegressions(unittest.TestCase):
                 )
         asyncio.run(check())
 
+    def test_craft_rejects_two_ingredients_in_one_cell_without_http(self):
+        before = {"inventory": [
+            {"item": "minecraft:stick", "count": 5, "slot": 0},
+            {"item": "minecraft:wooden_pickaxe", "count": 1, "slot": 1},
+        ]}
+        with patch.object(practice, "_post") as post:
+            result = practice._execute_action({
+                "action": "craft", "width": 1, "height": 1,
+                "grid": ["minecraft:stick", "minecraft:wooden_pickaxe"],
+            }, before)
+        self.assertFalse(result["ok"])
+        self.assertIn("exactly 1 entries, received 2", result["error"])
+        post.assert_not_called()
+
+    def test_craft_valid_3_by_3_reaches_game_bridge(self):
+        before = {"inventory": [
+            {"item": "minecraft:jungle_planks", "count": 6, "slot": 0},
+            {"item": "minecraft:stick", "count": 5, "slot": 1},
+        ]}
+        planks = "minecraft:jungle_planks"
+        grid = [planks, planks, "", planks, "minecraft:stick", "",
+                "", "minecraft:stick", ""]
+        plan = {"action": "craft", "width": 3, "height": 3,
+                "grid": grid, "times": 1}
+        with patch.object(practice, "_post", return_value={
+            "ok": True, "item": "minecraft:wooden_axe", "count": 1,
+        }) as post:
+            result = practice._execute_action(plan, before)
+        self.assertTrue(result["ok"])
+        post.assert_called_once_with("/craft", {
+            "width": 3, "height": 3, "grid": grid, "times": 1,
+        })
+
+    def test_craft_checks_real_ingredient_counts(self):
+        before = {"inventory": [{"item": "minecraft:stick", "count": 1}]}
+        with patch.object(practice, "_post") as post:
+            result = practice._execute_action({
+                "action": "craft", "width": 1, "height": 2,
+                "grid": ["minecraft:stick", "minecraft:stick"],
+            }, before)
+        self.assertIn("craft_ingredients_missing", result["error"])
+        post.assert_not_called()
+
+    def test_craft_http_400_preserves_real_server_error(self):
+        from unittest.mock import Mock
+        response = Mock()
+        response.ok = False
+        response.status_code = 400
+        response.json.return_value = {
+            "error": "The supplied grid does not match a crafting recipe."
+        }
+        with patch.object(practice.requests, "post", return_value=response):
+            actual = practice._post("/craft", {"width": 3, "height": 3})
+        self.assertFalse(actual["ok"])
+        self.assertEqual(actual["status_code"], 400)
+        self.assertIn("does not match a crafting recipe", actual["error"])
+
+    def test_craft_rejected_grids_have_distinct_durable_session_keys(self):
+        invalid = {"action": "craft", "width": 1, "height": 1,
+                   "grid": ["minecraft:stick", "minecraft:wooden_pickaxe"]}
+        corrected = {"action": "craft", "width": 3, "height": 3,
+                     "grid": ["minecraft:jungle_planks"] * 3 + [""] * 6}
+        old_key = agent._plan_target_key(invalid)
+        self.assertTrue(old_key.startswith("craft@"))
+        self.assertNotEqual(old_key, agent._plan_target_key(corrected))
+        self.assertEqual(agent._invalid_target_ttl(old_key), 1800)
+        self.assertTrue(agent._target_failure_needs_replan({
+            "ok": False, "plan": invalid,
+            "result": {"ok": False, "error": "craft_grid_size_mismatch"},
+        }))
+        self.assertFalse(agent._target_failure_needs_replan({
+            "ok": True, "plan": corrected,
+            "result": {"ok": True, "item": "minecraft:wooden_axe"},
+        }))
+
     def test_target_key_ignores_hypothesis_wording(self):
         a = {"action": "mine", "x": 205, "y": 71, "z": -120, "hypothesis": "A"}
         b = dict(a, hypothesis="B", tool="minecraft:string")
