@@ -295,6 +295,21 @@ def build_turn_input(message, source, runtime):
 
     parts = [_awareness_text(runtime)]
 
+    recent_trials = store.recent_trials(5)
+    if recent_trials:
+        parts.append("RECENT SELF-LEARNING EXPERIMENTS:")
+        for trial in recent_trials:
+            parts.append(
+                f"- intent={trial['intent']} success={trial['success']} "
+                f"hypothesis={_trim(trial['hypothesis'], 260)}"
+            )
+            parts.append(
+                f"  actions={_trim(trial['actions'], 320)}"
+            )
+            parts.append(
+                f"  observed={_trim(trial['outcome'], 420)}"
+            )
+
     if tasks:
         parts.append("ACTIVE LOCAL TASKS:")
         for task in tasks[:4]:
@@ -378,7 +393,11 @@ def build_turn_input(message, source, runtime):
             "highest-priority active goal through one small evidence-producing "
             "experiment or one verified step of an already learned procedure. "
             "Search skill_memory first. Use primitive actions, observe the "
-            "result, and record the trial. Keep this turn focused."
+            "result, and record the trial. A PRACTICE turn is incomplete until "
+            "skill_memory(action='trial', ...) records the attempted hypothesis "
+            "and actual observed outcome, unless no physical experiment was safe "
+            "or possible. When the goal is visibly achieved, update the goal to "
+            "completed. Keep this turn focused."
         )
     else:
         parts.append("CURRENT MESSAGE FROM ALIK:")
@@ -1059,6 +1078,9 @@ async def autonomy_sensor(input_queue, runtime):
             for goal in store.list_goals("active", 4)
             if goal.get("source") != "system" or goal.get("priority", 0) >= 6
         ]
+
+        if job_active:
+            continue
 
         if (
             not meaningful_goals
