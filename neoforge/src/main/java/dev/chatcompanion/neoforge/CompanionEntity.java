@@ -35,6 +35,7 @@ public final class CompanionEntity extends PathfinderMob {
     private JobType jobType = JobType.NONE;
     private JobState jobState = JobState.CANCELLED;
     private String reason = "idle";
+    private float jobProgress;
     private Vec3 destination;
     private double stopDistance = 3;
     private long repathTick;
@@ -86,6 +87,11 @@ public final class CompanionEntity extends PathfinderMob {
     public JobType jobType() { return jobType; }
     public JobState jobState() { return jobState; }
     public String reason() { return reason; }
+    public float jobProgress() { return jobProgress; }
+    public void jobProgress(float value, String why) {
+        jobProgress = Math.clamp(value, 0.0F, 1.0F);
+        if (jobState == JobState.RUNNING && why != null && !why.isBlank()) reason = why;
+    }
     public SimpleContainer companionInventory() { return inventory; }
     public boolean actionsAllowed() { return true; }
     public void actionsAllowed(boolean value) { actionsAllowed = true; }
@@ -116,6 +122,7 @@ public final class CompanionEntity extends PathfinderMob {
     public void stop(String why) {
         getNavigation().stop();
         jobState = JobState.CANCELLED;
+        jobProgress = 0.0F;
         reason = why;
     }
 
@@ -128,7 +135,7 @@ public final class CompanionEntity extends PathfinderMob {
     }
 
     public UUID externalJob(JobType type) { begin(type, null, 2); return jobId; }
-    public void complete(String why) { getNavigation().stop(); jobState = JobState.COMPLETED; reason = why; }
+    public void complete(String why) { getNavigation().stop(); jobProgress = 1.0F; jobState = JobState.COMPLETED; reason = why; }
     public void failJob(String why) { fail(why); }
 
     private void begin(JobType type, Vec3 target, double radius) {
@@ -136,6 +143,7 @@ public final class CompanionEntity extends PathfinderMob {
         jobId = UUID.randomUUID();
         jobType = type;
         jobState = JobState.RUNNING;
+        jobProgress = 0.0F;
         reason = "moving";
         destination = target;
         stopDistance = radius;
@@ -207,7 +215,7 @@ public final class CompanionEntity extends PathfinderMob {
         }
     }
 
-    private void fail(String why) { getNavigation().stop(); jobState = JobState.FAILED; reason = why; }
+    private void fail(String why) { getNavigation().stop(); jobProgress = 0.0F; jobState = JobState.FAILED; reason = why; }
 
     @Override public void addAdditionalSaveData(CompoundTag tag) {
         super.addAdditionalSaveData(tag);
