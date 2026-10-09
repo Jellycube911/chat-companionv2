@@ -581,7 +581,7 @@ def _chat_awareness_text(runtime):
         f"- pos={pos}\n"
         f"- Alik distance={owner_distance}\n"
         f"- physical job={job}\n"
-        f"- activity={_current_activity_text()}\n"
+        f"- activity={_current_activity_text(runtime)}\n"
         f"- inventory={items or ['empty']}\n"
         f"- recent physical evidence={evidence or ['none']}\n"
         "- Never claim progress not supported by this evidence."
@@ -898,6 +898,17 @@ def _plan_matches_user_goal(plan, goal, subgoal=""):
     return False
 
 
+def _autonomy_job_blocks_practice(state, runtime, has_goals):
+    """A continuous follow job is a stance, not a completed work action."""
+    if not state.get("jobActive"):
+        return False
+    return not (
+        has_goals
+        and str(state.get("jobType") or "").upper() == "FOLLOW"
+        and time.monotonic() >= float(runtime.get("manual_control_until", 0.0) or 0.0)
+    )
+
+
 def _current_user_subgoal(runtime):
     subgoal = runtime.get("user_subgoal") or {}
     if time.monotonic() - float(subgoal.get("at", 0.0)) >= 120.0:
@@ -983,12 +994,28 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         log_event("practice_host", "manual_control_hold")
         return {"ok": True, "status": "manual_control_hold"}
 
+    active_goal = bool(store.list_goals("active", 4))
+    preempt_follow = (
+        source == "practice"
+        and state.get("jobActive")
+        and not _autonomy_job_blocks_practice(state, runtime, active_goal)
+    )
     if state.get("jobActive"):
-        if source == "command":
+        if source == "command" or preempt_follow:
             try:
-                await asyncio.to_thread(_post, "/stop-action")
+                stopped = await asyncio.to_thread(_post, "/stop-action")
+                if isinstance(stopped, dict) and stopped.get("ok") is False:
+                    raise RuntimeError(f"stop action rejected: {stopped}")
                 await asyncio.sleep(0.1)
                 await update_awareness(runtime)
+                state = (runtime.get("awareness") or {}).get("state") or {}
+                log_event(
+                    "practice_host", "preempt_follow_for_goal" if preempt_follow else "command_preemption",
+                    accepted=not state.get("jobActive", False),
+                    job_type=state.get("jobType"),
+                )
+                if state.get("jobActive"):
+                    return {"ok": False, "status": "preemption_failed"}
             except Exception as error:
                 log_exception(
                     "practice_host",
@@ -996,6 +1023,7 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
                     error,
                     directive=directive,
                 )
+                return {"ok": False, "status": "preemption_failed"}
         else:
             log_event(
                 "practice_host",
@@ -1119,6 +1147,12 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         plan=plan,
         execution=execution,
     )
+    if execution.get("ok") and (execution.get("result") or {}).get("state") == "COMPLETED":
+        runtime["last_verified_action"] = {
+            "at": time.monotonic(),
+            "action": plan.get("action"),
+            "result": execution.get("result"),
+        }
     await _report_planned_outcome(runtime, execution, source)
     return execution
 
@@ -1330,7 +1364,7 @@ async def run_turn(agent, message, source, reply_in_game, runtime):
             result = await Runner.run(agent, prepared, max_turns=max_turns)
             answer = str(result.final_output or "").strip()
         if source in {"minecraft", "console"}:
-            answer = _format_ingame_reply(answer)
+            answer = _format_ingame_reply(_ground_chat_reply(answer, runtime))
     except MaxTurnsExceeded as error:
         log_exception(
             "agent",
@@ -1826,7 +1860,8 @@ async def fast_chat_reflex(text, runtime=None):
             return {"handled": True, "reply": "looking", "background": False}
 
         if (
-            "come to me" in normalized
+            normalized == "come"
+            or "come to me" in normalized
             or normalized.startswith("come here")
             or normalized.startswith("can you come here")
             or normalized.startswith("can u come here")
@@ -1840,6 +1875,11 @@ async def fast_chat_reflex(text, runtime=None):
                 f"Alik asked Chat to come to him; follow result: {result}",
             )
             accepted = bool(result.get("ok", True))
+            if runtime is not None:
+                runtime["last_move_command"] = {
+                    "at": time.monotonic(), "accepted": accepted,
+                    "kind": "follow",
+                }
             if accepted and runtime is not None:
                 runtime["manual_control_until"] = time.monotonic() + 60.0
             return {
@@ -1933,7 +1973,15 @@ async def fast_chat_reflex(text, runtime=None):
     return None
 
 
-def _current_activity_text():
+def _current_activity_text(runtime=None):
+    awareness = (runtime or {}).get("awareness") or {}
+    state = awareness.get("state") or {}
+    if state.get("jobActive"):
+        job = str(state.get("jobType") or "task").lower()
+        reason = str(state.get("jobReason") or "")
+        if job == "follow":
+            return "following you" if reason != "holding" else "staying near you"
+        return _format_ingame_reply(f"{job} rn, {reason or 'in progress'}")
     active = [
         task
         for task in store.list_tasks(8)
@@ -1953,7 +2001,7 @@ def _current_activity_text():
     ]
     if meaningful:
         goal = meaningful[0]
-        return _format_ingame_reply(f"working on {goal['title'].lower()}")
+        return _format_ingame_reply(f"planning {goal['title'].lower()}; haven't finished it")
     return "just looking around rn"
 
 
@@ -2030,8 +2078,51 @@ def _learning_status_text():
     return "haven't learned it yet"
 
 
+def _is_movement_feedback(text):
+    normalized = _normalize_request_text(text)
+    return (
+        bool(re.search(r"\b(?:u|you)\s+(?:didnt|didn't|did not|havent|haven't)\s+mov", normalized))
+        or normalized in {"stuck on what", "why are you stuck", "why are u stuck"}
+    )
+
+
+def _motion_evidence_reply(runtime):
+    state = ((runtime or {}).get("awareness") or {}).get("state") or {}
+    move = (runtime or {}).get("last_move_command") or {}
+    reason = str(state.get("jobReason") or "")
+    job = str(state.get("jobType") or "")
+    if state.get("jobActive") and job in {"FOLLOW", "MOVE"}:
+        if reason == "holding":
+            return "i'm holding near you, not moving"
+        return "movement is active; haven't confirmed arrival"
+    if move and not move.get("accepted"):
+        return "my movement command was rejected"
+    if move and move.get("accepted"):
+        return "you're right, movement wasn't confirmed"
+    return "you're right, no movement attempt recorded"
+
+
+def _ground_chat_reply(answer, runtime):
+    """Strip unsupported physical claims, not conversational personality."""
+    answer = str(answer or "")
+    # No recipe lookup was performed by a chat-only turn. Never fabricate
+    # quantitative requirements from the agent's inventory counts.
+    if re.search(
+        r"\b(?:need|requires?|takes?)\s+\d+[^.!?]{0,100}\b(?:logs?|sticks?|planks?)\b",
+        answer, re.I,
+    ):
+        return "haven't checked the recipe yet"
+    attempted_movement = bool(re.search(
+        r"\bi\s+(?:tried\s+(?:to\s+)?mov|moved|walked)\b", answer, re.I,
+    ))
+    recent = (runtime or {}).get("last_move_command") or {}
+    if attempted_movement and not recent:
+        return "haven't confirmed any movement yet"
+    return answer
+
+
 def _is_activity_question(text):
-    normalized = text.lower().strip().rstrip(".!?")
+    normalized = _normalize_request_text(text)
     return normalized in {
         "what are you doing",
         "what are u doing",
@@ -2041,6 +2132,7 @@ def _is_activity_question(text):
         "what are u up to",
         "what is your current task",
         "what's your current task",
+        "what is next on your task",
     }
 
 
@@ -2133,6 +2225,13 @@ async def poll_minecraft_chat(input_queue, runtime, chat_agent):
                         )
                         continue
 
+                    if _is_movement_feedback(text):
+                        answer = _motion_evidence_reply(runtime)
+                        await _send_ingame(answer, reason="instant_movement_evidence")
+                        store.record_episode(text, answer)
+                        log_event("chat", "instant_reply", message=text, reply=answer)
+                        continue
+
                     if _is_learning_status_question(text):
                         answer = _learning_status_text()
                         await _send_ingame(
@@ -2213,17 +2312,8 @@ async def poll_minecraft_chat(input_queue, runtime, chat_agent):
                             )
                         continue
 
-                    await _send_ingame(
-                        "sec",
-                        reason="queued_chat_ack",
-                        retry=False,
-                    )
-                    log_event(
-                        "chat",
-                        "queued_chat_ack",
-                        message=text,
-                        reply="sec",
-                    )
+                    # Qwen's fast chat lane typically answers within a second.
+                    # Do not spam 'sec' before every normal message.
                     _spawn_player_chat(
                         chat_agent,
                         text,
@@ -2505,8 +2595,30 @@ async def autonomy_sensor(input_queue, runtime):
             for task in store.list_tasks(6)
             if task["status"] in {"queued", "running"}
         ]
-        task_active = bool(active_tasks)
+        # A queued/stale legacy task does not prove a task is executing.
+        # Only the actual worker holding a task may suspend practice.
+        task_active = runtime.get("active_task") is not None
         job_active = bool(state.get("jobActive"))
+        if now - float(runtime.get("last_sensor_trace", 0.0) or 0.0) >= 15.0:
+            runtime["last_sensor_trace"] = now
+            log_event(
+                "sensor", "autonomy_heartbeat",
+                job_active=job_active,
+                job_type=state.get("jobType"),
+                job_reason=state.get("jobReason"),
+                active_worker=runtime.get("active_task"),
+                legacy_tasks=[
+                    {"id": task.get("id"), "status": task.get("status"), "skill": task.get("skill")}
+                    for task in active_tasks[:4]
+                ],
+                goals=[
+                    {"id": goal.get("id"), "source": goal.get("source"), "title": goal.get("title")}
+                    for goal in store.list_goals("active", 4)
+                ],
+                owner_distance=(state.get("owner") or {}).get("distance"),
+                manual_control=now < float(runtime.get("manual_control_until", 0.0) or 0.0),
+                autonomy_pending=bool(runtime.get("autonomy_pending")),
+            )
 
         hostiles = sorted(
             (
@@ -2652,7 +2764,9 @@ async def autonomy_sensor(input_queue, runtime):
             if goal.get("source") != "system" or goal.get("priority", 0) >= 6
         ]
 
-        if job_active:
+        if _autonomy_job_blocks_practice(
+            state, runtime, bool(meaningful_goals)
+        ):
             continue
 
         if (
@@ -2719,7 +2833,9 @@ async def autonomy_sensor(input_queue, runtime):
 
         runtime["autonomy_pending"] = True
         runtime["last_autonomy_thought"] = now
-        source = "practice" if meaningful_goals else "autonomy"
+        # Even curiosity must use the host-executed experiment lane.
+        # A free-form autonomy text turn cannot perform physical actions.
+        source = "practice"
         message = (
             "Continue learning or applying a procedure toward the highest-priority "
             "active goal. Produce evidence from the world, record the trial, and "
@@ -2737,6 +2853,19 @@ async def autonomy_sensor(input_queue, runtime):
             source,
             message,
         )
+
+
+async def resilient_autonomy_sensor(input_queue, runtime):
+    """Restart sensing after an unexpected exception instead of going silent."""
+    while True:
+        try:
+            await autonomy_sensor(input_queue, runtime)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            log_exception("sensor", "sensor_crashed", error)
+            runtime["autonomy_pending"] = False
+            await asyncio.sleep(2.0)
 
 
 async def main():
@@ -2808,7 +2937,7 @@ async def main():
                 poll_minecraft_chat(input_queue, runtime, chat_agent)
             ),
             asyncio.create_task(console_input(input_queue, runtime)),
-            asyncio.create_task(autonomy_sensor(input_queue, runtime)),
+            asyncio.create_task(resilient_autonomy_sensor(input_queue, runtime)),
             asyncio.create_task(local_task_worker(input_queue, runtime)),
             asyncio.create_task(cloud_learning_worker(input_queue, runtime)),
         ]

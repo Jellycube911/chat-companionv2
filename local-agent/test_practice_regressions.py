@@ -158,6 +158,53 @@ class PracticeRegressions(unittest.TestCase):
             }
         }))
 
+    def test_continuous_follow_does_not_starve_goal_practice(self):
+        state = {"jobActive": True, "jobType": "FOLLOW", "jobReason": "holding"}
+        with patch.object(agent.time, "monotonic", return_value=500.0):
+            self.assertFalse(agent._autonomy_job_blocks_practice(state, {}, True))
+            self.assertTrue(agent._autonomy_job_blocks_practice(state, {}, False))
+            self.assertTrue(agent._autonomy_job_blocks_practice(
+                state, {"manual_control_until": 550.0}, True))
+            self.assertTrue(agent._autonomy_job_blocks_practice(
+                dict(state, jobType="MINE"), {}, True))
+
+    def test_short_come_command_is_physical(self):
+        async def check():
+            with patch.object(agent.store, "cancel_tasks"), patch.object(
+                agent, "_post", return_value={"ok": True}
+            ) as post, patch.object(agent.store, "record_event"):
+                state = {}
+                reply = await agent.fast_chat_reflex("come", state)
+                self.assertEqual(reply["reply"], "coming")
+                self.assertTrue(state["last_move_command"]["accepted"])
+                post.assert_called_once_with("/follow-owner")
+        asyncio.run(check())
+
+    def test_current_activity_is_grounded_not_fake_progress(self):
+        self.assertTrue(agent._is_activity_question("so what are u doing"))
+        with patch.object(agent.store, "list_tasks", return_value=[]), patch.object(
+            agent.store, "list_goals",
+            return_value=[{"title": "Obtain an axe", "source": "user", "priority": 9}],
+        ):
+            reply = agent._current_activity_text({"awareness": {"state": {"jobActive": False}}})
+            self.assertIn("planning", reply)
+            self.assertNotIn("working on", reply)
+
+    def test_unverified_chat_and_movement_corrections(self):
+        self.assertTrue(agent._is_movement_feedback("u didnt freaking move"))
+        self.assertEqual(
+            agent._motion_evidence_reply({}),
+            "you're right, no movement attempt recorded",
+        )
+        self.assertEqual(
+            agent._ground_chat_reply("i need 14 jungle logs and 5 sticks to craft an axe", {}),
+            "haven't checked the recipe yet",
+        )
+        self.assertEqual(
+            agent._ground_chat_reply("i tried moving but got stuck", {}),
+            "haven't confirmed any movement yet",
+        )
+
     def test_target_key_ignores_hypothesis_wording(self):
         a = {"action": "mine", "x": 205, "y": 71, "z": -120, "hypothesis": "A"}
         b = dict(a, hypothesis="B", tool="minecraft:string")
