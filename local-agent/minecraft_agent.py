@@ -169,7 +169,7 @@ def _discover_local_model():
 
 
 def choose_model():
-    provider = os.getenv("COMPANION_MODEL_PROVIDER", "auto").strip().lower()
+    provider = os.getenv("COMPANION_MODEL_PROVIDER", "local").strip().lower()
 
     if provider in {"auto", "local"}:
         discovered = _discover_local_model()
@@ -188,9 +188,10 @@ def choose_model():
             )
         if provider == "local":
             raise RuntimeError(
-                "COMPANION_MODEL_PROVIDER=local but no OpenAI-compatible "
-                "local model endpoint was found. Start your local model server "
-                "or set COMPANION_LOCAL_BASE_URL/COMPANION_LOCAL_MODEL."
+                "No local companion model is running. The default is now LOCAL-ONLY "
+                "to prevent accidental API token use. Start an OpenAI-compatible local "
+                "model server, or explicitly set COMPANION_MODEL_PROVIDER=openai "
+                "if you intentionally want the Luna fallback."
             )
 
     model_name = os.getenv(
