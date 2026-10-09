@@ -34,6 +34,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.SimpleContainer;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.monster.Enemy;
@@ -169,6 +170,7 @@ public final class LocalAgentBridge {
                     result.put("jobType", companion.jobType().name());
                     result.put("jobState", companion.jobState().name());
                     result.put("jobReason", companion.reason());
+                    result.put("jobProgress", companion.jobProgress());
                 } else {
                     Map<String, Object> lastJob = new LinkedHashMap<>();
                     lastJob.put("type", companion.jobType().name());
@@ -957,6 +959,7 @@ public final class LocalAgentBridge {
                 ItemStack oldMain = inventory.getItem(0).copy();
                 inventory.setItem(0, selected);
                 inventory.setItem(request.slot(), oldMain);
+                companion.setItemSlot(EquipmentSlot.MAINHAND, selected.copy());
 
                 return Map.of(
                         "ok", true,
