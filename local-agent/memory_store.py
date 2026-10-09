@@ -643,6 +643,8 @@ class MemoryStore:
         description = str(description).strip()[:1200]
         priority = max(1, min(10, int(priority)))
         source = str(source).strip()[:40] or "self"
+        if source == "self":
+            priority = min(priority, 4)
         if not title:
             raise ValueError("goal title is required")
         now = time.time()
