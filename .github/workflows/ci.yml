@@ -299,24 +299,20 @@ jobs:
 
           original_post = practice_engine._post
           try:
-              def no_move_post(path, payload=None):
-                  raise AssertionError("nearby move_to should be rejected before HTTP")
-              practice_engine._post = no_move_post
+              def reject_occupied(path, payload=None):
+                  assert path == "/block-at", path
+                  return {"ok": True, "air": False, "type": "minecraft:oak_log"}
+              practice_engine._post = reject_occupied
               nearby_before = {
                   "state": {"pos": [10.0, 64.0, 10.0]},
                   "inventory": [],
               }
               rejected = practice_engine._execute_action(
-                  {
-                      "action": "move_to",
-                      "x": 12.0,
-                      "y": 64.0,
-                      "z": 10.0,
-                  },
+                  {"action": "move_to", "x": 12.0, "y": 64.0, "z": 10.0},
                   nearby_before,
               )
               assert rejected["ok"] is False
-              assert "interaction range" in rejected["error"]
+              assert rejected["error"] == "destination_occupied"
           finally:
               practice_engine._post = original_post
 

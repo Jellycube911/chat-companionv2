@@ -725,7 +725,7 @@ def _reconcile_user_goals(execution):
             ) > 0
             if has_axe:
                 store.update_goal(goal["id"], status="completed")
-                messages.append("crafted an axe, task done")
+                messages.append("got an axe, task done")
                 continue
 
         if normalized in {"obtain a crafting table", "get a crafting table"}:
@@ -1414,10 +1414,11 @@ def _looks_like_direct_request(text):
 async def fast_task_intent(text):
     normalized = _normalize_request_text(text)
     if normalized in {"make it", "craft it", "get it"}:
-        return next(
-            (goal for goal in store.list_goals("active", 20) if goal["source"] == "user"),
-            None,
-        )
+        user_goals = [
+            goal for goal in store.list_goals("active", 20)
+            if goal["source"] == "user"
+        ]
+        return max(user_goals, key=lambda goal: int(goal["id"]), default=None)
     if not _looks_like_direct_request(text):
         return None
 
