@@ -140,6 +140,8 @@ def _generalized_procedure(plan):
         procedure["verify"] = "distance to destination decreases or arrival completes"
     elif action == "mine":
         procedure["target"] = "known target block coordinate"
+        if plan.get("tool"):
+            procedure["tool"] = plan.get("tool")
         procedure["verify"] = "mining job completes and resulting world/inventory evidence changes"
     elif action == "look_at":
         procedure["target"] = "known world coordinate"
@@ -346,11 +348,24 @@ def _execute_action(plan, before):
     if action == "mine":
         if x is None or y is None or z is None:
             return {"ok": False, "error": "mine requires x, y, z"}
+
+        requested_tool = str(plan.get("tool") or "").strip()
+        if requested_tool:
+            slot = _slot_for_item(requested_tool, before["inventory"])
+            if slot is None:
+                return {
+                    "ok": False,
+                    "error": f"requested mining tool is not in inventory: {requested_tool}",
+                }
+            equipped = _post("/equip-slot", {"slot": int(slot)})
+            if _failed(equipped):
+                return equipped
+
         started = _post(
             "/mine-block",
             {"x": int(round(float(x))), "y": int(round(float(y))), "z": int(round(float(z)))},
         )
-        return started if _failed(started) else _wait_for_job(22)
+        return started if _failed(started) else _wait_for_job(30)
 
     if action == "place":
         inventory = before["inventory"]
@@ -436,7 +451,7 @@ def _objective_success(plan, before, after, result):
         return bool(result.get("ok", True))
 
     if action == "mine":
-        return terminal == "COMPLETED"
+        return terminal == "COMPLETED" and str(result.get("reason", "")).startswith("block_mined")
 
     if action == "collect":
         wanted = plan.get("item")
@@ -457,6 +472,68 @@ def _objective_success(plan, before, after, result):
         return bool(result.get("ok", True))
 
     return False
+
+
+def _parse_mining_metrics(result):
+    reason = str((result or {}).get("reason") or "")
+    if not reason.startswith("block_mined|"):
+        return None
+
+    values = {}
+    for part in reason.split("|")[1:]:
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        values[key.strip()] = value.strip()
+
+    try:
+        ticks = max(1, int(values.get("break_ticks", "0")))
+    except ValueError:
+        return None
+
+    block = values.get("block") or "unknown"
+    tool = values.get("tool") or "minecraft:air"
+    seconds = ticks / 20.0
+    reward = 1.0 + (20.0 / ticks)
+    return {
+        "context": f"mine:{block}",
+        "option": tool,
+        "break_ticks": ticks,
+        "seconds": seconds,
+        "reward": reward,
+        "block": block,
+        "tool": tool,
+    }
+
+
+def _record_efficiency(plan, result, success):
+    if plan.get("action") != "mine":
+        return None
+
+    metrics = _parse_mining_metrics(result)
+    if metrics is None:
+        return None
+
+    row = store.record_efficiency(
+        metrics["context"],
+        metrics["option"],
+        metrics["seconds"],
+        success,
+        metrics["reward"] if success else 0.0,
+        metadata=json.dumps(
+            {
+                "block": metrics["block"],
+                "tool": metrics["tool"],
+                "break_ticks": metrics["break_ticks"],
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+    )
+    return {
+        **metrics,
+        "memory": row,
+    }
 
 
 def _record_learning(plan, result, before, after, success, promotable=True):
@@ -551,6 +628,7 @@ def execute_plan(plan):
         after = _snapshot()
         success = _objective_success(plan, before, after, result)
         learning = None
+        efficiency = None
         if plan["action"] != "idle":
             terminal = result.get("state") if isinstance(result, dict) else None
             promotable = not (
@@ -565,6 +643,7 @@ def execute_plan(plan):
                 success,
                 promotable=promotable,
             )
+            efficiency = _record_efficiency(plan, result, success)
 
         summary = {
             "ok": success,
@@ -573,6 +652,7 @@ def execute_plan(plan):
             "before": before,
             "after": after,
             "learning": learning,
+            "efficiency": efficiency,
         }
         store.record_event(
             "practice_result",
