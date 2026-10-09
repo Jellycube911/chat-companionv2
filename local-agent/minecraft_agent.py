@@ -594,11 +594,7 @@ async def run_turn(agent, message, source, reply_in_game, runtime):
     prepared = build_turn_input(message, source, runtime)
     max_turns = 10 if source in {"autonomy", "event", "task", "learning", "practice", "command"} else min(MAX_AGENT_TURNS, 4)
     turn_started = time.monotonic()
-    ack_task = (
-        asyncio.create_task(_delayed_chat_ack())
-        if source == "minecraft" and reply_in_game
-        else None
-    )
+    ack_task = None
     log_event(
         "agent",
         "turn_start",
@@ -1037,6 +1033,17 @@ async def poll_minecraft_chat(input_queue, runtime):
                             )
                         continue
 
+                    await _send_ingame(
+                        "sec",
+                        reason="queued_chat_ack",
+                        retry=False,
+                    )
+                    log_event(
+                        "chat",
+                        "queued_chat_ack",
+                        message=text,
+                        reply="sec",
+                    )
                     await enqueue(input_queue, runtime, 0, "minecraft", text)
         except Exception:
             pass
