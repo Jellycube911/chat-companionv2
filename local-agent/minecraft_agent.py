@@ -1976,24 +1976,25 @@ async def fast_chat_reflex(text, runtime=None):
             or normalized.startswith("can u come to me")
         ):
             store.cancel_tasks()
-            result = await asyncio.to_thread(_post, "/follow-owner")
-            store.record_event(
-                "motor_reflex",
-                f"Alik asked Chat to come to him; follow result: {result}",
-            )
-            accepted = bool(result.get("ok", True))
+            state = await asyncio.to_thread(_get, "/state")
+            owner = state.get("owner") or {}
+            if float(owner.get("distance", 999) or 999) <= 2.3:
+                return {"handled": True, "reply": "i'm here", "background": False}
+            if not all(owner.get(axis) is not None for axis in ("x", "y", "z")):
+                return {"handled": True, "reply": "can't locate you", "background": False}
+            result = await asyncio.to_thread(_post, "/move-to", {
+                "x": owner["x"], "y": owner["y"], "z": owner["z"],
+                "stop_distance": 2.0,
+            })
+            accepted = isinstance(result, dict) and result.get("ok") is not False
             if runtime is not None:
                 runtime["last_move_command"] = {
-                    "at": time.monotonic(), "accepted": accepted,
-                    "kind": "follow",
+                    "at": time.monotonic(), "accepted": accepted, "kind": "approach_once"
                 }
-            if accepted and runtime is not None:
-                runtime["manual_control_until"] = time.monotonic() + 60.0
-            return {
-                "handled": True,
-                "reply": "coming" if accepted else "couldn't move, checking",
-                "background": False,
-            }
+                if accepted:
+                    runtime["manual_control_until"] = time.monotonic() + 20.0
+            store.record_event("motor_reflex", f"One-time approach result: {result}")
+            return {"handled": True, "reply": "coming" if accepted else "couldn't move", "background": False}
 
         if normalized in {"follow me", "follow"}:
             store.cancel_tasks()
