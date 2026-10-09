@@ -37,7 +37,7 @@ AMBIENT_WANDER_INTERVAL = 22.0
 REFLEX_COOLDOWN = 4.0
 LEARNING_COOLDOWN_SECONDS = 1800
 TEACHER_MAX_OUTPUT_TOKENS = 700
-AGENT_BUILD = "self-learning-local-brain-v3-responsive-chat-2026-10-09"
+AGENT_BUILD = "self-learning-local-brain-v4-player-chat-2026-10-09"
 BASE_DIR = Path(__file__).resolve().parent
 
 set_tracing_disabled(True)
@@ -564,7 +564,8 @@ def build_turn_input(message, source, runtime):
         )
     elif source == "practice":
         parts.append(
-            "INTERNAL PRACTICE TURN: not a message from Alik. Advance the "
+            "INTERNAL PRACTICE TURN: not a message from Alik. Never chat, ask "
+            "questions, or explain observations. Advance the "
             "highest-priority active goal through one small evidence-producing "
             "experiment or one verified step of an already learned procedure. "
             "Search skill_memory first. Use primitive actions, observe the "
@@ -572,8 +573,10 @@ def build_turn_input(message, source, runtime):
             "skill_memory(action='trial', ...) records the attempted hypothesis "
             "and actual observed outcome, unless no physical experiment was safe "
             "or possible. When the goal is visibly achieved, update the goal to "
-            "completed. Keep this turn focused."
+            "completed. Keep this turn focused. End with a tiny internal status "
+            "only after recording the experiment."
         )
+        parts.append("/no_think")
     elif source == "command":
         parts.append(
             "BACKGROUND USER COMMAND: Alik already received a short acknowledgement. "
@@ -592,7 +595,13 @@ def build_turn_input(message, source, runtime):
 
 async def run_turn(agent, message, source, reply_in_game, runtime):
     prepared = build_turn_input(message, source, runtime)
-    max_turns = 10 if source in {"autonomy", "event", "task", "learning", "practice", "command"} else min(MAX_AGENT_TURNS, 4)
+    max_turns = (
+        6
+        if source in {"autonomy", "event", "task", "learning", "practice"}
+        else 8
+        if source == "command"
+        else 1
+    )
     turn_started = time.monotonic()
     ack_task = None
     log_event(
@@ -776,6 +785,16 @@ def _simple_chat_reply(text):
     normalized = text.lower().strip().rstrip(".!?")
     if normalized in {"hey", "hi", "hello", "yo", "sup", "hey chat", "hi chat"}:
         return "hey"
+    if any(
+        phrase in normalized
+        for phrase in (
+            "how are you",
+            "how you doing",
+            "how u doing",
+            "how are u",
+        )
+    ):
+        return "good lol, you?"
     if normalized in {"thanks", "thank you", "thx", "ty"}:
         return "np"
     if normalized in {
@@ -788,6 +807,46 @@ def _simple_chat_reply(text):
         "what u doing",
     }:
         return _current_activity_text()
+    return None
+
+
+def _feedback_reply(text):
+    normalized = text.lower().strip().rstrip(".!?")
+
+    negative = (
+        "you didnt ",
+        "you didn't ",
+        "you did not ",
+        "you havent ",
+        "you haven't ",
+        "you have not ",
+    )
+    if normalized.startswith(negative):
+        return "yea, you're right", True
+
+    if (
+        any(word in normalized for word in ("tree", "trees", "log", "logs"))
+        and any(
+            phrase in normalized
+            for phrase in (
+                "near you",
+                "nearby",
+                "right near",
+                "around you",
+                "above you",
+                "behind you",
+                "in front of you",
+                "standing near",
+            )
+        )
+    ):
+        return "oh nice, got it", True
+
+    if normalized.startswith(("yes ", "yeah ", "yep ")) and any(
+        word in normalized for word in ("there", "near", "tree", "logs")
+    ):
+        return "got it", True
+
     return None
 
 
@@ -837,6 +896,40 @@ async def fast_chat_reflex(text):
         }
 
     try:
+        if "look up" in normalized:
+            state = await asyncio.to_thread(_get, "/state")
+            result = await asyncio.to_thread(
+                _post,
+                "/look-at",
+                {
+                    "x": int(round(state.get("x", 0))),
+                    "y": int(round(state.get("y", 0) + 8)),
+                    "z": int(round(state.get("z", 0))),
+                },
+            )
+            store.record_event(
+                "motor_reflex",
+                f"Alik asked Chat to look up: {result}",
+            )
+            return {"handled": True, "reply": "looking", "background": False}
+
+        if "look down" in normalized:
+            state = await asyncio.to_thread(_get, "/state")
+            result = await asyncio.to_thread(
+                _post,
+                "/look-at",
+                {
+                    "x": int(round(state.get("x", 0))),
+                    "y": int(round(state.get("y", 0) - 6)),
+                    "z": int(round(state.get("z", 0))),
+                },
+            )
+            store.record_event(
+                "motor_reflex",
+                f"Alik asked Chat to look down: {result}",
+            )
+            return {"handled": True, "reply": "looking", "background": False}
+
         if (
             "come to me" in normalized
             or normalized.startswith("come here")
@@ -901,7 +994,24 @@ async def fast_chat_reflex(text):
         )
         return None
 
+    feedback = _feedback_reply(text)
+    if feedback is not None:
+        reply, background = feedback
+        store.record_event(
+            "user_feedback",
+            f"Alik said: {text}",
+        )
+        return {
+            "handled": True,
+            "reply": reply,
+            "background": background,
+        }
+
     if _looks_like_action_request(text):
+        store.record_event(
+            "user_instruction",
+            f"Alik asked: {text}",
+        )
         return {
             "handled": True,
             "reply": "yep, on it",
@@ -980,6 +1090,7 @@ async def poll_minecraft_chat(input_queue, runtime):
                 text = str(message.get("text", "")).strip()
                 if text:
                     runtime["last_user_activity"] = time.monotonic()
+                    log_event("chat", "user_message", message=text)
                     _preempt_background_reasoning(runtime)
 
                     if _is_activity_question(text):
@@ -1029,7 +1140,7 @@ async def poll_minecraft_chat(input_queue, runtime):
                                 runtime,
                                 0,
                                 "command",
-                                f"Alik asked: {text}",
+                                f"Alik said: {text}",
                             )
                         continue
 
@@ -1598,6 +1709,11 @@ async def main():
                 "convert_schemas_to_strict": True,
             },
         )
+        chat_agent = Agent(
+            name="Chat",
+            model=model,
+            instructions=INSTRUCTIONS,
+        )
 
         tasks = [
             asyncio.create_task(poll_minecraft_chat(input_queue, runtime)),
@@ -1638,7 +1754,6 @@ async def main():
                     break
 
                 if source == "minecraft":
-                    log_event("chat", "user_message", message=message)
                     print(f"\n[MINECRAFT] Alik: {message}")
 
                 try:
@@ -1646,9 +1761,14 @@ async def main():
                     if source == "task":
                         reply_in_game = "completed" in message or "failed" in message
 
+                    turn_agent = (
+                        chat_agent
+                        if source in {"minecraft", "console"}
+                        else agent
+                    )
                     reasoning = asyncio.create_task(
                         run_turn(
-                            agent,
+                            turn_agent,
                             message,
                             source=source,
                             reply_in_game=reply_in_game,
