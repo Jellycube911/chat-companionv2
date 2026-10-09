@@ -30,6 +30,20 @@ class SkillFailure(Exception):
     pass
 
 
+class SkillUnavailable(Exception):
+    pass
+
+
+TRANSIENT_WORLD_ERRORS = (
+    "player is not connected to a world",
+    "owner player is unavailable",
+    "companion server service is not ready",
+    "no loaded companion found",
+    "integrated server",
+    "companion world is unavailable",
+)
+
+
 def _request(method, path, payload=None, timeout=8):
     try:
         kwargs = {"timeout": timeout}
@@ -63,7 +77,11 @@ def _post(path, payload=None):
 
 def _require(result, what):
     if isinstance(result, dict) and result.get("ok") is False:
-        raise SkillFailure(f"{what}: {result.get('error', 'failed')}")
+        message = str(result.get("error", "failed"))
+        lower = message.lower()
+        if any(fragment in lower for fragment in TRANSIENT_WORLD_ERRORS):
+            raise SkillUnavailable(f"{what}: {message}")
+        raise SkillFailure(f"{what}: {message}")
     return result
 
 
@@ -801,6 +819,19 @@ def run_task(task):
             progress="cancelled",
         )
         store.record_event("skill_cancel", f"Task #{task['id']} cancelled")
+        return None
+    except SkillUnavailable as error:
+        message = f"{type(error).__name__}: {error}"
+        store.update_task(
+            task["id"],
+            status="queued",
+            progress="waiting for Minecraft world/companion",
+            error="",
+        )
+        store.record_event(
+            "skill_paused",
+            f"Task #{task['id']} paused because Minecraft is unavailable: {error}",
+        )
         return None
     except Exception as error:
         message = f"{type(error).__name__}: {error}"
