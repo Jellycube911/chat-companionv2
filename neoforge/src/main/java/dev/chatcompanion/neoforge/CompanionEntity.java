@@ -54,7 +54,7 @@ public final class CompanionEntity extends PathfinderMob {
 
     public static AttributeSupplier.Builder attributes() {
         return createMobAttributes().add(Attributes.MAX_HEALTH, 20)
-                .add(Attributes.MOVEMENT_SPEED, 0.28).add(Attributes.FOLLOW_RANGE, 48)
+                .add(Attributes.MOVEMENT_SPEED, 0.36).add(Attributes.FOLLOW_RANGE, 48)
                 .add(Attributes.ATTACK_DAMAGE, 3);
     }
 
@@ -192,10 +192,10 @@ public final class CompanionEntity extends PathfinderMob {
             fail("hazard"); return;
         }
         long tick = world.getGameTime();
-        if (tick - repathTick >= 15) {
+        if (tick - repathTick >= 8) {
             boolean path = jobType == JobType.FOLLOW
-                    ? getNavigation().moveTo(player, 1.1)
-                    : getNavigation().moveTo(target.x, target.y, target.z, 1.1);
+                    ? getNavigation().moveTo(player, 1.28)
+                    : getNavigation().moveTo(target.x, target.y, target.z, 1.28);
             repathTick = tick;
             reason = path ? "moving" : "repath_pending";
         }
