@@ -108,6 +108,7 @@ public final class LocalAgentBridge {
             created.createContext("/resume-action", LocalAgentBridge::handleResumeAction);
             created.createContext("/collect-items", LocalAgentBridge::handleCollectItems);
             created.createContext("/mine-block", LocalAgentBridge::handleMineBlock);
+            created.createContext("/block-at", LocalAgentBridge::handleBlockAt);
             created.createContext("/place-block", LocalAgentBridge::handlePlaceBlock);
             created.createContext("/attack-entity", LocalAgentBridge::handleAttackEntity);
             created.createContext("/take-held-item", LocalAgentBridge::handleTakeHeldItem);
@@ -813,6 +814,37 @@ public final class LocalAgentBridge {
                 return queued("collect_items");
             });
             sendJson(exchange, 202, GSON.toJson(result));
+        } catch (Exception failure) {
+            sendFailure(exchange, failure);
+        }
+    }
+
+    private static void handleBlockAt(HttpExchange exchange) throws IOException {
+        if (!requireMethod(exchange, "POST")) {
+            return;
+        }
+
+        BlockRequest request;
+        try {
+            request = readJson(exchange, BlockRequest.class);
+        } catch (IllegalArgumentException failure) {
+            sendJson(exchange, 400, GSON.toJson(Map.of("error", failure.getMessage())));
+            return;
+        }
+
+        try {
+            Map<String, Object> result = withCompanion(context -> {
+                BlockPos pos = new BlockPos(request.x(), request.y(), request.z());
+                BlockState state = context.world().getBlockState(pos);
+                return Map.of(
+                        "ok", true,
+                        "x", pos.getX(),
+                        "y", pos.getY(),
+                        "z", pos.getZ(),
+                        "type", BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString(),
+                        "air", state.isAir());
+            });
+            sendJson(exchange, 200, GSON.toJson(result));
         } catch (Exception failure) {
             sendFailure(exchange, failure);
         }
