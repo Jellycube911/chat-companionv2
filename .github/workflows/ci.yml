@@ -84,6 +84,9 @@ jobs:
 
           assert minecraft_agent._simple_chat_reply("hey") == "hey"
           assert minecraft_agent._simple_chat_reply("whats up") is not None
+          assert minecraft_agent._simple_chat_reply("Hello, how are you doing") == "good lol, you?"
+          feedback = minecraft_agent._feedback_reply("Yes, you are standing near a lot of them")
+          assert feedback and feedback[1] is True
           assert minecraft_agent._looks_like_action_request(
               "can u put the crafting table"
           )
@@ -136,6 +139,8 @@ jobs:
           assert 'async def _send_ingame' in source
           assert 'async def _delayed_chat_ack' in source
           assert 'QUICK CHAT CONTEXT' in source
+          assert 'chat_agent = Agent(' in source
+          assert 'prefer experiment(...)' in source
           PY
           python - <<'PY'
           import asyncio
@@ -157,7 +162,7 @@ jobs:
               ) as server:
                   names = {tool.name for tool in await server.list_tools()}
                   expected = {
-                      "observe", "navigate", "world_action", "craft",
+                      "observe", "scan_blocks", "navigate", "world_action", "craft", "experiment",
                       "say", "remember", "recall_memory", "goals", "skills", "skill_memory", "learn", "memory_status",
                   }
                   missing = expected - names
