@@ -139,7 +139,7 @@ class PracticeRegressions(unittest.TestCase):
         self.assertTrue(agent._looks_like_action_request(text))
         goal = {"title": "Obtain an axe"}
         plan = {"action": "place", "intent": "place crafting table", "hypothesis": "test placement"}
-        self.assertFalse(agent._plan_matches_user_goal(plan, goal))
+        self.assertTrue(agent._plan_matches_user_goal(plan, goal))
         self.assertTrue(agent._plan_matches_user_goal(plan, goal, text))
 
     def test_mining_occlusion_is_cached_but_not_falsely_successful(self):
@@ -216,6 +216,28 @@ class PracticeRegressions(unittest.TestCase):
         }
         self.assertTrue(agent._plan_matches_user_goal(step, goal))
         self.assertFalse(agent._plan_matches_user_goal(dict(step, goal_id=42), goal))
+
+    def test_repeated_navigation_budget_resets_when_inventory_changes(self):
+        runtime = {}
+        goal = {"id": 9, "title": "Obtain an axe"}
+        inv = [{"item": "minecraft:stick", "count": 5}]
+        plan = {"action": "move_to", "x": 216, "y": 70, "z": -105}
+        agent._record_goal_navigation(runtime, goal, inv, plan)
+        agent._record_goal_navigation(runtime, goal, inv, plan)
+        self.assertEqual(agent._goal_navigation_count(runtime, goal, inv), 2)
+        self.assertEqual(agent._goal_navigation_count(runtime, goal, inv), 2)
+        self.assertEqual(agent._goal_navigation_count(
+            runtime, goal, [{"item": "minecraft:stick", "count": 4}]
+        ), 0)
+
+    def test_inventory_crafting_is_valid_goal_prerequisite(self):
+        goal = {"title": "Obtain an axe", "source": "user"}
+        self.assertTrue(agent._plan_matches_user_goal(
+            {"action": "craft", "intent": "try planks"}, goal
+        ))
+        self.assertFalse(agent._plan_matches_user_goal(
+            {"action": "mine", "intent": "test random stone"}, goal
+        ))
 
     def test_target_key_ignores_hypothesis_wording(self):
         a = {"action": "mine", "x": 205, "y": 71, "z": -120, "hypothesis": "A"}

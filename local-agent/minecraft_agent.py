@@ -91,6 +91,8 @@ Examples of syntax only:
 {"intent":"locate logs","hypothesis":"nearby loaded logs can be found by scanning","action":"scan_blocks","contains":["_log"],"radius":20,"limit":12}
 {"intent":"harvest known log","hypothesis":"the mining primitive can approach and break the known block","action":"mine","x":100,"y":64,"z":100,"expected_contains":"_log"}
 {"intent":"reach a standable spot","hypothesis":"moving to nearby open ground will improve access","action":"move_to","x":98,"y":64,"z":100}
+{"intent":"try an observed ingredient in crafting","hypothesis":"the inventory item may craft into a useful ingredient","action":"craft","width":1,"height":1,"grid":["minecraft:oak_log"],"times":1}
+{"intent":"place a stored work surface","hypothesis":"a table may allow larger crafting recipes","action":"place","item":"minecraft:crafting_table"}
 
 If recent evidence says move_to is repath_pending with no position change, do
 NOT repeat the same target. Change the action or target. If a scan found the
@@ -597,7 +599,12 @@ def build_practice_plan_input(runtime, directive=None):
         [directive or ""]
         + [f"{goal['title']} {goal['description']}" for goal in goals[:3]]
     )
-    learned = store.find_learned_skills(learning_query, 3)
+    learned = [
+        skill for skill in store.find_learned_skills(learning_query, 8)
+        if float(skill.get("confidence", 0)) >= 0.6
+        and int(skill.get("successes", 0)) >= 2
+        and int(skill.get("successes", 0)) >= int(skill.get("failures", 0))
+    ][:3]
     relevant_memory = store.recall(learning_query, 4)
     efficiency = store.list_efficiency(12)
 
@@ -666,6 +673,17 @@ def build_practice_plan_input(runtime, directive=None):
                 f"- [{event['kind']}] {_trim(event['summary'], 360)}"
             )
 
+    goal = next((g for g in goals if g.get("source") == "user"), None)
+    if goal:
+        budget = max(0, 2 - _goal_navigation_count(
+            runtime, goal, (runtime.get("awareness") or {}).get("inventory") or []
+        ))
+        parts.append(
+            f"Navigation trials left before a material experiment: {budget}. "
+            "When zero, DO NOT move_to/move_forward/look_at. Use craft, "
+            "place, equip, collect, mine, scan_blocks or idle. "
+            "Inventoried resources should be used before gathering more."
+        )
     parts.append(
         "Choose ONE next primitive that best advances the current user directive "
         "or, if there is none, the highest-priority active goal. "
@@ -679,8 +697,10 @@ def build_practice_plan_input(runtime, directive=None):
         "of a solid block you intend to mine. move_to is only for a standable "
         "destination. Respect Alik's corrections and teacher hints above. Do not "
         "repeat a failed target unchanged. A user-assigned crafting goal takes "
-        "priority over self-practice; inspect inventory and try crafting before "
-        "gathering unrelated resources. Output JSON only."
+        "priority over self-practice. If resources are in the inventory, "
+        "experiment with craft/place before searching for more resources. "
+        "craft takes width,height,grid (use empty strings for empty slots),times. "
+        "Do not invent recipe outcomes. Output JSON only."
     )
     return "\n".join(parts)
 
@@ -835,6 +855,8 @@ async def _report_planned_outcome(runtime, execution, source):
     if execution.get("status") in {
         "manual_control_hold",
         "goal_drift",
+        "planner_backoff",
+        "planner_stuck_backoff",
         "physical_job_in_progress",
         "pending",
         "post_goal_pause",
@@ -881,7 +903,7 @@ async def _report_planned_outcome(runtime, execution, source):
 
 def _plan_matches_user_goal(plan, goal, subgoal=""):
     """Guard against objective drift without prescribing Minecraft recipes."""
-    if not goal or plan.get("action") in {"idle", "scan_blocks"}:
+    if not goal or plan.get("action") in {"idle", "scan_blocks", "craft", "place"}:
         return True
     # A tool-building prerequisite does not have to name the finished item.
     # Require an explicit link to the real active goal, not a Minecraft recipe.
@@ -910,6 +932,27 @@ def _plan_matches_user_goal(plan, goal, subgoal=""):
         }
         return bool(subgoal_words & set(re.findall(r"[a-z]{3,}", rationale)))
     return False
+
+
+def _goal_navigation_count(runtime, goal, inventory):
+    if not goal:
+        return 0
+    signature = tuple(sorted(
+        (str(item.get("item") or ""), int(item.get("count") or 0))
+        for item in (inventory or [])
+    ))
+    marker = (str(goal.get("id", goal.get("title"))), signature)
+    saved = runtime.get("goal_navigation") or {}
+    if saved.get("marker") != marker:
+        saved = {"marker": marker, "count": 0}
+        runtime["goal_navigation"] = saved
+    return int(saved.get("count", 0))
+
+
+def _record_goal_navigation(runtime, goal, inventory, plan):
+    if goal and plan.get("action") in {"move_to", "move_forward", "look_at"}:
+        _goal_navigation_count(runtime, goal, inventory)
+        runtime["goal_navigation"]["count"] += 1
 
 
 def _autonomy_job_blocks_practice(state, runtime, has_goals):
@@ -1058,6 +1101,10 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
                 },
             }
 
+    if source == "practice" and time.monotonic() < float(runtime.get("planner_backoff_until", 0.0) or 0.0):
+        log_event("practice_host", "planner_backoff", until=runtime["planner_backoff_until"])
+        return {"ok": True, "status": "planner_backoff"}
+
     prompt = build_practice_plan_input(runtime, directive=directive)
     log_event(
         "practice_host",
@@ -1114,29 +1161,48 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         (goal for goal in store.list_goals("active", 20) if goal.get("source") == "user"),
         None,
     )
-    if not _plan_matches_user_goal(plan, user_goal, directive or _current_user_subgoal(runtime)):
-        message = f"plan_unrelated_to_user_goal:{user_goal['title']}"
-        store.record_event("practice_error", message)
-        log_event("practice_host", "goal_drift_rejected", plan=plan, goal=user_goal["title"])
-        # One extra local attempt gives the planner a chance to explain a real
-        # prerequisite instead of silently losing this entire practice tick.
-        revision = await _local_fast_completion(
-            runtime,
-            PRACTICE_PLANNER_INSTRUCTIONS,
-            prompt + "\nREJECTED ACTION: " + json.dumps(plan, ensure_ascii=False)
-            + f"\nACTIVE USER GOAL: #{user_goal['id']} {user_goal['title']}. "
-            "Choose a real prerequisite experiment, provide goal_id and "
-            "goal_reason linking it to this goal, or scan. Return JSON only.",
-            json_mode=True,
-            max_tokens=180,
+    exhausted = (
+        source == "practice"
+        and user_goal is not None
+        and plan.get("action") in {"move_to", "move_forward", "look_at"}
+        and _goal_navigation_count(runtime, user_goal, awareness_inventory) >= 2
+    )
+    drift = not _plan_matches_user_goal(
+        plan, user_goal, directive or _current_user_subgoal(runtime)
+    )
+    if drift or exhausted:
+        cause = "navigation_budget_exhausted" if exhausted else "plan_unrelated_to_user_goal"
+        log_event("practice_host", "planner_plan_rejected", plan=plan, cause=cause)
+        restriction = (
+            "DO NOT propose move_to, move_forward, or look_at. "
+            "Use a craft/place/inventory experiment or scan instead."
+            if exhausted else
+            "Propose an action that directly prepares materials or explain its "
+            "relation using goal_id and goal_reason."
         )
-        revised_plan = parse_plan(revision)
-        if revised_plan is None or not _plan_matches_user_goal(
-            revised_plan, user_goal, directive or _current_user_subgoal(runtime)
-        ):
-            return {"ok": False, "status": "goal_drift", "plan": plan, "error": message}
-        log_event("practice_host", "goal_drift_replanned", plan=revised_plan)
-        plan = revised_plan
+        raw_revision = await _local_fast_completion(
+            runtime, PRACTICE_PLANNER_INSTRUCTIONS,
+            prompt + "\nREJECTED: " + json.dumps(plan, ensure_ascii=False)
+            + "\n" + restriction + "\nReturn a DIFFERENT JSON action.",
+            json_mode=True, max_tokens=180,
+        )
+        revision = parse_plan(raw_revision)
+        invalid = (
+            revision is None
+            or not _plan_matches_user_goal(
+                revision, user_goal, directive or _current_user_subgoal(runtime)
+            )
+            or (exhausted and revision.get("action") in {"move_to", "move_forward", "look_at"})
+        )
+        if invalid:
+            runtime["planner_backoff_until"] = time.monotonic() + 30.0
+            log_event("practice_host", "planner_stuck_backoff", cause=cause, revision=revision)
+            return {"ok": False, "status": "planner_stuck_backoff", "plan": plan, "error": cause}
+        log_event("practice_host", "goal_drift_replanned", plan=revision)
+        plan = revision
+
+    if source == "practice":
+        _record_goal_navigation(runtime, user_goal, awareness_inventory, plan)
 
     target_key = _plan_target_key(plan)
     invalid = runtime.setdefault("invalid_targets", {})
