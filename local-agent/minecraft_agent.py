@@ -26,7 +26,9 @@ MINECRAFT_URL = "http://127.0.0.1:8765"
 POLL_INTERVAL = 0.35
 SENSOR_INTERVAL = 0.75
 MCP_TIMEOUT_SECONDS = 35
-MAX_AGENT_TURNS = 24
+MAX_AGENT_TURNS = 8
+INGAME_REPLY_SOFT_CHARS = 140
+INGAME_REPLY_HARD_CHARS = 240
 AUTONOMY_GOAL_INTERVAL = 6.0
 AUTONOMY_IDLE_INTERVAL = 45.0
 AMBIENT_LOOK_INTERVAL = 7.0
@@ -133,9 +135,23 @@ Prefer one targeted observation over redundant scans. Do not repeat the exact
 same failed action without a changed hypothesis. Never claim a goal succeeded
 without world/inventory evidence.
 
-Normal Minecraft chat is conversation with you. The host displays your final
-answer back in Minecraft automatically. Use say only for an extra deliberate
-utterance while doing something else. Keep ordinary replies concise.
+MINECRAFT CHAT STYLE
+Normal Minecraft chat is conversation with Alik, not a report. Sound like an
+actual player typing while playing:
+- usually 2-12 words;
+- normally one short sentence, two only when necessary;
+- use contractions and casual natural phrasing;
+- fragments are fine ("looking for wood rn", "found one", "gimme a sec");
+- answer the question directly, then stop;
+- do not write headings, bullet lists, numbered steps, markdown, JSON, or code;
+- do not narrate your full reasoning or summarize your internal process;
+- do not say "next steps", "here's what I'll do", or give unsolicited tutorials;
+- do not repeat awareness/task data unless Alik asked;
+- if busy, briefly say what you are doing without pausing the physical task;
+- longer explanations belong only when Alik explicitly asks for an explanation.
+
+The host displays your final answer back in Minecraft automatically. Use say
+only for an extra deliberate utterance while doing something else.
 """
 
 
@@ -157,6 +173,35 @@ def _post(path, payload=None):
 def _trim(text, limit=600):
     text = str(text).strip()
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _format_ingame_reply(text):
+    text = str(text or "").strip()
+    if not text:
+        return ""
+
+    text = text.replace("**", "")
+    text = text.replace("__", "")
+    text = text.replace("###", "")
+    text = text.replace("##", "")
+    text = text.replace("#", "")
+    text = re.sub(r"(?m)^\\s*[-*•]\\s+", "", text)
+    text = re.sub(r"(?m)^\\s*\\d+[.)]\\s+", "", text)
+    text = re.sub(r"\\s+", " ", text).strip()
+
+    if len(text) <= INGAME_REPLY_HARD_CHARS:
+        return text
+
+    sentence_end = max(
+        text.rfind(". ", 0, INGAME_REPLY_HARD_CHARS),
+        text.rfind("! ", 0, INGAME_REPLY_HARD_CHARS),
+        text.rfind("? ", 0, INGAME_REPLY_HARD_CHARS),
+    )
+    if sentence_end >= 40:
+        return text[: sentence_end + 1].strip()
+
+    shortened = text[:INGAME_REPLY_HARD_CHARS].rsplit(" ", 1)[0].rstrip(" ,;:")
+    return shortened + "…"
 
 
 def _local_endpoint():
@@ -419,6 +464,8 @@ async def run_turn(agent, message, source, reply_in_game, runtime):
     try:
         result = await Runner.run(agent, prepared, max_turns=max_turns)
         answer = str(result.final_output or "").strip()
+        if source in {"minecraft", "console"}:
+            answer = _format_ingame_reply(answer)
     except MaxTurnsExceeded:
         answer = (
             ""
@@ -436,7 +483,7 @@ async def run_turn(agent, message, source, reply_in_game, runtime):
             await asyncio.to_thread(
                 _post,
                 "/say",
-                {"message": answer[:4096]},
+                {"message": _format_ingame_reply(answer)},
             )
         except Exception as error:
             print(f"\n[CHAT ERROR] {error}")
@@ -598,9 +645,8 @@ def _current_activity_text():
     if active:
         task = active[0]
         progress = task.get("progress") or "starting"
-        return (
-            f"I'm working on {task['skill'].replace('_', ' ')}. "
-            f"Right now: {progress}."
+        return _format_ingame_reply(
+            f"{task['skill'].replace('_', ' ')} rn, {progress}"
         )
 
     goals = store.list_goals("active", 4)
@@ -613,12 +659,11 @@ def _current_activity_text():
         trials = store.recent_trials(1)
         if trials:
             trial = trials[-1]
-            return (
-                f"I'm currently trying to: {goal['title']}. "
-                f"My latest experiment was: {trial['hypothesis']}"
+            return _format_ingame_reply(
+                f"{goal['title']} rn. trying: {trial['hypothesis']}"
             )
-        return f"I'm currently trying to: {goal['title']}."
-    return "I'm idle and keeping an eye on the surroundings."
+        return _format_ingame_reply(f"working on {goal['title'].lower()}")
+    return "just looking around rn"
 
 
 def _is_activity_question(text):
