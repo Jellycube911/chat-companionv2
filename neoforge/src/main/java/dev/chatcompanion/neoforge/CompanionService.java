@@ -482,6 +482,18 @@ public final class CompanionService implements AutoCloseable {
     }
 
     private void lookAtPoint(CompanionEntity companion, Vec3 target) {
+        Vec3 eye = companion.getEyePosition();
+        Vec3 delta = target.subtract(eye);
+        double horizontal = Math.sqrt(delta.x * delta.x + delta.z * delta.z);
+        float yaw = (float)Math.toDegrees(Math.atan2(-delta.x, delta.z));
+        float pitch = (float)-Math.toDegrees(Math.atan2(delta.y, horizontal));
+
+        // Rotate immediately like a player moving their view before holding
+        // attack. LookControl remains set as well so normal mob head tracking
+        // agrees with the authoritative raycast on subsequent ticks.
+        companion.setYRot(yaw);
+        companion.setYHeadRot(yaw);
+        companion.setXRot(pitch);
         companion.getLookControl().setLookAt(target.x, target.y, target.z, 90.0F, 90.0F);
     }
 
