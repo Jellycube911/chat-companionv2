@@ -111,6 +111,29 @@ class PracticeRegressions(unittest.TestCase):
                 notify.assert_not_awaited()
         asyncio.run(check())
 
+    def test_user_goal_rejects_unrelated_mining(self):
+        goal = {"title": "Obtain an axe", "source": "user"}
+        unrelated = {
+            "action": "mine", "intent": "test direct mining action",
+            "hypothesis": "the mining primitive breaks a log",
+        }
+        related = dict(unrelated, intent="gather material for axe")
+        self.assertFalse(agent._plan_matches_user_goal(unrelated, goal))
+        self.assertTrue(agent._plan_matches_user_goal(related, goal))
+
+    def test_come_to_me_follows_and_pauses_practice(self):
+        from unittest.mock import AsyncMock
+        async def run():
+            with patch.object(agent.store, "cancel_tasks"), patch.object(
+                agent, "_post", return_value={"ok": True, "action": "follow"}
+            ) as post, patch.object(agent.store, "record_event"):
+                runtime = {}
+                result = await agent.fast_chat_reflex("come to me", runtime)
+                self.assertEqual(result["reply"], "coming")
+                self.assertIn("manual_control_until", runtime)
+                post.assert_called_once_with("/follow-owner")
+        asyncio.run(run())
+
     def test_target_key_ignores_hypothesis_wording(self):
         a = {"action": "mine", "x": 205, "y": 71, "z": -120, "hypothesis": "A"}
         b = dict(a, hypothesis="B", tool="minecraft:string")

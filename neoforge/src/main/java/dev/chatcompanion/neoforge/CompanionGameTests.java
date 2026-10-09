@@ -115,6 +115,36 @@ public final class CompanionGameTests {
     }
 
     @GameTest(template = "empty", timeoutTicks = 150)
+    public static void miningReportsObstructionWithoutStalling(GameTestHelper helper) {
+        floor(helper);
+        ServerPlayer owner = helper.makeMockServerPlayerInLevel();
+        Vec3 pos = Vec3.atBottomCenterOf(helper.absolutePos(new BlockPos(2, 2, 2)));
+        owner.setPos(pos.x, pos.y, pos.z);
+        CompanionEntity companion = ChatCompanion.service.spawn(owner);
+        BlockPos target = companion.blockPosition().offset(3, 0, 0);
+        BlockPos blocker = companion.blockPosition().offset(1, 0, 0);
+        helper.getLevel().setBlockAndUpdate(target, Blocks.STONE.defaultBlockState());
+        helper.getLevel().setBlockAndUpdate(blocker, Blocks.STONE.defaultBlockState());
+        JsonObject args = new JsonObject();
+        args.addProperty("dimension", owner.level().dimension().location().toString());
+        args.addProperty("x", target.getX());
+        args.addProperty("y", target.getY());
+        args.addProperty("z", target.getZ());
+        ActionOutcome admitted = ChatCompanion.service.localAction(owner, "mine_block", args);
+        helper.assertTrue(admitted.success(), "Blocked mining experiment must be admitted");
+        helper.runAfterDelay(18, () -> {
+            helper.assertTrue(companion.jobState() == CompanionEntity.JobState.FAILED,
+                    "Occluded mining must fail promptly, not wait indefinitely");
+            helper.assertTrue(companion.reason().contains("mining_blocked|block=minecraft:stone|at="),
+                    "The obstruction must be reported for local experimentation");
+            helper.assertTrue(helper.getLevel().getBlockState(target).is(Blocks.STONE),
+                    "Failed mining must not mutate the target");
+            owner.connection.disconnect(net.minecraft.network.chat.Component.literal("test complete"));
+            helper.succeed();
+        });
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 150)
     public static void immediateStopFencesSessionInitialization(GameTestHelper helper) {
         floor(helper);
         ServerPlayer owner = helper.makeMockServerPlayerInLevel();

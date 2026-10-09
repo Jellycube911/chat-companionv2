@@ -825,6 +825,8 @@ async def _report_planned_outcome(runtime, execution, source):
     streak_key = f"{plan.get('intent', '')}:{plan.get('action', '')}"
 
     if execution.get("status") in {
+        "manual_control_hold",
+        "goal_drift",
         "physical_job_in_progress",
         "pending",
         "post_goal_pause",
@@ -861,6 +863,21 @@ async def _report_planned_outcome(runtime, execution, source):
             _format_ingame_reply(f"stuck on {intent}: {reason}"),
             cooldown=90.0,
         )
+
+
+def _plan_matches_user_goal(plan, goal):
+    """Guard against objective drift without prescribing Minecraft recipes."""
+    if not goal or plan.get("action") in {"idle", "scan_blocks"}:
+        return True
+    keywords = set(re.findall(r"[a-z]{3,}", str(goal.get("title") or "").lower())) - {
+        "obtain", "make", "craft", "gather", "build", "some", "with", "from", "your"
+    }
+    if not keywords:
+        return True
+    rationale = " ".join(
+        str(plan.get(key) or "").lower() for key in ("intent", "hypothesis")
+    )
+    return any(word in rationale for word in keywords)
 
 
 def _plan_target_key(plan):
@@ -923,6 +940,13 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
             "ok": True,
             "status": "post_goal_pause",
         }
+
+    if (
+        source == "practice"
+        and time.monotonic() < float(runtime.get("manual_control_until", 0.0) or 0.0)
+    ):
+        log_event("practice_host", "manual_control_hold")
+        return {"ok": True, "status": "manual_control_hold"}
 
     if state.get("jobActive"):
         if source == "command":
@@ -1008,6 +1032,16 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
             f"Planner returned invalid action JSON: {_trim(raw, 500)}",
         )
         return None
+
+    user_goal = next(
+        (goal for goal in store.list_goals("active", 20) if goal.get("source") == "user"),
+        None,
+    )
+    if not _plan_matches_user_goal(plan, user_goal):
+        message = f"plan_unrelated_to_user_goal:{user_goal['title']}"
+        store.record_event("practice_error", message)
+        log_event("practice_host", "goal_drift_rejected", plan=plan, goal=user_goal["title"])
+        return {"ok": False, "status": "goal_drift", "plan": plan, "error": message}
 
     target_key = _plan_target_key(plan)
     invalid = runtime.setdefault("invalid_targets", {})
@@ -1757,22 +1791,19 @@ async def fast_chat_reflex(text, runtime=None):
             or normalized.startswith("can u come to me")
         ):
             store.cancel_tasks()
-            state = await asyncio.to_thread(_get, "/state")
-            owner = state.get("owner", {})
-            result = await asyncio.to_thread(
-                _post,
-                "/move-to",
-                {
-                    "x": owner.get("x"),
-                    "y": owner.get("y"),
-                    "z": owner.get("z"),
-                },
-            )
+            result = await asyncio.to_thread(_post, "/follow-owner")
             store.record_event(
                 "motor_reflex",
-                f"Alik asked Chat to come to him; movement started immediately: {result}",
+                f"Alik asked Chat to come to him; follow result: {result}",
             )
-            return {"handled": True, "reply": "coming", "background": False}
+            accepted = bool(result.get("ok", True))
+            if accepted and runtime is not None:
+                runtime["manual_control_until"] = time.monotonic() + 60.0
+            return {
+                "handled": True,
+                "reply": "coming" if accepted else "couldn't move, checking",
+                "background": False,
+            }
 
         if normalized in {"follow me", "follow"}:
             store.cancel_tasks()

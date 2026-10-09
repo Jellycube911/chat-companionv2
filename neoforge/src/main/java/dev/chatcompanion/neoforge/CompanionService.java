@@ -361,7 +361,29 @@ public final class CompanionService implements AutoCloseable {
 
         companion.getNavigation().stop();
         lookAtBlock(companion, job.block());
+        // Surface the actual block occluding the ray. Choosing to remove it
+        // or approach from another angle remains the local AI's decision.
+        Vec3 eye = companion.getEyePosition();
+        HitResult sight = world.clip(new ClipContext(
+                eye, Vec3.atCenterOf(job.block()), ClipContext.Block.OUTLINE,
+                ClipContext.Fluid.NONE, companion));
+        if (sight instanceof BlockHitResult hit && !hit.getBlockPos().equals(job.block())) {
+            BlockPos obstruction = hit.getBlockPos();
+            String blockId = BuiltInRegistries.BLOCK.getKey(
+                    world.getBlockState(obstruction).getBlock()).toString();
+            clearBreakProgress(companion, job, world);
+            companion.failJob("mining_blocked|block=" + blockId
+                    + "|at=" + obstruction.getX() + "," + obstruction.getY() + "," + obstruction.getZ());
+            work.remove(owner);
+            return;
+        }
         if (!canInteractWithBlock(companion, job.block(), world)) {
+            if (world.getGameTime() - job.started() > 100) {
+                clearBreakProgress(companion, job, world);
+                companion.failJob("mining_alignment_timeout");
+                work.remove(owner);
+                return;
+            }
             companion.jobProgress(job.progress(), "aligning_to_block");
             return;
         }
@@ -492,6 +514,7 @@ public final class CompanionService implements AutoCloseable {
         // attack. LookControl remains set as well so normal mob head tracking
         // agrees with the authoritative raycast on subsequent ticks.
         companion.setYRot(yaw);
+        companion.setYBodyRot(yaw);
         companion.setYHeadRot(yaw);
         companion.setXRot(pitch);
         companion.getLookControl().setLookAt(target.x, target.y, target.z, 90.0F, 90.0F);
