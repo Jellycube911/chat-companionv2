@@ -514,6 +514,27 @@ def skills(
 
 @mcp.tool()
 @_tool_guard
+def learn(
+    action: Literal["request", "status", "list"],
+    topic: str | None = None,
+    problem: str | None = None,
+    request_id: int | None = None,
+):
+    """Request a rare cloud-teacher lesson. The local host enforces cooldowns and stores the lesson locally."""
+    if action == "list":
+        return store.list_learning(8)
+    if action == "status":
+        if request_id is None:
+            return {"ok": False, "error": "status requires request_id"}
+        item = store.learning_request(request_id)
+        return item or {"ok": False, "error": "learning request not found"}
+    if not topic or not problem:
+        return {"ok": False, "error": "request requires topic and problem"}
+    return store.request_learning(topic, problem, cooldown_seconds=1800)
+
+
+@mcp.tool()
+@_tool_guard
 def memory_status():
     """Return counts and local database location without dumping memory contents."""
     return store.stats()
