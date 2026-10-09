@@ -1006,7 +1006,6 @@ class MemoryStore:
                 ),
             )
 
-            skill = None
             if resolved_skill_id is not None:
                 db.execute(
                     """
@@ -1030,7 +1029,6 @@ class MemoryStore:
                         resolved_skill_id,
                     ),
                 )
-                skill = self.learned_skill(resolved_skill_id)
 
             db.execute(
                 """
@@ -1041,6 +1039,11 @@ class MemoryStore:
                 """
             )
 
+        skill = (
+            self.learned_skill(resolved_skill_id)
+            if resolved_skill_id is not None
+            else None
+        )
         return {
             "ok": True,
             "success": success,
