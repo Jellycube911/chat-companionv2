@@ -54,6 +54,27 @@ jobs:
           graph = store.skill_graph(a['id'])
           assert graph and graph['children']
           assert store.stats()['learned_skills'] >= 2
+          fast = store.record_efficiency(
+              'mine:minecraft:oak_log',
+              'minecraft:wooden_axe',
+              0.6,
+              True,
+              2.6,
+              metadata='ci fast tool',
+          )
+          slow = store.record_efficiency(
+              'mine:minecraft:oak_log',
+              'minecraft:wooden_pickaxe',
+              2.0,
+              True,
+              1.5,
+              metadata='ci slow tool',
+          )
+          assert fast['attempts'] >= 1
+          assert slow['attempts'] >= 1
+          best = store.best_efficiency('mine:minecraft:oak_log')
+          assert best['option'] == 'minecraft:wooden_axe'
+          assert store.stats()['action_efficiency'] >= 2
           PY
           python - <<'PY'
           import json
@@ -168,6 +189,27 @@ jobs:
           assert '_spawn_player_chat' in source
           assert 'blocking local-model HTTP request cannot actually be cancelled' in source
           assert '_instant_failure_explanation' in source
+          assert 'PERSISTENT EFFICIENCY REWARD MEMORY' in source
+          assert '_report_planned_outcome' in source
+          assert '_reconcile_user_goals' in source
+
+          service_source = open(
+              "../neoforge/src/main/java/dev/chatcompanion/neoforge/CompanionService.java",
+              encoding="utf-8",
+          ).read()
+          entity_source = open(
+              "../neoforge/src/main/java/dev/chatcompanion/neoforge/CompanionEntity.java",
+              encoding="utf-8",
+          ).read()
+          bridge_source = open(
+              "../neoforge/src/main/java/dev/chatcompanion/neoforge/client/LocalAgentBridge.java",
+              encoding="utf-8",
+          ).read()
+          assert "destroyBlockProgress" in service_source
+          assert "break_ticks=" in service_source
+          assert "companion.swing(InteractionHand.MAIN_HAND)" in service_source
+          assert "jobProgress()" in entity_source
+          assert 'result.put("jobProgress", companion.jobProgress())' in bridge_source
 
           plan = practice_engine.parse_plan(
               '{"intent":"approach log","hypothesis":"moving closer reduces distance","action":"move_to","x":10,"y":64,"z":10}'
@@ -195,6 +237,16 @@ jobs:
           assert '"x":' not in generalized
           assert '"y":' not in generalized
           assert '"z":' not in generalized
+
+          metrics = practice_engine._parse_mining_metrics({
+              "state": "COMPLETED",
+              "reason": "block_mined|block=minecraft:oak_log|tool=minecraft:wooden_axe|break_ticks=8",
+          })
+          assert metrics["block"] == "minecraft:oak_log"
+          assert metrics["tool"] == "minecraft:wooden_axe"
+          assert metrics["break_ticks"] == 8
+          assert metrics["seconds"] == 0.4
+          assert metrics["reward"] > 1.0
 
           original_post = practice_engine._post
           try:
