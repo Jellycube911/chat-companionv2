@@ -5,6 +5,7 @@ from collections import Counter
 import requests
 
 from memory_store import store
+from action_log import log_event, log_exception
 
 
 MINECRAFT_URL = "http://127.0.0.1:8765"
@@ -72,7 +73,17 @@ def _get(path):
 
 
 def _post(path, payload=None):
-    return _request("POST", path, payload)
+    started_at = time.monotonic()
+    result = _request("POST", path, payload)
+    log_event(
+        "legacy_skill",
+        "bridge_post",
+        path=path,
+        payload=payload,
+        elapsed_ms=round((time.monotonic() - started_at) * 1000),
+        result=result,
+    )
+    return result
 
 
 def _require(result, what):
@@ -868,9 +879,30 @@ def execute_task(task):
 
 
 def run_task(task):
+    log_event(
+        "legacy_skill",
+        "task_start",
+        task_id=task.get("id"),
+        skill=task.get("skill"),
+        args=task.get("args"),
+    )
     try:
-        return execute_task(task)
+        result = execute_task(task)
+        log_event(
+            "legacy_skill",
+            "task_complete",
+            task_id=task.get("id"),
+            skill=task.get("skill"),
+            result=result,
+        )
+        return result
     except SkillCancelled:
+        log_event(
+            "legacy_skill",
+            "task_cancelled",
+            task_id=task.get("id"),
+            skill=task.get("skill"),
+        )
         store.update_task(
             task["id"],
             status="cancelled",
@@ -879,6 +911,13 @@ def run_task(task):
         store.record_event("skill_cancel", f"Task #{task['id']} cancelled")
         return None
     except SkillUnavailable as error:
+        log_exception(
+            "legacy_skill",
+            "task_paused",
+            error,
+            task_id=task.get("id"),
+            skill=task.get("skill"),
+        )
         message = f"{type(error).__name__}: {error}"
         store.update_task(
             task["id"],
@@ -892,6 +931,13 @@ def run_task(task):
         )
         return None
     except Exception as error:
+        log_exception(
+            "legacy_skill",
+            "task_failed",
+            error,
+            task_id=task.get("id"),
+            skill=task.get("skill"),
+        )
         message = f"{type(error).__name__}: {error}"
         store.update_task(
             task["id"],
