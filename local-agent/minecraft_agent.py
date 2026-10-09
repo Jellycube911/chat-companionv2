@@ -942,6 +942,10 @@ async def main():
         print()
         print(f"Minecraft companion connected. [{AGENT_BUILD}]")
         print(f"Brain model: {model_label}")
+        if model_label.startswith("local:"):
+            print("Inference: LOCAL - OpenAI API reasoning tokens are not being used.")
+        else:
+            print("Inference: CLOUD - OpenAI API reasoning tokens ARE being used.")
         print(f"Memory DB: {store.path}")
         print("Continuous local awareness: ON")
         print("Persistent task executive: ON")
