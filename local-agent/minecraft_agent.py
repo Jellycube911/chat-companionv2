@@ -20,6 +20,7 @@ from agents.mcp import MCPServerStdio
 
 from memory_store import store
 from skill_executor import run_task
+from action_log import DEFAULT_LOG, log_event, log_exception, start_session
 
 
 MINECRAFT_URL = "http://127.0.0.1:8765"
@@ -285,6 +286,14 @@ def choose_model():
 
 async def enqueue(input_queue, runtime, priority, source, message):
     runtime["sequence"] += 1
+    log_event(
+        "agent",
+        "queue",
+        priority=priority,
+        sequence=runtime["sequence"],
+        source=source,
+        message=message,
+    )
     await input_queue.put((priority, runtime["sequence"], source, message))
 
 
@@ -460,13 +469,30 @@ def build_turn_input(message, source, runtime):
 async def run_turn(agent, message, source, reply_in_game, runtime):
     prepared = build_turn_input(message, source, runtime)
     max_turns = 10 if source in {"autonomy", "event", "task", "learning", "practice"} else MAX_AGENT_TURNS
+    turn_started = time.monotonic()
+    log_event(
+        "agent",
+        "turn_start",
+        source=source,
+        message=message,
+        max_turns=max_turns,
+        active_goals=store.list_goals("active", 4),
+        recent_trials=store.recent_trials(3),
+    )
 
     try:
         result = await Runner.run(agent, prepared, max_turns=max_turns)
         answer = str(result.final_output or "").strip()
         if source in {"minecraft", "console"}:
             answer = _format_ingame_reply(answer)
-    except MaxTurnsExceeded:
+    except MaxTurnsExceeded as error:
+        log_exception(
+            "agent",
+            "turn_max_turns",
+            error,
+            source=source,
+            message=message,
+        )
         answer = (
             ""
             if source in {"autonomy", "event", "task", "learning", "practice"}
@@ -496,6 +522,14 @@ async def run_turn(agent, message, source, reply_in_game, runtime):
             f"{_trim(message, 500)} -> {_trim(answer, 500)}",
         )
 
+    log_event(
+        "agent",
+        "turn_end",
+        source=source,
+        elapsed_ms=round((time.monotonic() - turn_started) * 1000),
+        reply=answer,
+        reply_in_game=reply_in_game,
+    )
     return answer
 
 
@@ -1236,6 +1270,14 @@ async def main():
     }
 
     model, model_label = choose_model()
+    start_session(build=AGENT_BUILD, model=model_label)
+    log_event(
+        "agent",
+        "startup",
+        model=model_label,
+        cloud_teacher=_cloud_teacher_enabled(),
+        teacher_model=_teacher_model_name() if _cloud_teacher_enabled() else None,
+    )
     python_executable = sys.executable
     server_file = BASE_DIR / "mcp_server.py"
 
@@ -1276,6 +1318,7 @@ async def main():
         else:
             print("Inference: CLOUD - OpenAI API reasoning tokens ARE being used.")
         print(f"Memory DB: {store.path}")
+        print(f"Action log: {DEFAULT_LOG}")
         print("Continuous local awareness: ON")
         print("Persistent task executive: ON")
         print("Unified chat/action/autonomy identity: ON")
@@ -1298,6 +1341,7 @@ async def main():
                     break
 
                 if source == "minecraft":
+                    log_event("chat", "user_message", message=message)
                     print(f"\n[MINECRAFT] Alik: {message}")
 
                 try:
@@ -1330,6 +1374,13 @@ async def main():
                             runtime["reasoning_task"] = None
                             runtime["reasoning_source"] = None
                 except Exception as error:
+                    log_exception(
+                        "agent",
+                        "main_loop_error",
+                        error,
+                        source=source,
+                        message=message,
+                    )
                     print(f"\nERROR: {error}")
                     store.record_event(
                         "agent_error",
@@ -1348,6 +1399,7 @@ async def main():
                     if source in {"autonomy", "event", "task", "learning"}:
                         runtime["autonomy_pending"] = False
         finally:
+            log_event("agent", "session_stop")
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
