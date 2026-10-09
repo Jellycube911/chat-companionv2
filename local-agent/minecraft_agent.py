@@ -37,7 +37,7 @@ AMBIENT_WANDER_INTERVAL = 22.0
 REFLEX_COOLDOWN = 4.0
 LEARNING_COOLDOWN_SECONDS = 1800
 TEACHER_MAX_OUTPUT_TOKENS = 700
-AGENT_BUILD = "self-learning-local-brain-v2-2026-10-09"
+AGENT_BUILD = "self-learning-local-brain-v3-responsive-chat-2026-10-09"
 BASE_DIR = Path(__file__).resolve().parent
 
 set_tracing_disabled(True)
@@ -172,6 +172,60 @@ def _post(path, payload=None):
     response = requests.post(f"{MINECRAFT_URL}{path}", **kwargs)
     response.raise_for_status()
     return response.json()
+
+
+async def _send_ingame(message, *, reason="reply", retry=True):
+    message = _format_ingame_reply(message)
+    if not message:
+        return False
+
+    attempts = 2 if retry else 1
+    last_result = None
+    for attempt in range(1, attempts + 1):
+        try:
+            result = await asyncio.to_thread(
+                _post,
+                "/say",
+                {"message": message},
+            )
+            last_result = result
+            ok = not (
+                isinstance(result, dict)
+                and result.get("ok") is False
+            )
+            log_event(
+                "chat",
+                "send_result",
+                reason=reason,
+                message=message,
+                attempt=attempt,
+                ok=ok,
+                result=result,
+            )
+            if ok:
+                return True
+        except Exception as error:
+            log_exception(
+                "chat",
+                "send_error",
+                error,
+                reason=reason,
+                message=message,
+                attempt=attempt,
+            )
+        if attempt < attempts:
+            await asyncio.sleep(0.15)
+
+    store.record_event(
+        "chat_delivery_failed",
+        f"Could not send in-game chat ({reason}): {last_result}",
+    )
+    return False
+
+
+async def _delayed_chat_ack(delay=1.2):
+    await asyncio.sleep(delay)
+    await _send_ingame("sec", reason="slow_reply_ack", retry=False)
 
 
 def _trim(text, limit=600):
@@ -484,6 +538,11 @@ async def run_turn(agent, message, source, reply_in_game, runtime):
     prepared = build_turn_input(message, source, runtime)
     max_turns = 10 if source in {"autonomy", "event", "task", "learning", "practice", "command"} else MAX_AGENT_TURNS
     turn_started = time.monotonic()
+    ack_task = (
+        asyncio.create_task(_delayed_chat_ack())
+        if source == "minecraft" and reply_in_game
+        else None
+    )
     log_event(
         "agent",
         "turn_start",
@@ -518,15 +577,17 @@ async def run_turn(agent, message, source, reply_in_game, runtime):
     elif answer:
         print(f"\n[{source.upper()}] {answer}")
 
+    if ack_task is not None and not ack_task.done():
+        ack_task.cancel()
+        await asyncio.gather(ack_task, return_exceptions=True)
+
     if answer and reply_in_game:
-        try:
-            await asyncio.to_thread(
-                _post,
-                "/say",
-                {"message": _format_ingame_reply(answer)},
-            )
-        except Exception as error:
-            print(f"\n[CHAT ERROR] {error}")
+        sent = await _send_ingame(
+            answer,
+            reason=f"{source}_final_reply",
+        )
+        if not sent:
+            print("\n[CHAT ERROR] Could not deliver in-game reply.")
 
     if source in {"minecraft", "console"}:
         store.record_episode(message, answer)
@@ -577,8 +638,49 @@ def _extract_count(text, default):
     return max(1, min(64, int(match.group(1))))
 
 
+def _looks_like_direct_request(text):
+    normalized = text.lower().strip().rstrip(".!?")
+    if any(
+        phrase in normalized
+        for phrase in (
+            "didnt ",
+            "didn't ",
+            "did not ",
+            "havent ",
+            "haven't ",
+            "hasnt ",
+            "hasn't ",
+            "you didnt",
+            "you didn't",
+            "you did not",
+        )
+    ):
+        return False
+    return normalized.startswith(
+        (
+            "can you ",
+            "can u ",
+            "could you ",
+            "could u ",
+            "would you ",
+            "will you ",
+            "please ",
+            "gather ",
+            "collect ",
+            "get ",
+            "chop ",
+            "cut ",
+            "build ",
+            "make ",
+            "craft ",
+        )
+    )
+
+
 async def fast_task_intent(text):
     normalized = text.lower().strip()
+    if not _looks_like_direct_request(text):
+        return None
 
     if (
         "build" in normalized
@@ -619,6 +721,16 @@ def _simple_chat_reply(text):
         return "hey"
     if normalized in {"thanks", "thank you", "thx", "ty"}:
         return "np"
+    if normalized in {
+        "whats up",
+        "what's up",
+        "wassup",
+        "wats up",
+        "wyd",
+        "what you doing",
+        "what u doing",
+    }:
+        return _current_activity_text()
     return None
 
 
@@ -668,14 +780,14 @@ async def fast_chat_reflex(text):
         }
 
     try:
-        if normalized in {
-            "come here",
-            "come to me",
-            "can you come here",
-            "can u come here",
-            "can you come to me",
-            "can u come to me",
-        }:
+        if (
+            "come to me" in normalized
+            or normalized.startswith("come here")
+            or normalized.startswith("can you come here")
+            or normalized.startswith("can u come here")
+            or normalized.startswith("can you come to me")
+            or normalized.startswith("can u come to me")
+        ):
             store.cancel_tasks()
             state = await asyncio.to_thread(_get, "/state")
             owner = state.get("owner", {})
@@ -815,14 +927,10 @@ async def poll_minecraft_chat(input_queue, runtime):
 
                     if _is_activity_question(text):
                         answer = _current_activity_text()
-                        try:
-                            await asyncio.to_thread(
-                                _post,
-                                "/say",
-                                {"message": answer},
-                            )
-                        except Exception:
-                            pass
+                        await _send_ingame(
+                            answer,
+                            reason="instant_status",
+                        )
                         print(f"\n[MINECRAFT] Alik: {text}")
                         print(f"\nAI [instant status]: {answer}")
                         store.record_episode(text, answer)
@@ -831,14 +939,10 @@ async def poll_minecraft_chat(input_queue, runtime):
 
                     simple = _simple_chat_reply(text)
                     if simple is not None:
-                        try:
-                            await asyncio.to_thread(
-                                _post,
-                                "/say",
-                                {"message": simple},
-                            )
-                        except Exception:
-                            pass
+                        await _send_ingame(
+                            simple,
+                            reason="instant_chat",
+                        )
                         print(f"\n[MINECRAFT] Alik: {text}")
                         print(f"\nAI [instant chat]: {simple}")
                         store.record_episode(text, simple)
@@ -848,14 +952,10 @@ async def poll_minecraft_chat(input_queue, runtime):
                     reflex = await fast_chat_reflex(text)
                     if reflex and reflex.get("handled"):
                         reply = reflex.get("reply") or "yep"
-                        try:
-                            await asyncio.to_thread(
-                                _post,
-                                "/say",
-                                {"message": reply},
-                            )
-                        except Exception:
-                            pass
+                        await _send_ingame(
+                            reply,
+                            reason="instant_action_ack",
+                        )
                         print(f"\n[MINECRAFT] Alik: {text}")
                         print(f"\nAI [instant action]: {reply}")
                         store.record_episode(text, reply)
@@ -1492,7 +1592,7 @@ async def main():
                     try:
                         await reasoning
                     except asyncio.CancelledError:
-                        if source in {"autonomy", "event", "task", "learning", "practice"}:
+                        if source in {"autonomy", "event", "task", "learning", "practice", "command"}:
                             print(
                                 f"\n[{source.upper()}] Reasoning interrupted for Alik."
                             )
@@ -1516,14 +1616,10 @@ async def main():
                         f"{type(error).__name__}: {error}",
                     )
                     if source == "minecraft":
-                        try:
-                            await asyncio.to_thread(
-                                _post,
-                                "/say",
-                                {"message": f"I hit an error: {error}"[:4096]},
-                            )
-                        except Exception:
-                            pass
+                        await _send_ingame(
+                            "something broke, gimme a sec",
+                            reason="agent_error",
+                        )
                 finally:
                     if source in {"autonomy", "event", "task", "learning", "practice"}:
                         runtime["autonomy_pending"] = False
