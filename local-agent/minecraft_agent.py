@@ -45,7 +45,7 @@ BASE_DIR = Path(__file__).resolve().parent
 set_tracing_disabled(True)
 
 
-PRACTICE_PLANNER_PLAYER_CHAT_INSTRUCTIONS = """
+PLAYER_CHAT_INSTRUCTIONS = """
 You are Chat, Alik's persistent Minecraft companion. Reply like a real player
 typing while playing: normally 2-12 words and one sentence. Be casual and
 direct. Never invent what your body is doing, what you collected, or what
@@ -56,7 +56,7 @@ attempt failed or stalled, say that plainly. Do not use markdown or lists.
 """
 
 
-INSTRUCTIONS = """
+PRACTICE_PLANNER_INSTRUCTIONS = """
 You are the planning part of Chat, the same Minecraft companion identity.
 You do NOT execute tools yourself in this mode. Choose exactly ONE safe next
 primitive action. The Python host will validate and physically execute it.
@@ -2227,7 +2227,7 @@ async def main():
         chat_agent = Agent(
             name="Chat",
             model=model,
-            instructions=INSTRUCTIONS,
+            instructions=PLAYER_CHAT_INSTRUCTIONS,
         )
         practice_planner = Agent(
             name="Chat",
