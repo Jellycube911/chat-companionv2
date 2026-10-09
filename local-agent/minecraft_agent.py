@@ -537,6 +537,62 @@ async def fast_chat_reflex(text):
         )
 
 
+def _current_activity_text():
+    active = [
+        task
+        for task in store.list_tasks(8)
+        if task["status"] in {"running", "queued"}
+    ]
+    if active:
+        task = active[0]
+        progress = task.get("progress") or "starting"
+        return (
+            f"I'm working on {task['skill'].replace('_', ' ')}. "
+            f"Right now: {progress}."
+        )
+
+    goals = store.list_goals("active", 4)
+    meaningful = [
+        goal for goal in goals
+        if goal.get("source") != "system" or goal.get("priority", 0) >= 6
+    ]
+    if meaningful:
+        goal = meaningful[0]
+        return f"I'm currently trying to: {goal['title']}."
+    return "I'm idle and keeping an eye on the surroundings."
+
+
+def _is_activity_question(text):
+    normalized = text.lower().strip().rstrip(".!?")
+    return normalized in {
+        "what are you doing",
+        "what are u doing",
+        "what're you doing",
+        "what r u doing",
+        "what are you up to",
+        "what are u up to",
+        "what is your current task",
+        "what's your current task",
+    }
+
+
+def _preempt_background_reasoning(runtime):
+    task = runtime.get("reasoning_task")
+    source = runtime.get("reasoning_source")
+    if (
+        task is not None
+        and not task.done()
+        and source in {"autonomy", "event", "task", "learning"}
+    ):
+        task.cancel()
+        store.record_event(
+            "reasoning_preempted",
+            f"Background {source} reasoning was interrupted by Alik.",
+        )
+        return True
+    return False
+
+
 async def poll_minecraft_chat(input_queue, runtime):
     while True:
         try:
@@ -545,6 +601,23 @@ async def poll_minecraft_chat(input_queue, runtime):
                 text = str(message.get("text", "")).strip()
                 if text:
                     runtime["last_user_activity"] = time.monotonic()
+                    _preempt_background_reasoning(runtime)
+
+                    if _is_activity_question(text):
+                        answer = _current_activity_text()
+                        try:
+                            await asyncio.to_thread(
+                                _post,
+                                "/say",
+                                {"message": answer},
+                            )
+                        except Exception:
+                            pass
+                        print(f"\n[MINECRAFT] Alik: {text}")
+                        print(f"\nAI [instant status]: {answer}")
+                        store.record_episode(text, answer)
+                        continue
+
                     await fast_chat_reflex(text)
                     await enqueue(input_queue, runtime, 0, "minecraft", text)
         except Exception:
@@ -558,6 +631,7 @@ async def console_input(input_queue, runtime):
         text = text.strip()
         if text:
             runtime["last_user_activity"] = time.monotonic()
+            _preempt_background_reasoning(runtime)
             await fast_task_intent(text)
             await enqueue(input_queue, runtime, 0, "console", text)
         if text.lower() in {"quit", "exit"}:
@@ -1083,6 +1157,8 @@ async def main():
         "active_task": None,
         "awareness": None,
         "self_improvement_attempted": False,
+        "reasoning_task": None,
+        "reasoning_source": None,
     }
 
     model, model_label = choose_model()
@@ -1155,13 +1231,30 @@ async def main():
                     if source == "task":
                         reply_in_game = "completed" in message or "failed" in message
 
-                    await run_turn(
-                        agent,
-                        message,
-                        source=source,
-                        reply_in_game=reply_in_game,
-                        runtime=runtime,
+                    reasoning = asyncio.create_task(
+                        run_turn(
+                            agent,
+                            message,
+                            source=source,
+                            reply_in_game=reply_in_game,
+                            runtime=runtime,
+                        )
                     )
+                    runtime["reasoning_task"] = reasoning
+                    runtime["reasoning_source"] = source
+                    try:
+                        await reasoning
+                    except asyncio.CancelledError:
+                        if source in {"autonomy", "event", "task", "learning"}:
+                            print(
+                                f"\n[{source.upper()}] Reasoning interrupted for Alik."
+                            )
+                        else:
+                            raise
+                    finally:
+                        if runtime.get("reasoning_task") is reasoning:
+                            runtime["reasoning_task"] = None
+                            runtime["reasoning_source"] = None
                 except Exception as error:
                     print(f"\nERROR: {error}")
                     store.record_event(
