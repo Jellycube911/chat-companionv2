@@ -1,4 +1,5 @@
 import functools
+import math
 import time
 import traceback
 from typing import Literal
@@ -345,6 +346,70 @@ def navigate(
     return _wait_for_job(8)
 
 
+def _inventory_slot_for_item(item_id):
+    wanted = str(item_id or "").strip().lower()
+    if not wanted:
+        return None
+    inventory = _observe("inventory")
+    if not isinstance(inventory, list):
+        return None
+    for entry in inventory:
+        current = str(entry.get("item", "")).lower()
+        if current == wanted or current.endswith(":" + wanted) or current.endswith("/" + wanted):
+            return int(entry["slot"])
+    return None
+
+
+def _place_slot_nearby(slot, face="up"):
+    state = _get("/state")
+    if _failed(state):
+        return state
+
+    bx = math.floor(float(state.get("x", 0)))
+    by = math.floor(float(state.get("y", 0)))
+    bz = math.floor(float(state.get("z", 0)))
+
+    candidates = [
+        (bx + 1, by, bz),
+        (bx - 1, by, bz),
+        (bx, by, bz + 1),
+        (bx, by, bz - 1),
+        (bx + 1, by, bz + 1),
+        (bx + 1, by, bz - 1),
+        (bx - 1, by, bz + 1),
+        (bx - 1, by, bz - 1),
+    ]
+
+    attempts = []
+    for x, y, z in candidates:
+        started = _post(
+            "/place-block",
+            {
+                "x": x,
+                "y": y,
+                "z": z,
+                "inventory_slot": int(slot),
+                "face": face or "up",
+            },
+        )
+        attempts.append({"pos": [x, y, z], "started": started})
+        if _failed(started):
+            continue
+        time.sleep(0.05)
+        result = _wait_for_job(12)
+        if result.get("state") == "COMPLETED":
+            result["placed_at"] = [x, y, z]
+            result["slot"] = int(slot)
+            return result
+
+    return {
+        "ok": False,
+        "error": "could not place that inventory item on nearby ground",
+        "slot": int(slot),
+        "attempts": attempts[-3:],
+    }
+
+
 @mcp.tool()
 @_tool_guard
 def world_action(
@@ -362,8 +427,9 @@ def world_action(
     slot: int | None = None,
     face: Literal["up", "down", "north", "south", "east", "west"] | None = None,
     entity_id: str | None = None,
+    item: str | None = None,
 ):
-    """Perform one physical inventory/world action using the companion body."""
+    """Perform one physical inventory/world action. For place, pass item to resolve its inventory slot; omit x/y/z to place it on nearby valid ground."""
     if action == "collect":
         started = _post("/collect-items")
         if _failed(started):
@@ -383,8 +449,38 @@ def world_action(
         return result
 
     if action == "place":
-        if x is None or y is None or z is None or slot is None:
-            return {"ok": False, "error": "place requires x, y, z and slot"}
+        if item:
+            resolved = _inventory_slot_for_item(item)
+            if resolved is None:
+                return {
+                    "ok": False,
+                    "error": f"item not found in companion inventory: {item}",
+                    "inventory": _observe("inventory"),
+                }
+            slot = resolved
+
+        if slot is None:
+            return {
+                "ok": False,
+                "error": (
+                    "place requires item or slot. If you know the item name, "
+                    "pass item='minecraft:...' and omit coordinates to place nearby."
+                ),
+                "inventory": _observe("inventory"),
+            }
+
+        coords = (x, y, z)
+        if all(value is None for value in coords):
+            return _place_slot_nearby(slot, face or "up")
+        if any(value is None for value in coords):
+            return {
+                "ok": False,
+                "error": (
+                    "provide all of x,y,z for an exact placement, or omit all "
+                    "three to place the selected item nearby"
+                ),
+            }
+
         started = _post(
             "/place-block",
             {
