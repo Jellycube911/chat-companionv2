@@ -22,10 +22,10 @@ jobs:
         run: python -m pip install -r local-agent/requirements.txt
       - name: Check local Python agent
         run: |
-          python -m py_compile local-agent/minecraft_agent.py local-agent/mcp_server.py local-agent/memory_store.py local-agent/skill_executor.py local-agent/action_log.py
+          python -m py_compile local-agent/minecraft_agent.py local-agent/mcp_server.py local-agent/memory_store.py local-agent/skill_executor.py local-agent/action_log.py local-agent/practice_engine.py
           cd local-agent
           python - <<'PY'
-          import agents, mcp, requests, memory_store, mcp_server, skill_executor, action_log
+          import agents, mcp, requests, memory_store, mcp_server, skill_executor, action_log, practice_engine
           store = memory_store.store
           assert store.list_goals('active', 5)
           r = store.request_learning('ci:test', 'verify local learning queue', 60)
@@ -139,6 +139,31 @@ jobs:
           assert 'async def _send_ingame' in source
           assert 'async def _delayed_chat_ack' in source
           assert 'QUICK CHAT CONTEXT' in source
+          assert 'run_planned_action' in source
+          assert 'practice_planner = Agent(' in source
+
+          plan = practice_engine.parse_plan(
+              '{"intent":"approach log","hypothesis":"moving closer reduces distance","action":"move_to","x":10,"y":64,"z":10}'
+          )
+          assert plan["action"] == "move_to"
+          before = {
+              "state": {"pos": [0, 64, 0]},
+              "inventory": [],
+          }
+          closer = {
+              "state": {"pos": [8, 64, 8]},
+              "inventory": [],
+          }
+          farther = {
+              "state": {"pos": [-3, 64, -3]},
+              "inventory": [],
+          }
+          assert practice_engine._objective_success(
+              plan, before, closer, {"state": "COMPLETED"}
+          )
+          assert not practice_engine._objective_success(
+              plan, before, farther, {"state": "COMPLETED"}
+          )
           assert 'chat_agent = Agent(' in source
           assert 'prefer experiment(...)' in source
           PY
@@ -189,5 +214,6 @@ jobs:
             local-agent/memory_store.py
             local-agent/skill_executor.py
             local-agent/action_log.py
+            local-agent/practice_engine.py
             local-agent/requirements.txt
             local-agent/README.md
