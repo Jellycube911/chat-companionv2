@@ -1,4 +1,5 @@
 import functools
+import json
 import math
 import time
 import traceback
@@ -313,6 +314,40 @@ def _observe(view: Literal["state", "entities", "blocks", "inventory", "vision"]
     ]
 
 
+
+
+@mcp.tool()
+@_tool_guard
+def scan_blocks(
+    contains: list[str] | None = None,
+    exact: list[str] | None = None,
+    radius: int = 16,
+    limit: int = 32,
+    exposed_only: bool = False,
+):
+    """Search loaded nearby blocks around the companion. This is a coarse resource/map sense, not literal eyesight."""
+    radius = max(1, min(20, int(radius)))
+    limit = max(1, min(64, int(limit)))
+    result = _post(
+        "/find-blocks",
+        {
+            "contains": contains or [],
+            "exact": exact or [],
+            "radius": radius,
+            "limit": limit,
+            "exposed_only": bool(exposed_only),
+        },
+    )
+    if _failed(result):
+        return result
+    return [
+        {
+            "type": block.get("type"),
+            "pos": [block.get("x"), block.get("y"), block.get("z")],
+            "distance": round(float(block.get("distance", 0)), 2),
+        }
+        for block in result.get("blocks", [])[:limit]
+    ]
 
 
 @mcp.tool()
@@ -795,6 +830,128 @@ def skill_memory(
     result["promoted_skill"] = promoted
     result["teacher_request"] = teacher_request
     return result
+
+
+@mcp.tool()
+@_tool_guard
+def experiment(
+    intent: str,
+    hypothesis: str,
+    action: Literal[
+        "move_to",
+        "move_forward",
+        "look_at",
+        "collect",
+        "mine",
+        "place",
+        "equip",
+        "craft",
+    ],
+    x: float | None = None,
+    y: float | None = None,
+    z: float | None = None,
+    slot: int | None = None,
+    item: str | None = None,
+    face: Literal["up", "down", "north", "south", "east", "west"] | None = None,
+    width: int | None = None,
+    height: int | None = None,
+    grid: list[str] | None = None,
+    times: int = 1,
+    skill_id: int | None = None,
+    name: str | None = None,
+):
+    """Run one safe physical experiment and automatically persist its observed success/failure as self-learning evidence."""
+    intent = str(intent).strip().lower()
+    hypothesis = str(hypothesis).strip()
+    if not intent or not hypothesis:
+        return {"ok": False, "error": "experiment requires intent and hypothesis"}
+
+    before = {
+        "state": _observe("state"),
+        "inventory": _observe("inventory"),
+    }
+
+    if action in {"move_to", "move_forward", "look_at"}:
+        mapped = {
+            "move_to": "move_to",
+            "move_forward": "move_forward",
+            "look_at": "look_at",
+        }[action]
+        result = navigate(mapped, x=x, y=y, z=z)
+    elif action in {"collect", "mine", "place", "equip"}:
+        result = world_action(
+            action,
+            x=None if x is None else int(round(x)),
+            y=None if y is None else int(round(y)),
+            z=None if z is None else int(round(z)),
+            slot=slot,
+            face=face,
+            item=item,
+        )
+    else:
+        if width is None or height is None or not grid:
+            return {
+                "ok": False,
+                "error": "craft experiment requires width, height and grid",
+            }
+        result = craft(width, height, grid, times)
+
+    after = {
+        "state": _observe("state"),
+        "inventory": _observe("inventory"),
+    }
+    failed = (
+        isinstance(result, dict)
+        and (
+            result.get("ok") is False
+            or result.get("state") in {"FAILED", "CANCELLED", "UNKNOWN"}
+        )
+    )
+    success = not failed
+    action_record = json.dumps(
+        {
+            "action": action,
+            "x": x,
+            "y": y,
+            "z": z,
+            "slot": slot,
+            "item": item,
+            "face": face,
+            "width": width,
+            "height": height,
+            "grid": grid,
+            "times": times,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    outcome = json.dumps(
+        {
+            "result": result,
+            "before": before,
+            "after": after,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=str,
+    )
+
+    learning = skill_memory(
+        "trial",
+        name=name,
+        intent=intent,
+        skill_id=skill_id,
+        hypothesis=hypothesis,
+        actions=action_record,
+        outcome=outcome,
+        success=success,
+    )
+    return {
+        "ok": success,
+        "action": action,
+        "result": result,
+        "learning": learning,
+    }
 
 
 @mcp.tool()
