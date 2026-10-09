@@ -306,13 +306,58 @@ def _prepare_woodcutting(task_id):
         raise SkillFailure("crafted an axe but could not equip it")
 
 
+def _search_waypoints(state, radius=14):
+    x = float(state.get("x", 0))
+    y = float(state.get("y", 0))
+    z = float(state.get("z", 0))
+    offsets = [
+        (radius, 0, "east"),
+        (0, radius, "south"),
+        (-radius, 0, "west"),
+        (0, -radius, "north"),
+        (radius, radius, "south-east"),
+        (-radius, radius, "south-west"),
+        (-radius, -radius, "north-west"),
+        (radius, -radius, "north-east"),
+    ]
+    return [
+        {"x": x + dx, "y": y, "z": z + dz, "label": label}
+        for dx, dz, label in offsets
+    ]
+
+
+def _move_search_sector(task_id, waypoint, index, total):
+    _progress(
+        task_id,
+        f"searching for trees: moving {waypoint['label']} "
+        f"(sector {index}/{total})",
+    )
+    started = _post(
+        "/move-to",
+        {
+            "x": waypoint["x"],
+            "y": waypoint["y"],
+            "z": waypoint["z"],
+            "stop_distance": 2.0,
+        },
+    )
+    if isinstance(started, dict) and started.get("ok") is False:
+        return False
+    result = _wait_job(task_id, 18)
+    return bool(result.get("ok"))
+
+
 def _gather_logs(task_id, target_total, use_axe=True):
     if use_axe and target_total >= 5:
         _prepare_woodcutting(task_id)
     elif use_axe:
         _equip_best_axe(task_id)
 
+    initial_state = _require(_get("/state"), "read state")
+    search_waypoints = _search_waypoints(initial_state, radius=14)
+    search_index = 0
     failed_rounds = 0
+
     while _count_matching(
         lambda item: any(pattern in item for pattern in LOG_PATTERNS)
     ) < target_total:
@@ -353,8 +398,21 @@ def _gather_logs(task_id, target_total, use_axe=True):
         ]
 
         if not candidates:
+            moved = False
+            while search_index < len(search_waypoints) and not moved:
+                waypoint = search_waypoints[search_index]
+                search_index += 1
+                moved = _move_search_sector(
+                    task_id,
+                    waypoint,
+                    search_index,
+                    len(search_waypoints),
+                )
+            if moved:
+                time.sleep(0.2)
+                continue
             raise SkillFailure(
-                "no logs found within 20 blocks; move closer to trees and resume"
+                "no logs found after scanning the nearby area and 8 search sectors"
             )
 
         before = _count_matching(
