@@ -141,6 +141,21 @@ class MemoryStore:
                 """
             )
             db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS skill_edges (
+                    parent_skill_id INTEGER NOT NULL,
+                    child_skill_id INTEGER NOT NULL,
+                    relation TEXT NOT NULL DEFAULT 'subskill',
+                    weight REAL NOT NULL DEFAULT 1.0,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY(parent_skill_id, child_skill_id, relation),
+                    FOREIGN KEY(parent_skill_id) REFERENCES learned_skills(id),
+                    FOREIGN KEY(child_skill_id) REFERENCES learned_skills(id)
+                )
+                """
+            )
+            db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_memories_updated ON memories(updated_at DESC)"
             )
             db.execute(
@@ -166,6 +181,12 @@ class MemoryStore:
             )
             db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_skill_trials_intent ON skill_trials(intent, created_at DESC)"
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_skill_edges_parent ON skill_edges(parent_skill_id)"
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_skill_edges_child ON skill_edges(child_skill_id)"
             )
 
             now = time.time()
@@ -215,6 +236,46 @@ class MemoryStore:
                   )
                 """
             )
+            migration = db.execute(
+                """
+                SELECT 1 FROM memories
+                WHERE kind='fact' AND memory_key='system.self_learning_v1'
+                LIMIT 1
+                """
+            ).fetchone()
+            if migration is None:
+                db.execute(
+                    """
+                    UPDATE tasks
+                    SET status='cancelled',
+                        progress='retired by self-learning upgrade',
+                        error='',
+                        updated_at=?
+                    WHERE status IN ('queued','running')
+                      AND skill IN (
+                        'gather_logs',
+                        'make_stone_pickaxe',
+                        'build_basic_house'
+                      )
+                    """,
+                    (now,),
+                )
+                db.execute(
+                    """
+                    INSERT INTO memories(
+                        kind, memory_key, content, importance,
+                        created_at, updated_at, last_used
+                    )
+                    VALUES ('fact', 'system.self_learning_v1', ?, 8, ?, ?, ?)
+                    """,
+                    (
+                        "High-level Minecraft procedures are now learned from experiments; legacy deterministic skills are fallback scaffolding only.",
+                        now,
+                        now,
+                        now,
+                    ),
+                )
+
             goal_count = db.execute("SELECT COUNT(*) FROM goals").fetchone()[0]
             if goal_count == 0:
                 db.execute(
@@ -1075,6 +1136,96 @@ class MemoryStore:
             for row in rows
         ]
 
+    def link_learned_skills(
+        self,
+        parent_skill_id,
+        child_skill_id,
+        relation="subskill",
+        weight=1.0,
+    ):
+        parent_skill_id = int(parent_skill_id)
+        child_skill_id = int(child_skill_id)
+        relation = str(relation).strip().lower()[:40] or "subskill"
+        weight = max(0.05, min(5.0, float(weight)))
+        if parent_skill_id == child_skill_id:
+            raise ValueError("a skill cannot depend on itself")
+        if self.learned_skill(parent_skill_id) is None:
+            raise ValueError("parent skill not found")
+        if self.learned_skill(child_skill_id) is None:
+            raise ValueError("child skill not found")
+        now = time.time()
+        with self._connect() as db:
+            db.execute(
+                """
+                INSERT INTO skill_edges(
+                    parent_skill_id, child_skill_id, relation,
+                    weight, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(parent_skill_id, child_skill_id, relation)
+                DO UPDATE SET weight=excluded.weight, updated_at=excluded.updated_at
+                """,
+                (
+                    parent_skill_id,
+                    child_skill_id,
+                    relation,
+                    weight,
+                    now,
+                    now,
+                ),
+            )
+        return {
+            "ok": True,
+            "parent_skill_id": parent_skill_id,
+            "child_skill_id": child_skill_id,
+            "relation": relation,
+            "weight": weight,
+        }
+
+    def skill_graph(self, skill_id):
+        skill_id = int(skill_id)
+        root = self.learned_skill(skill_id)
+        if root is None:
+            return None
+        with self._connect() as db:
+            children = db.execute(
+                """
+                SELECT child_skill_id, relation, weight
+                FROM skill_edges
+                WHERE parent_skill_id=?
+                ORDER BY weight DESC
+                """,
+                (skill_id,),
+            ).fetchall()
+            parents = db.execute(
+                """
+                SELECT parent_skill_id, relation, weight
+                FROM skill_edges
+                WHERE child_skill_id=?
+                ORDER BY weight DESC
+                """,
+                (skill_id,),
+            ).fetchall()
+        return {
+            "skill": root,
+            "children": [
+                {
+                    "skill": self.learned_skill(row["child_skill_id"]),
+                    "relation": row["relation"],
+                    "weight": row["weight"],
+                }
+                for row in children
+            ],
+            "parents": [
+                {
+                    "skill": self.learned_skill(row["parent_skill_id"]),
+                    "relation": row["relation"],
+                    "weight": row["weight"],
+                }
+                for row in parents
+            ],
+        }
+
     def stats(self):
         with self._connect() as db:
             memory_count = db.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
@@ -1095,6 +1246,9 @@ class MemoryStore:
             skill_trials = db.execute(
                 "SELECT COUNT(*) FROM skill_trials"
             ).fetchone()[0]
+            skill_edges = db.execute(
+                "SELECT COUNT(*) FROM skill_edges"
+            ).fetchone()[0]
         return {
             "memories": memory_count,
             "episodes": episode_count,
@@ -1104,6 +1258,7 @@ class MemoryStore:
             "queued_learning": queued_learning,
             "learned_skills": learned_skills,
             "skill_trials": skill_trials,
+            "skill_edges": skill_edges,
             "database": str(self.path),
         }
 
