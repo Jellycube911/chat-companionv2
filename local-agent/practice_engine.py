@@ -34,7 +34,18 @@ def _post(path, payload=None):
         data["ok"] = False
         data["status_code"] = 409
         return data
-    response.raise_for_status()
+    if not response.ok:
+        try:
+            body = response.json()
+        except ValueError:
+            body = {"error": response.text[:350] or "unknown bridge response"}
+        detail = body.get("error") if isinstance(body, dict) else str(body)
+        return {
+            "ok": False,
+            "error": str(detail or "Minecraft bridge rejected the action"),
+            "status_code": response.status_code,
+            "path": path,
+        }
     return response.json()
 
 
@@ -522,14 +533,46 @@ def _execute_action(plan, before):
         width = plan.get("width")
         height = plan.get("height")
         grid = plan.get("grid")
-        if width is None or height is None or not isinstance(grid, list):
-            return {"ok": False, "error": "craft requires width, height and grid"}
+        if not isinstance(grid, list):
+            return {"ok": False, "error": "craft_grid_missing: grid must be a list"}
+        try:
+            width, height = int(width), int(height)
+        except (TypeError, ValueError, OverflowError):
+            return {"ok": False, "error": "craft_dimensions_missing: provide integer width and height"}
+        if not (1 <= width <= 3 and 1 <= height <= 3):
+            return {"ok": False, "error": "craft_dimensions_invalid: width and height must be 1-3"}
+        if len(grid) != width * height:
+            return {
+                "ok": False,
+                "error": f"craft_grid_size_mismatch: {width}x{height} requires exactly "
+                         f"{width * height} entries, received {len(grid)}. "
+                         "Use empty strings for unused cells.",
+            }
+        if not all(isinstance(item, str) for item in grid):
+            return {"ok": False, "error": "craft_grid_items_invalid: use item ID strings or empty strings"}
+        normalized = [item.strip() for item in grid]
+        required = {}
+        for item in normalized:
+            if item:
+                required[item] = required.get(item, 0) + 1
+        if not required:
+            return {"ok": False, "error": "craft_grid_empty: supply at least one ingredient"}
+        unavailable = [
+            f"{item} {quantity} needed, {_item_count(before.get('inventory', []), item)} carried"
+            for item, quantity in required.items()
+            if _item_count(before.get("inventory", []), item) < quantity
+        ]
+        if unavailable:
+            return {
+                "ok": False,
+                "error": "craft_ingredients_missing: " + "; ".join(unavailable),
+            }
         return _post(
             "/craft",
             {
-                "width": int(width),
-                "height": int(height),
-                "grid": [str(item) for item in grid],
+                "width": width,
+                "height": height,
+                "grid": normalized,
                 "times": max(1, min(64, int(plan.get("times", 1) or 1))),
             },
         )
