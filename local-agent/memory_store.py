@@ -331,7 +331,16 @@ class MemoryStore:
                 for row in db.execute(
                     """
                     SELECT id FROM learned_skills
-                    WHERE lower(intent)='navigate towards log coordinates'
+                    WHERE lower(intent) IN (
+                        'navigate towards log coordinates',
+                        'approach target log'
+                    )
+                       OR (
+                            source='self'
+                            AND procedure LIKE '%"x":%'
+                            AND procedure LIKE '%"y":%'
+                            AND procedure LIKE '%"z":%'
+                       )
                     """
                 ).fetchall()
             ]
@@ -342,7 +351,7 @@ class MemoryStore:
                     [*bad_skill_ids, *bad_skill_ids],
                 )
                 db.execute(
-                    f"DELETE FROM skill_trials WHERE skill_id IN ({placeholders})",
+                    f"UPDATE skill_trials SET skill_id=NULL WHERE skill_id IN ({placeholders})",
                     bad_skill_ids,
                 )
                 db.execute(
