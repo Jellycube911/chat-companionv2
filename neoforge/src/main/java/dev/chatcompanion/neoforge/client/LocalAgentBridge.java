@@ -946,7 +946,8 @@ public final class LocalAgentBridge {
 
         try {
             Map<String, Object> result = withCompanion(context -> {
-                SimpleContainer inventory = context.companion().companionInventory();
+                CompanionEntity companion = context.companion();
+                SimpleContainer inventory = companion.companionInventory();
                 if (request.slot() == 0) {
                     ItemStack current = inventory.getItem(0);
                     return Map.of(
