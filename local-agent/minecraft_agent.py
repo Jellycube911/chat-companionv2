@@ -39,7 +39,7 @@ AMBIENT_WANDER_INTERVAL = 22.0
 REFLEX_COOLDOWN = 4.0
 LEARNING_COOLDOWN_SECONDS = 1800
 TEACHER_MAX_OUTPUT_TOKENS = 700
-AGENT_BUILD = "self-learning-local-brain-v7-grounded-fast-chat-2026-10-09"
+AGENT_BUILD = "self-learning-local-brain-v8-live-efficiency-2026-10-09"
 BASE_DIR = Path(__file__).resolve().parent
 
 set_tracing_disabled(True)
@@ -71,7 +71,8 @@ Allowed actions:
 - move_forward: only for a deliberate short test; prefer move_to for a known
   standable destination
 - look_at: x,y,z
-- mine: x,y,z. IMPORTANT: mine already makes the body approach, face, reach,
+- mine: x,y,z, optional tool item id. IMPORTANT: mine already makes the body
+  approach, face, reach, hold the mining action through real break progress,
   and physically break the target. Once a target block coordinate is known,
   prefer mine directly instead of move_to(target_block).
 - collect
@@ -93,6 +94,17 @@ Examples of syntax only:
 If recent evidence says move_to is repath_pending with no position change, do
 NOT repeat the same target. Change the action or target. If a scan found the
 desired block within about 4.5 blocks, try mine directly.
+
+EFFICIENCY LEARNING
+The host measures actual physical execution time and stores persistent reward
+history. Higher average reward means that option has been more effective in
+real Minecraft. For mining, break ticks are measured only while actually
+breaking the block, so tool comparisons are meaningful. Prefer the best measured
+tool for that block type when it is available. If evidence is sparse and the
+goal involves repeated harvesting, a safe comparison of plausible inventory
+tools can be useful. Do not assume a tool was better unless measured evidence
+or a durable user/teacher lesson supports it. When choosing a mining tool, put
+its exact inventory item id in the optional "tool" field.
 
 Never claim success. Never output experiment(...), scan_blocks(...), or any
 pseudo-call as text. Output JSON only. The host decides whether the action
@@ -586,6 +598,7 @@ def build_practice_plan_input(runtime, directive=None):
     )
     learned = store.find_learned_skills(learning_query, 3)
     relevant_memory = store.recall(learning_query, 4)
+    efficiency = store.list_efficiency(12)
 
     parts = [_awareness_text(runtime)]
     if directive:
@@ -614,6 +627,16 @@ def build_practice_plan_input(runtime, directive=None):
                 f"- [{memory['kind']}] {_trim(memory['content'], 500)}"
             )
 
+    if efficiency:
+        parts.append("PERSISTENT EFFICIENCY REWARD MEMORY (higher reward is better):")
+        for item in efficiency:
+            parts.append(
+                f"- {item['context']} option={item['option']} "
+                f"attempts={item['attempts']} success={item['successes']}/{item['attempts']} "
+                f"avg={item['avg_seconds']:.2f}s best={item['best_seconds']:.2f}s "
+                f"reward={item['avg_reward']:.3f}"
+            )
+
     if trials:
         parts.append("RECENT EXPERIMENT EVIDENCE:")
         for trial in trials:
@@ -640,6 +663,147 @@ def build_practice_plan_input(runtime, directive=None):
         "repeat a failed target unchanged. Output JSON only."
     )
     return "\n".join(parts)
+
+
+def _inventory_count(inventory, predicate):
+    return sum(
+        int(item.get("count", 0))
+        for item in (inventory or [])
+        if predicate(str(item.get("item", "")))
+    )
+
+
+def _reconcile_user_goals(execution):
+    after = (execution or {}).get("after") or {}
+    inventory = after.get("inventory") or []
+    messages = []
+
+    for goal in store.list_goals("active", 20):
+        if goal.get("source") != "user":
+            continue
+        title = str(goal.get("title") or "")
+        normalized = title.lower().strip()
+
+        match = re.fullmatch(r"gather\s+(\d+)\s+logs?", normalized)
+        if match:
+            target = int(match.group(1))
+            count = _inventory_count(
+                inventory,
+                lambda item: item.startswith("minecraft:") and item.endswith("_log"),
+            )
+            if count >= target:
+                store.update_goal(goal["id"], status="completed")
+                messages.append(f"got {count} logs, task done")
+                continue
+
+        if normalized in {"obtain a stone pickaxe", "get a stone pickaxe"}:
+            has_pickaxe = _inventory_count(
+                inventory,
+                lambda item: item == "minecraft:stone_pickaxe",
+            ) > 0
+            if has_pickaxe:
+                store.update_goal(goal["id"], status="completed")
+                messages.append("got the stone pickaxe, task done")
+
+    return messages
+
+
+def _execution_failure_reason(execution):
+    if not execution:
+        return "no result"
+    result = execution.get("result") or {}
+    return str(
+        result.get("error")
+        or result.get("reason")
+        or execution.get("error")
+        or "unknown issue"
+    ).strip()
+
+
+async def _notify_once(runtime, key, message, cooldown=30.0):
+    now = time.monotonic()
+    notices = runtime.setdefault("notices", {})
+    last = float(notices.get(key, 0.0) or 0.0)
+    if now - last < cooldown:
+        return False
+    notices[key] = now
+    await _send_ingame(message, reason="proactive_status")
+    log_event(
+        "chat",
+        "proactive_status",
+        key=key,
+        message=message,
+    )
+    return True
+
+
+async def _report_planned_outcome(runtime, execution, source):
+    if not execution:
+        if source == "command":
+            await _notify_once(
+                runtime,
+                "command:no_result",
+                "couldn't get a usable action plan",
+                cooldown=5.0,
+            )
+        return
+
+    for message in _reconcile_user_goals(execution):
+        await _notify_once(
+            runtime,
+            "goal_complete:" + message,
+            message,
+            cooldown=2.0,
+        )
+
+    learning = execution.get("learning") or {}
+    promoted = learning.get("promoted_skill") if isinstance(learning, dict) else None
+    teacher = learning.get("teacher_request") if isinstance(learning, dict) else None
+
+    if promoted:
+        name = str(promoted.get("name") or promoted.get("intent") or "that")
+        await _notify_once(
+            runtime,
+            f"learned:{promoted.get('id', name)}",
+            _format_ingame_reply(f"figured out a reliable way to {name}"),
+            cooldown=120.0,
+        )
+
+    if teacher and (teacher.get("ok") or teacher.get("deferred")):
+        intent = str((execution.get("plan") or {}).get("intent") or "this")
+        await _notify_once(
+            runtime,
+            f"teacher:{intent}",
+            _format_ingame_reply(f"I'm stuck on {intent}, trying to learn another way"),
+            cooldown=90.0,
+        )
+
+    plan = execution.get("plan") or {}
+    streaks = runtime.setdefault("failure_streaks", {})
+    streak_key = f"{plan.get('intent', '')}:{plan.get('action', '')}"
+
+    if execution.get("ok"):
+        streaks.pop(streak_key, None)
+        return
+
+    streaks[streak_key] = int(streaks.get(streak_key, 0)) + 1
+    reason = _execution_failure_reason(execution)
+
+    if source == "command":
+        await _notify_once(
+            runtime,
+            f"command_fail:{streak_key}:{reason}",
+            _format_ingame_reply(f"couldn't do that: {reason}"),
+            cooldown=5.0,
+        )
+    elif streaks[streak_key] >= 2:
+        intent = str(plan.get("intent") or "that")
+        await _notify_once(
+            runtime,
+            f"blocked:{streak_key}:{reason}",
+            _format_ingame_reply(f"having trouble with {intent}: {reason}"),
+            cooldown=45.0,
+        )
 
 
 async def run_planned_action(planner_agent, runtime, directive=None, source="practice"):
@@ -711,6 +875,7 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         plan=plan,
         execution=execution,
     )
+    await _report_planned_outcome(runtime, execution, source)
     return execution
 
 
@@ -2189,6 +2354,8 @@ async def main():
         "physical_action_active": False,
         "model_label": None,
         "chat_tasks": set(),
+        "notices": {},
+        "failure_streaks": {},
     }
 
     model, model_label = choose_model()
