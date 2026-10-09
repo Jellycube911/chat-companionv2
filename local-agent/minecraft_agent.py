@@ -70,10 +70,11 @@ For a high-level goal:
 1. search skill_memory for relevant learned skills and inspect confidence;
 2. if a sufficiently tested procedure exists, reuse it but still verify results;
 3. otherwise form a small hypothesis using only safe primitive MCP actions;
-4. execute a short experiment, normally 1-3 physical actions;
-5. observe the resulting world/inventory state;
-6. record the trial with skill_memory(trial, ...), including what actually
-   happened rather than what you expected;
+4. prefer experiment(...) for physical tests because it automatically records
+   the action, verified before/after state, and success/failure as a trial;
+5. use scan_blocks(...) when you need a coarse loaded-area search for a specific
+   block/resource rather than wandering randomly;
+6. observe additional state only when needed to interpret the result;
 7. change the approach after failure instead of repeating blindly;
 8. once a procedure has evidence behind it, save or refine it with
    skill_memory(save, ...);
@@ -128,6 +129,8 @@ PHYSICAL BEHAVIOR
 - crafting uses registered Minecraft recipes;
 - use navigate(look_at, ...) then observe(vision) when you deliberately inspect
   a direction or object;
+- scan_blocks is a coarse nearby resource/map search and is not literal sight;
+- experiment wraps one safe primitive action and automatically stores evidence;
 - for world_action(place), pass item="minecraft:..." when you know what item
   should be placed. Coordinates are optional for nearby placement; do not guess
   inventory slot numbers when the item name is known.
