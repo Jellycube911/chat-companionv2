@@ -681,8 +681,30 @@ async def cloud_learning_worker(input_queue, runtime):
             print(f"[TEACHER] Failed: {error}")
 
 
+async def minecraft_world_ready():
+    try:
+        state = await asyncio.to_thread(_get, "/state")
+        return bool(state) and state.get("serverState") == "running"
+    except Exception:
+        return False
+
+
 async def local_task_worker(input_queue, runtime):
+    waiting_for_world = False
+
     while True:
+        if not await minecraft_world_ready():
+            if not waiting_for_world:
+                print("\n[MINECRAFT] Waiting for world/companion before running local tasks...")
+                waiting_for_world = True
+            runtime["active_task"] = None
+            await asyncio.sleep(1.0)
+            continue
+
+        if waiting_for_world:
+            print("\n[MINECRAFT] World/companion connected. Resuming queued tasks.")
+            waiting_for_world = False
+
         task = await asyncio.to_thread(store.next_queued_task)
         if task is None:
             await asyncio.sleep(0.35)
@@ -698,10 +720,14 @@ async def local_task_worker(input_queue, runtime):
         if finished is None:
             continue
 
+        detail = (
+            finished["error"]
+            if finished["status"] == "failed" and finished.get("error")
+            else finished["progress"]
+        )
         summary = (
             f"Local task #{finished['id']} {finished['skill']} "
-            f"{finished['status']}: "
-            f"{finished['progress'] or finished['error']}"
+            f"{finished['status']}: {detail}"
         )
         print(f"\n[SKILL] {summary}")
 
