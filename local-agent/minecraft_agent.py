@@ -73,7 +73,13 @@ For a high-level goal:
    happened rather than what you expected;
 7. change the approach after failure instead of repeating blindly;
 8. once a procedure has evidence behind it, save or refine it with
-   skill_memory(save, ...).
+   skill_memory(save, ...);
+9. when a learned procedure depends on other learned procedures, link them with
+   skill_memory(link, ...) so the skill graph records the composition.
+
+Keep experiment intents stable and concise. Reuse the same intent wording when
+testing the same capability; use a separate subskill intent for a reusable
+subproblem rather than lumping every experiment into the broad user goal.
 
 A learned procedure is descriptive knowledge over safe MCP tools, never code.
 Do not claim that something was learned until an observed trial supports it.
@@ -604,6 +610,13 @@ def _current_activity_text():
     ]
     if meaningful:
         goal = meaningful[0]
+        trials = store.recent_trials(1)
+        if trials:
+            trial = trials[-1]
+            return (
+                f"I'm currently trying to: {goal['title']}. "
+                f"My latest experiment was: {trial['hypothesis']}"
+            )
         return f"I'm currently trying to: {goal['title']}."
     return "I'm idle and keeping an eye on the surroundings."
 
@@ -729,7 +742,7 @@ async def _ask_cloud_teacher(request):
             "Teach principles and testable hypotheses, not step-by-step play."
         ),
         input=prompt,
-        reasoning={"effort": "medium"},
+        reasoning={"effort": "low"},
         max_output_tokens=TEACHER_MAX_OUTPUT_TOKENS,
         store=False,
     )
@@ -766,10 +779,13 @@ async def cloud_learning_worker(input_queue, runtime):
             )
             safe_key = re.sub(r"[^a-z0-9_.-]+", ".", request["topic"].lower()).strip(".")
             store.remember(
-                "skill",
+                "lesson",
                 f"teacher.{safe_key[:100] or request['id']}",
-                lesson,
-                9,
+                (
+                    "UNTESTED TEACHER HYPOTHESIS. Verify in Minecraft before "
+                    "promoting to a learned skill.\n" + lesson
+                ),
+                8,
             )
             store.record_event(
                 "learning_complete",
