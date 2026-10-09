@@ -156,6 +156,24 @@ class MemoryStore:
                 """
             )
             db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS action_efficiency (
+                    context TEXT NOT NULL,
+                    option TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    successes INTEGER NOT NULL DEFAULT 0,
+                    failures INTEGER NOT NULL DEFAULT 0,
+                    avg_seconds REAL NOT NULL DEFAULT 0,
+                    best_seconds REAL NOT NULL DEFAULT 0,
+                    avg_reward REAL NOT NULL DEFAULT 0,
+                    last_reward REAL NOT NULL DEFAULT 0,
+                    metadata TEXT NOT NULL DEFAULT '',
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY(context, option)
+                )
+                """
+            )
+            db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_memories_updated ON memories(updated_at DESC)"
             )
             db.execute(
@@ -187,6 +205,9 @@ class MemoryStore:
             )
             db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_skill_edges_child ON skill_edges(child_skill_id)"
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_action_efficiency_reward ON action_efficiency(context, avg_reward DESC, updated_at DESC)"
             )
 
             now = time.time()
@@ -1352,6 +1373,116 @@ class MemoryStore:
             ],
         }
 
+    def record_efficiency(
+        self,
+        context,
+        option,
+        seconds,
+        success,
+        reward,
+        metadata="",
+    ):
+        context = str(context).strip().lower()[:240]
+        option = str(option).strip().lower()[:240]
+        seconds = max(0.0, float(seconds))
+        success = bool(success)
+        reward = float(reward)
+        metadata = str(metadata).strip()[:2400]
+        if not context or not option:
+            raise ValueError("context and option are required")
+        now = time.time()
+
+        with self._connect() as db:
+            db.execute(
+                """
+                INSERT INTO action_efficiency(
+                    context, option, attempts, successes, failures,
+                    avg_seconds, best_seconds, avg_reward, last_reward,
+                    metadata, updated_at
+                )
+                VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(context, option) DO UPDATE SET
+                    avg_seconds=(
+                        action_efficiency.avg_seconds * action_efficiency.attempts
+                        + excluded.avg_seconds
+                    ) / (action_efficiency.attempts + 1),
+                    best_seconds=CASE
+                        WHEN action_efficiency.best_seconds <= 0
+                          OR excluded.best_seconds < action_efficiency.best_seconds
+                        THEN excluded.best_seconds
+                        ELSE action_efficiency.best_seconds
+                    END,
+                    avg_reward=(
+                        action_efficiency.avg_reward * action_efficiency.attempts
+                        + excluded.avg_reward
+                    ) / (action_efficiency.attempts + 1),
+                    last_reward=excluded.last_reward,
+                    attempts=action_efficiency.attempts + 1,
+                    successes=action_efficiency.successes + excluded.successes,
+                    failures=action_efficiency.failures + excluded.failures,
+                    metadata=excluded.metadata,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    context,
+                    option,
+                    1 if success else 0,
+                    0 if success else 1,
+                    seconds,
+                    seconds,
+                    reward,
+                    reward,
+                    metadata,
+                    now,
+                ),
+            )
+            row = db.execute(
+                """
+                SELECT context, option, attempts, successes, failures,
+                       avg_seconds, best_seconds, avg_reward, last_reward,
+                       metadata, updated_at
+                FROM action_efficiency
+                WHERE context=? AND option=?
+                """,
+                (context, option),
+            ).fetchone()
+
+        return dict(row) if row is not None else None
+
+    def list_efficiency(self, limit=16, context=None):
+        limit = max(1, min(50, int(limit)))
+        with self._connect() as db:
+            if context:
+                rows = db.execute(
+                    """
+                    SELECT context, option, attempts, successes, failures,
+                           avg_seconds, best_seconds, avg_reward, last_reward,
+                           metadata, updated_at
+                    FROM action_efficiency
+                    WHERE context=?
+                    ORDER BY avg_reward DESC, attempts DESC, updated_at DESC
+                    LIMIT ?
+                    """,
+                    (str(context).strip().lower()[:240], limit),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    """
+                    SELECT context, option, attempts, successes, failures,
+                           avg_seconds, best_seconds, avg_reward, last_reward,
+                           metadata, updated_at
+                    FROM action_efficiency
+                    ORDER BY updated_at DESC, avg_reward DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    def best_efficiency(self, context):
+        rows = self.list_efficiency(1, context=context)
+        return rows[0] if rows else None
+
     def stats(self):
         with self._connect() as db:
             memory_count = db.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
@@ -1375,6 +1506,9 @@ class MemoryStore:
             skill_edges = db.execute(
                 "SELECT COUNT(*) FROM skill_edges"
             ).fetchone()[0]
+            action_efficiency = db.execute(
+                "SELECT COUNT(*) FROM action_efficiency"
+            ).fetchone()[0]
         return {
             "memories": memory_count,
             "episodes": episode_count,
@@ -1385,6 +1519,7 @@ class MemoryStore:
             "learned_skills": learned_skills,
             "skill_trials": skill_trials,
             "skill_edges": skill_edges,
+            "action_efficiency": action_efficiency,
             "database": str(self.path),
         }
 
