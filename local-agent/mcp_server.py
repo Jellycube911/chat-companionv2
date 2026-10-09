@@ -580,11 +580,19 @@ def skill_memory(
                 "trial requires intent, hypothesis, actions, outcome and success"
             ),
         }
+    verified_state = _observe("state")
+    verified_inventory = _observe("inventory")
+    verified_outcome = (
+        f"{outcome}\n"
+        f"VERIFIED_AFTER_STATE={verified_state}\n"
+        f"VERIFIED_AFTER_INVENTORY={verified_inventory[:16] if isinstance(verified_inventory, list) else verified_inventory}"
+    )
+
     result = store.record_skill_trial(
         intent,
         hypothesis,
         actions,
-        outcome,
+        verified_outcome,
         success,
         skill_id=skill_id,
     )
