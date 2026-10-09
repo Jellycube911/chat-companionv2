@@ -24,7 +24,7 @@ jobs:
         run: |
           python -m py_compile local-agent/minecraft_agent.py local-agent/mcp_server.py local-agent/memory_store.py local-agent/skill_executor.py
           cd local-agent
-          python -c "import agents, mcp, requests, memory_store, mcp_server, skill_executor; assert memory_store.store.list_goals('active', 5)"
+          python -c "import agents, mcp, requests, memory_store, mcp_server, skill_executor; assert memory_store.store.list_goals('active', 5); r=memory_store.store.request_learning('ci:test','verify local learning queue',60); assert r.get('ok') or r.get('deferred')"
           COMPANION_MODEL_PROVIDER=openai COMPANION_OPENAI_MODEL=gpt-5.6-luna python -c "import minecraft_agent; _, label = minecraft_agent.choose_model(); assert label == 'openai:gpt-5.6-luna', label; assert 'sol' not in label.lower(), label; print('brain model fallback:', label)"
           python - <<'PY'
           import asyncio
@@ -47,7 +47,7 @@ jobs:
                   names = {tool.name for tool in await server.list_tools()}
                   expected = {
                       "observe", "navigate", "world_action", "craft",
-                      "say", "remember", "recall_memory", "goals", "skills", "memory_status",
+                      "say", "remember", "recall_memory", "goals", "skills", "learn", "memory_status",
                   }
                   missing = expected - names
                   assert not missing, f"Missing MCP tools: {sorted(missing)}"
