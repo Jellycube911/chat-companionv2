@@ -154,6 +154,9 @@ jobs:
           assert '_native_local_completion' in source
           assert 'physical_action_active' in source
           assert 'mine already' in source
+          assert 'poll_minecraft_chat(input_queue, runtime, chat_agent)' in source
+          assert '_spawn_player_chat' in source
+          assert 'blocking local-model HTTP request cannot actually be cancelled' in source
 
           plan = practice_engine.parse_plan(
               '{"intent":"approach log","hypothesis":"moving closer reduces distance","action":"move_to","x":10,"y":64,"z":10}'
