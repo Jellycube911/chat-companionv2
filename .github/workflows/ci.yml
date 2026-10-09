@@ -81,6 +81,7 @@ jobs:
           python - <<'PY'
           import minecraft_agent
           import mcp_server
+          import practice_engine
 
           assert minecraft_agent._simple_chat_reply("hey") == "hey"
           assert minecraft_agent._simple_chat_reply("whats up") is not None
