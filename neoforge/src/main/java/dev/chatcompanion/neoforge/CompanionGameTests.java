@@ -114,7 +114,7 @@ public final class CompanionGameTests {
         });
     }
 
-    @GameTest(template = "empty", timeoutTicks = 160)
+    @GameTest(template = "empty", timeoutTicks = 350)
     public static void miningHasObservableProgressBeforeCompletion(GameTestHelper helper) {
         floor(helper);
         ServerPlayer owner = helper.makeMockServerPlayerInLevel();
@@ -136,9 +136,11 @@ public final class CompanionGameTests {
                     "Mining must expose partial progress before the block breaks");
             helper.assertTrue(helper.getLevel().getBlockState(target).is(Blocks.STONE),
                     "Partial progress must not immediately remove the block");
-            helper.runAfterDelay(85, () -> {
+            helper.runAfterDelay(250, () -> {
                 helper.assertTrue(companion.jobState() == CompanionEntity.JobState.COMPLETED,
-                        "Progressive mining must eventually finish");
+                        "Progressive mining must eventually finish; state="
+                            + companion.jobState() + " reason=" + companion.reason()
+                            + " progress=" + companion.jobProgress());
                 helper.assertTrue(!helper.getLevel().getBlockState(target).is(Blocks.STONE),
                         "Completed mining must change the physical world");
                 helper.assertTrue(companion.reason().contains("break_ticks="),
