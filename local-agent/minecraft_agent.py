@@ -1012,6 +1012,45 @@ def _invalid_target_ttl(key):
     return 1800.0 if str(key).startswith("craft@") else 180.0
 
 
+def _handle_craft_learning(runtime, plan, execution, goal, inventory):
+    """Ask for sparse guidance only after repeated real crafting failures."""
+    if plan.get("action") != "craft":
+        return
+    if execution.get("ok"):
+        runtime["failed_craft_attempts"] = 0
+        return
+    count = int(runtime.get("failed_craft_attempts", 0)) + 1
+    runtime["failed_craft_attempts"] = count
+    if count < 3 or not goal or not _cloud_teacher_enabled():
+        return
+    runtime["failed_craft_attempts"] = 0
+    result = execution.get("result") or {}
+    observed_error = (
+        result.get("error") or execution.get("error")
+        or "crafting did not produce an item"
+    )
+    hint = store.request_learning(
+        "crafting:" + str(goal.get("title") or "unknown").lower(),
+        "User goal: " + str(goal.get("title"))
+        + ". Local Minecraft server rejected crafting attempts. "
+        + "Latest attempted dimensions/grid: "
+        + json.dumps({
+            "width": plan.get("width"), "height": plan.get("height"),
+            "grid": plan.get("grid"),
+        }, ensure_ascii=False)
+        + ". Observed error: " + str(observed_error)
+        + ". Actual inventory: " + json.dumps(inventory, ensure_ascii=False)
+        + ". Propose an UNTESTED valid Minecraft crafting sequence with "
+        "correct width*height grid entries, needed placement/crafting table, "
+        "and a world-verified success criterion. Never invent an axe head item.",
+        cooldown_seconds=1800,
+    )
+    log_event(
+        "practice_host", "craft_teacher_escalation",
+        failures=count, teacher_request=hint,
+    )
+
+
 def _plan_target_key(plan):
     action = str(plan.get("action") or "")
     if action == "craft":
@@ -1319,6 +1358,7 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
             for key, (_, why) in list(invalid.items()):
                 if why.startswith("mining_blocked|"):
                     invalid.pop(key, None)
+    _handle_craft_learning(runtime, plan, execution, user_goal, awareness_inventory)
     await update_awareness(runtime)
     log_event(
         "practice_host",
