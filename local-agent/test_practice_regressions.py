@@ -121,17 +121,18 @@ class PracticeRegressions(unittest.TestCase):
         self.assertFalse(agent._plan_matches_user_goal(unrelated, goal))
         self.assertTrue(agent._plan_matches_user_goal(related, goal))
 
-    def test_come_to_me_follows_and_pauses_practice(self):
-        from unittest.mock import AsyncMock
+    def test_come_to_me_approaches_once_and_pauses_practice(self):
         async def run():
             with patch.object(agent.store, "cancel_tasks"), patch.object(
-                agent, "_post", return_value={"ok": True, "action": "follow"}
+                agent, "_get", return_value={"owner": {"x": 5, "y": 64, "z": 8, "distance": 6}}
+            ), patch.object(
+                agent, "_post", return_value={"ok": True, "action": "move_to"}
             ) as post, patch.object(agent.store, "record_event"):
                 runtime = {}
                 result = await agent.fast_chat_reflex("come to me", runtime)
                 self.assertEqual(result["reply"], "coming")
                 self.assertIn("manual_control_until", runtime)
-                post.assert_called_once_with("/follow-owner")
+                post.assert_called_once_with("/move-to", {"x": 5, "y": 64, "z": 8, "stop_distance": 2.0})
         asyncio.run(run())
 
     def test_natural_user_instruction_is_actionable(self):
@@ -171,13 +172,15 @@ class PracticeRegressions(unittest.TestCase):
     def test_short_come_command_is_physical(self):
         async def check():
             with patch.object(agent.store, "cancel_tasks"), patch.object(
+                agent, "_get", return_value={"owner": {"x": 3, "y": 64, "z": 4, "distance": 5}}
+            ), patch.object(
                 agent, "_post", return_value={"ok": True}
             ) as post, patch.object(agent.store, "record_event"):
                 state = {}
                 reply = await agent.fast_chat_reflex("come", state)
                 self.assertEqual(reply["reply"], "coming")
                 self.assertTrue(state["last_move_command"]["accepted"])
-                post.assert_called_once_with("/follow-owner")
+                post.assert_called_once_with("/move-to", {"x": 3, "y": 64, "z": 4, "stop_distance": 2.0})
         asyncio.run(check())
 
     def test_current_activity_is_grounded_not_fake_progress(self):
