@@ -83,11 +83,18 @@ jobs:
           import mcp_server
 
           assert minecraft_agent._simple_chat_reply("hey") == "hey"
+          assert minecraft_agent._simple_chat_reply("whats up") is not None
           assert minecraft_agent._looks_like_action_request(
               "can u put the crafting table"
           )
           assert not minecraft_agent._looks_like_action_request(
               "can you explain how to craft a table"
+          )
+          assert not minecraft_agent._looks_like_direct_request(
+              "you didnt get any logs"
+          )
+          assert minecraft_agent._looks_like_direct_request(
+              "can you gather logs"
           )
 
           original_observe = mcp_server._observe
@@ -125,7 +132,10 @@ jobs:
               mcp_server._wait_for_job = original_wait
 
           source = open("minecraft_agent.py", encoding="utf-8").read()
-          assert 'source in {"autonomy", "event", "task", "learning", "practice"}' in source
+          assert 'source in {"autonomy", "event", "task", "learning", "practice", "command"}' in source
+          assert 'async def _send_ingame' in source
+          assert 'async def _delayed_chat_ack' in source
+          assert 'QUICK CHAT CONTEXT' in source
           PY
           python - <<'PY'
           import asyncio
