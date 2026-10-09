@@ -1419,6 +1419,48 @@ def _current_activity_text():
     return "just looking around rn"
 
 
+def _instant_failure_explanation(text):
+    normalized = text.lower().strip().rstrip(".!?")
+    if not (
+        "why" in normalized
+        and any(
+            phrase in normalized
+            for phrase in ("cant ", "can't ", "cannot ", "couldnt ", "couldn't ")
+        )
+    ):
+        return None
+
+    trials = store.recent_trials(6)
+    failed = next(
+        (trial for trial in reversed(trials) if not trial.get("success")),
+        None,
+    )
+    if failed is None:
+        return None
+
+    try:
+        outcome = json.loads(failed.get("outcome") or "{}")
+        result = outcome.get("result") or {}
+        reason = str(result.get("reason") or result.get("error") or "").strip()
+    except Exception:
+        reason = ""
+
+    lowered = reason.lower()
+    if "repath_pending" in lowered:
+        return "pathing's stuck trying to get into reach"
+    if lowered == "moving" or "moving" in lowered:
+        return "still getting into reach, haven't mined it yet"
+    if "invalid_mining_target" in lowered:
+        return "that target wasn't actually mineable"
+    if "line" in lowered and "sight" in lowered:
+        return "can't get a clear line on it yet"
+    if "reach" in lowered:
+        return "can't get into reach yet"
+    if reason:
+        return _format_ingame_reply(f"last try failed: {reason}")
+    return "last mining attempt failed; trying another approach"
+
+
 def _is_learning_status_question(text):
     normalized = text.lower().strip().rstrip(".!?")
     return any(
@@ -1531,6 +1573,23 @@ async def poll_minecraft_chat(input_queue, runtime, chat_agent):
                     runtime["last_user_activity"] = time.monotonic()
                     log_event("chat", "user_message", message=text)
                     _preempt_background_reasoning(runtime)
+
+                    failure_answer = _instant_failure_explanation(text)
+                    if failure_answer is not None:
+                        await _send_ingame(
+                            failure_answer,
+                            reason="instant_failure_explanation",
+                        )
+                        print(f"\n[MINECRAFT] Alik: {text}")
+                        print(f"\nAI [failure status]: {failure_answer}")
+                        store.record_episode(text, failure_answer)
+                        log_event(
+                            "chat",
+                            "instant_reply",
+                            message=text,
+                            reply=failure_answer,
+                        )
+                        continue
 
                     if _is_learning_status_question(text):
                         answer = _learning_status_text()
