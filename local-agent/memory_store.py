@@ -91,6 +91,23 @@ class MemoryStore:
                 """
             )
             db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS learning_requests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    topic TEXT NOT NULL,
+                    problem TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    lesson TEXT NOT NULL DEFAULT '',
+                    error TEXT NOT NULL DEFAULT '',
+                    model TEXT NOT NULL DEFAULT '',
+                    input_tokens INTEGER NOT NULL DEFAULT 0,
+                    output_tokens INTEGER NOT NULL DEFAULT 0,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """
+            )
+            db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_memories_updated ON memories(updated_at DESC)"
             )
             db.execute(
@@ -104,6 +121,12 @@ class MemoryStore:
             )
             db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status, created_at ASC)"
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_learning_status ON learning_requests(status, created_at ASC)"
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_learning_topic ON learning_requests(topic, updated_at DESC)"
             )
 
             now = time.time()
@@ -129,6 +152,14 @@ class MemoryStore:
                 """
                 UPDATE tasks
                 SET status='queued', progress='resuming after restart', updated_at=?
+                WHERE status='running'
+                """,
+                (now,),
+            )
+            db.execute(
+                """
+                UPDATE learning_requests
+                SET status='queued', error='', updated_at=?
                 WHERE status='running'
                 """,
                 (now,),
@@ -544,6 +575,201 @@ class MemoryStore:
             ).rowcount
         return {"ok": True, "cancelled": count}
 
+    def request_learning(self, topic, problem, cooldown_seconds=1800):
+        topic = str(topic).strip().lower()[:160]
+        problem = str(problem).strip()[:2400]
+        if not topic or not problem:
+            raise ValueError("topic and problem are required")
+        now = time.time()
+        cooldown_seconds = max(60, int(cooldown_seconds))
+
+        with self._connect() as db:
+            active = db.execute(
+                """
+                SELECT id, status, updated_at
+                FROM learning_requests
+                WHERE topic=? AND status IN ('queued','running')
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (topic,),
+            ).fetchone()
+            if active is not None:
+                return {
+                    "ok": True,
+                    "id": active["id"],
+                    "status": active["status"],
+                    "reused": True,
+                }
+
+            recent = db.execute(
+                """
+                SELECT id, status, updated_at
+                FROM learning_requests
+                WHERE topic=?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (topic,),
+            ).fetchone()
+            if recent is not None and now - recent["updated_at"] < cooldown_seconds:
+                return {
+                    "ok": False,
+                    "deferred": True,
+                    "id": recent["id"],
+                    "status": recent["status"],
+                    "retry_after_seconds": int(
+                        cooldown_seconds - (now - recent["updated_at"])
+                    ),
+                }
+
+            cursor = db.execute(
+                """
+                INSERT INTO learning_requests(
+                    topic, problem, status, lesson, error, model,
+                    input_tokens, output_tokens, created_at, updated_at
+                )
+                VALUES (?, ?, 'queued', '', '', '', 0, 0, ?, ?)
+                """,
+                (topic, problem, now, now),
+            )
+            request_id = cursor.lastrowid
+
+        return {
+            "ok": True,
+            "id": request_id,
+            "status": "queued",
+            "topic": topic,
+        }
+
+    def next_learning_request(self):
+        with self._connect() as db:
+            row = db.execute(
+                """
+                SELECT id FROM learning_requests
+                WHERE status='queued'
+                ORDER BY created_at ASC
+                LIMIT 1
+                """
+            ).fetchone()
+            if row is None:
+                return None
+            request_id = row["id"]
+            changed = db.execute(
+                """
+                UPDATE learning_requests
+                SET status='running', updated_at=?
+                WHERE id=? AND status='queued'
+                """,
+                (time.time(), request_id),
+            ).rowcount
+        return self.learning_request(request_id) if changed == 1 else None
+
+    def learning_request(self, request_id):
+        with self._connect() as db:
+            row = db.execute(
+                """
+                SELECT id, topic, problem, status, lesson, error, model,
+                       input_tokens, output_tokens, created_at, updated_at
+                FROM learning_requests
+                WHERE id=?
+                """,
+                (int(request_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "topic": row["topic"],
+            "problem": row["problem"],
+            "status": row["status"],
+            "lesson": row["lesson"],
+            "error": row["error"],
+            "model": row["model"],
+            "input_tokens": row["input_tokens"],
+            "output_tokens": row["output_tokens"],
+        }
+
+    def finish_learning(
+        self,
+        request_id,
+        *,
+        status,
+        lesson="",
+        error="",
+        model="",
+        input_tokens=0,
+        output_tokens=0,
+    ):
+        if status not in {"completed", "failed"}:
+            raise ValueError("learning status must be completed or failed")
+        with self._connect() as db:
+            changed = db.execute(
+                """
+                UPDATE learning_requests
+                SET status=?, lesson=?, error=?, model=?,
+                    input_tokens=?, output_tokens=?, updated_at=?
+                WHERE id=?
+                """,
+                (
+                    status,
+                    str(lesson).strip()[:8000],
+                    str(error).strip()[:2400],
+                    str(model).strip()[:120],
+                    max(0, int(input_tokens or 0)),
+                    max(0, int(output_tokens or 0)),
+                    time.time(),
+                    int(request_id),
+                ),
+            ).rowcount
+        return {"ok": changed == 1, "id": int(request_id), "status": status}
+
+    def list_learning(self, limit=8):
+        limit = max(1, min(20, int(limit)))
+        with self._connect() as db:
+            rows = db.execute(
+                """
+                SELECT id, topic, status, lesson, error, model,
+                       input_tokens, output_tokens, updated_at
+                FROM learning_requests
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "topic": row["topic"],
+                "status": row["status"],
+                "lesson": row["lesson"],
+                "error": row["error"],
+                "model": row["model"],
+                "input_tokens": row["input_tokens"],
+                "output_tokens": row["output_tokens"],
+            }
+            for row in rows
+        ]
+
+    def recent_task_failures(self, skill, limit=3):
+        skill = str(skill).strip().lower()
+        limit = max(1, min(10, int(limit)))
+        with self._connect() as db:
+            rows = db.execute(
+                """
+                SELECT id, error, updated_at
+                FROM tasks
+                WHERE skill=? AND status='failed'
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (skill, limit),
+            ).fetchall()
+        return [
+            {"id": row["id"], "error": row["error"], "updated_at": row["updated_at"]}
+            for row in rows
+        ]
+
     def stats(self):
         with self._connect() as db:
             memory_count = db.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
@@ -555,12 +781,16 @@ class MemoryStore:
             active_tasks = db.execute(
                 "SELECT COUNT(*) FROM tasks WHERE status IN ('queued','running')"
             ).fetchone()[0]
+            queued_learning = db.execute(
+                "SELECT COUNT(*) FROM learning_requests WHERE status IN ('queued','running')"
+            ).fetchone()[0]
         return {
             "memories": memory_count,
             "episodes": episode_count,
             "active_goals": active_goals,
             "events": event_count,
             "active_tasks": active_tasks,
+            "queued_learning": queued_learning,
             "database": str(self.path),
         }
 
