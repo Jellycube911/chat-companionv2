@@ -1206,6 +1206,21 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         if invalid:
             runtime["planner_backoff_until"] = time.monotonic() + 30.0
             log_event("practice_host", "planner_stuck_backoff", cause=cause, revision=revision)
+            if exhausted and user_goal and _cloud_teacher_enabled():
+                # A repeated failed reasoning strategy is a legitimate reason
+                # for a rare cloud lesson, not another motion experiment.
+                lesson = store.request_learning(
+                    "goal_navigation:" + str(user_goal["title"]).lower(),
+                    "Local planner repeatedly proposes navigation rather than "
+                    "material actions for user goal: " + str(user_goal["title"])
+                    + ". Available inventory: "
+                    + json.dumps(awareness_inventory, ensure_ascii=False)
+                    + ". Give a concise untested next crafting/placement "
+                    "hypothesis, with an example grid and verification step. "
+                    "Do not claim any physical action succeeded.",
+                    cooldown_seconds=1800,
+                )
+                log_event("practice_host", "goal_teacher_escalation", request=lesson)
             return {"ok": False, "status": "planner_stuck_backoff", "plan": plan, "error": cause}
         log_event("practice_host", "goal_drift_replanned", plan=revision)
         plan = revision

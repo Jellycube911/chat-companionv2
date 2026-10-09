@@ -242,6 +242,21 @@ class PracticeRegressions(unittest.TestCase):
             {"action": "mine", "intent": "test random stone"}, goal
         ))
 
+    def test_come_correction_routes_to_one_time_approach(self):
+        async def check():
+            with patch.object(agent.store, "cancel_tasks"), patch.object(
+                agent, "_get", return_value={
+                    "owner": {"x": 1, "y": 64, "z": 2, "distance": 4.0}
+                }
+            ), patch.object(agent, "_post", return_value={"ok": True}
+            ) as post, patch.object(agent.store, "record_event"):
+                reply = await agent.fast_chat_reflex("i didnt say follow i said come", {})
+                self.assertEqual(reply["reply"], "coming")
+                post.assert_called_once_with(
+                    "/move-to", {"x": 1, "y": 64, "z": 2, "stop_distance": 2.0}
+                )
+        asyncio.run(check())
+
     def test_target_key_ignores_hypothesis_wording(self):
         a = {"action": "mine", "x": 205, "y": 71, "z": -120, "hypothesis": "A"}
         b = dict(a, hypothesis="B", tool="minecraft:string")
