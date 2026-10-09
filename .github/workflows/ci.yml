@@ -22,10 +22,10 @@ jobs:
         run: python -m pip install -r local-agent/requirements.txt
       - name: Check local Python agent
         run: |
-          python -m py_compile local-agent/minecraft_agent.py local-agent/mcp_server.py local-agent/memory_store.py local-agent/skill_executor.py
+          python -m py_compile local-agent/minecraft_agent.py local-agent/mcp_server.py local-agent/memory_store.py local-agent/skill_executor.py local-agent/action_log.py
           cd local-agent
           python - <<'PY'
-          import agents, mcp, requests, memory_store, mcp_server, skill_executor
+          import agents, mcp, requests, memory_store, mcp_server, skill_executor, action_log
           store = memory_store.store
           assert store.list_goals('active', 5)
           r = store.request_learning('ci:test', 'verify local learning queue', 60)
@@ -54,6 +54,28 @@ jobs:
           graph = store.skill_graph(a['id'])
           assert graph and graph['children']
           assert store.stats()['learned_skills'] >= 2
+          PY
+          python - <<'PY'
+          import json
+          import os
+          import tempfile
+          from pathlib import Path
+          import action_log
+
+          with tempfile.TemporaryDirectory() as tmp:
+              path = Path(tmp) / "recent.jsonl"
+              os.environ["COMPANION_ACTION_LOG"] = str(path)
+              action_log.start_session(build="ci", model="local:test")
+              action_log.log_event(
+                  "ci",
+                  "redaction_test",
+                  api_key="should-not-leak",
+                  payload={"token": "also-secret", "value": 3},
+              )
+              rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+              assert rows[-1]["api_key"] == "<redacted>"
+              assert rows[-1]["payload"]["token"] == "<redacted>"
+              assert rows[-1]["payload"]["value"] == 3
           PY
           COMPANION_MODEL_PROVIDER=openai COMPANION_OPENAI_MODEL=gpt-5.6-luna python -c "import minecraft_agent; _, label = minecraft_agent.choose_model(); assert label == 'openai:gpt-5.6-luna', label; assert 'sol' not in label.lower(), label; print('brain model fallback:', label)"
           python - <<'PY'
@@ -102,5 +124,6 @@ jobs:
             local-agent/mcp_server.py
             local-agent/memory_store.py
             local-agent/skill_executor.py
+            local-agent/action_log.py
             local-agent/requirements.txt
             local-agent/README.md
