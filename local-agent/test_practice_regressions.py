@@ -332,6 +332,27 @@ class PracticeRegressions(unittest.TestCase):
             "result": {"ok": True, "item": "minecraft:wooden_axe"},
         }))
 
+    def test_crafting_teacher_only_after_three_observed_failures(self):
+        runtime = {}
+        plan = {"action": "craft", "width": 1, "height": 1,
+                "grid": ["minecraft:stick", "minecraft:wooden_pickaxe"]}
+        goal = {"id": 9, "title": "Obtain an axe"}
+        failed = {"ok": False, "result": {
+            "ok": False, "error": "craft_grid_size_mismatch: grid requires 1 entry"
+        }}
+        with patch.object(agent, "_cloud_teacher_enabled", return_value=True), patch.object(
+            agent.store, "request_learning", return_value={"ok": True}
+        ) as teacher, patch.object(agent, "log_event"):
+            agent._handle_craft_learning(runtime, plan, failed, goal, [])
+            agent._handle_craft_learning(runtime, plan, failed, goal, [])
+            teacher.assert_not_called()
+            agent._handle_craft_learning(runtime, plan, failed, goal, [])
+            teacher.assert_called_once()
+            self.assertEqual(runtime["failed_craft_attempts"], 0)
+            self.assertEqual(teacher.call_args.kwargs["cooldown_seconds"], 1800)
+            agent._handle_craft_learning(runtime, plan, {"ok": True}, goal, [])
+            self.assertEqual(runtime["failed_craft_attempts"], 0)
+
     def test_target_key_ignores_hypothesis_wording(self):
         a = {"action": "mine", "x": 205, "y": 71, "z": -120, "hypothesis": "A"}
         b = dict(a, hypothesis="B", tool="minecraft:string")
