@@ -1136,6 +1136,30 @@ class MemoryStore:
             for row in rows
         ]
 
+    def recent_trials(self, limit=8):
+        limit = max(1, min(20, int(limit)))
+        with self._connect() as db:
+            rows = db.execute(
+                """
+                SELECT skill_id, intent, hypothesis, actions, outcome, success, created_at
+                FROM skill_trials
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [
+            {
+                "skill_id": row["skill_id"],
+                "intent": row["intent"],
+                "hypothesis": row["hypothesis"],
+                "actions": row["actions"],
+                "outcome": row["outcome"],
+                "success": bool(row["success"]),
+            }
+            for row in reversed(rows)
+        ]
+
     def link_learned_skills(
         self,
         parent_skill_id,
