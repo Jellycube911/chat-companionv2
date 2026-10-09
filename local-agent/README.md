@@ -4,15 +4,16 @@ This folder contains the local MCP brain used by the Minecraft companion.
 
 ## Brain model selection
 
-The agent is **local-first**.
+The agent is **local-only by default**.
 
 By default:
 
 1. It checks for an OpenAI-compatible local endpoint at:
    `http://127.0.0.1:11434/v1`
 2. If one is available, it uses a local model from that endpoint.
-3. If no local endpoint is available, it falls back to `gpt-5.6-luna`.
-4. The agent refuses model names containing `sol` and falls back to Luna.
+3. If no local endpoint is available, the brain refuses to start rather than silently using API tokens.
+4. Cloud use is opt-in with `COMPANION_MODEL_PROVIDER=openai`.
+5. The agent refuses model names containing `sol` and uses Luna instead.
 
 ### Force local inference
 
@@ -27,7 +28,9 @@ $env:COMPANION_LOCAL_MODEL = "YOUR_TOOL_CAPABLE_LOCAL_MODEL"
 
 The local model should support OpenAI-style chat completions and function/tool calls.
 
-### Automatic local-or-Luna mode
+### Optional automatic local-or-Luna mode
+
+This explicitly allows a cloud fallback:
 
 ```powershell
 $env:COMPANION_MODEL_PROVIDER = "auto"
