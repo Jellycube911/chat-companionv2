@@ -30,6 +30,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.monster.Enemy;
@@ -365,6 +366,8 @@ public final class CompanionService implements AutoCloseable {
             return;
         }
 
+        ItemStack visibleTool = companion.companionInventory().getItem(0).copy();
+        companion.setItemSlot(EquipmentSlot.MAINHAND, visibleTool);
         FakePlayer fake = fake(companion, world, 0);
         float delta = job.initial().getDestroyProgress(fake, world, job.block());
         if (delta <= 0 || !Float.isFinite(delta)) {
@@ -391,6 +394,7 @@ public final class CompanionService implements AutoCloseable {
 
             boolean success = fake.gameMode.destroyBlock(job.block());
             companion.companionInventory().setItem(0, fake.getMainHandItem().copy());
+            companion.setItemSlot(EquipmentSlot.MAINHAND, fake.getMainHandItem().copy());
             clearBreakProgress(companion, job, world);
 
             if (success && !world.getBlockState(job.block()).equals(job.initial())) {
