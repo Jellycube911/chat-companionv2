@@ -126,3 +126,51 @@ and local skills continue to work; only teacher requests fail.
 
 Teacher calls use a 30-minute cooldown per topic by default. They return a
 compact reusable lesson rather than controlling the Minecraft body directly.
+
+
+## Self-learning skill system
+
+High-level Minecraft goals are no longer automatically mapped to the legacy
+`gather_logs`, `make_stone_pickaxe`, or `build_basic_house` Python routines.
+Those routines remain fallback scaffolding only.
+
+The normal path is now:
+
+```text
+goal
+ -> search learned skill memory
+ -> form a local hypothesis
+ -> execute a short experiment with primitive MCP actions
+ -> observe the resulting world/inventory state
+ -> record the trial and verified after-state
+ -> vary the hypothesis after failure
+ -> promote repeated successes into a learned skill
+ -> compose learned skills through parent/subskill links
+ -> reuse and update confidence on future trials
+```
+
+Persistent SQLite tables now include:
+
+- `learned_skills`
+- `skill_trials`
+- `skill_edges`
+
+A learned skill stores a natural-language procedure over safe MCP primitives,
+not executable code. Confidence is based on observed successes and failures.
+
+The MCP `skill_memory` tool supports:
+
+- `search`
+- `save`
+- `trial`
+- `history`
+- `list`
+- `link`
+- `graph`
+
+Two successful experiments can promote a new low-confidence procedure. Several
+distinct failed hypotheses can queue the cloud teacher. Teacher output is a hint
+to test, not trusted knowledge by itself.
+
+User chat preempts background PRACTICE reasoning. Physical Minecraft jobs are
+allowed to finish their current action before another practice turn starts.
