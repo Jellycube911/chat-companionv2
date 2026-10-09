@@ -845,8 +845,11 @@ def _feedback_reply(text):
     ):
         return "oh nice, got it", True
 
-    if normalized.startswith(("yes ", "yeah ", "yep ")) and any(
-        word in normalized for word in ("there", "near", "tree", "logs")
+    affirmative = normalized.startswith(
+        ("yes", "yeah", "yep", "yea", "correct", "right")
+    )
+    if affirmative and any(
+        word in normalized for word in ("there", "near", "tree", "trees", "log", "logs")
     ):
         return "got it", True
 
