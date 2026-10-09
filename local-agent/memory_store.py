@@ -236,6 +236,16 @@ class MemoryStore:
                   )
                 """
             )
+            db.execute(
+                """
+                UPDATE OR IGNORE memories
+                SET kind='lesson',
+                    content='UNTESTED TEACHER HYPOTHESIS. Verify in Minecraft before promoting to a learned skill.\n' || content,
+                    updated_at=?
+                WHERE kind='skill' AND memory_key LIKE 'teacher.%'
+                """,
+                (now,),
+            )
             migration = db.execute(
                 """
                 SELECT 1 FROM memories
