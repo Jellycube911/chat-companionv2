@@ -114,6 +114,41 @@ public final class CompanionGameTests {
         });
     }
 
+    @GameTest(template = "empty", timeoutTicks = 160)
+    public static void miningHasObservableProgressBeforeCompletion(GameTestHelper helper) {
+        floor(helper);
+        ServerPlayer owner = helper.makeMockServerPlayerInLevel();
+        Vec3 pos = Vec3.atBottomCenterOf(helper.absolutePos(new BlockPos(2, 2, 2)));
+        owner.setPos(pos.x, pos.y, pos.z);
+        CompanionEntity companion = ChatCompanion.service.spawn(owner);
+        companion.companionInventory().setItem(0, new ItemStack(Items.WOODEN_PICKAXE));
+        BlockPos target = companion.blockPosition().offset(2, 0, 0);
+        helper.getLevel().setBlockAndUpdate(target, Blocks.STONE.defaultBlockState());
+        JsonObject args = new JsonObject();
+        args.addProperty("dimension", owner.level().dimension().location().toString());
+        args.addProperty("x", target.getX());
+        args.addProperty("y", target.getY());
+        args.addProperty("z", target.getZ());
+        helper.assertTrue(ChatCompanion.service.localAction(owner, "mine_block", args).success(),
+                "Progressive mining must be admitted");
+        helper.runAfterDelay(8, () -> {
+            helper.assertTrue(companion.jobProgress() > 0.0F && companion.jobProgress() < 1.0F,
+                    "Mining must expose partial progress before the block breaks");
+            helper.assertTrue(helper.getLevel().getBlockState(target).is(Blocks.STONE),
+                    "Partial progress must not immediately remove the block");
+            helper.runAfterDelay(85, () -> {
+                helper.assertTrue(companion.jobState() == CompanionEntity.JobState.COMPLETED,
+                        "Progressive mining must eventually finish");
+                helper.assertTrue(!helper.getLevel().getBlockState(target).is(Blocks.STONE),
+                        "Completed mining must change the physical world");
+                helper.assertTrue(companion.reason().contains("break_ticks="),
+                        "Successful mining must report observed break timing");
+                owner.connection.disconnect(net.minecraft.network.chat.Component.literal("test complete"));
+                helper.succeed();
+            });
+        });
+    }
+
     @GameTest(template = "empty", timeoutTicks = 150)
     public static void miningReportsObstructionWithoutStalling(GameTestHelper helper) {
         floor(helper);
@@ -125,6 +160,7 @@ public final class CompanionGameTests {
         BlockPos blocker = companion.blockPosition().offset(1, 0, 0);
         helper.getLevel().setBlockAndUpdate(target, Blocks.STONE.defaultBlockState());
         helper.getLevel().setBlockAndUpdate(blocker, Blocks.STONE.defaultBlockState());
+        helper.getLevel().setBlockAndUpdate(blocker.above(), Blocks.STONE.defaultBlockState());
         JsonObject args = new JsonObject();
         args.addProperty("dimension", owner.level().dimension().location().toString());
         args.addProperty("x", target.getX());
