@@ -84,3 +84,45 @@ The host continuously maintains a compact current world model from:
 - active goals/tasks
 
 This awareness is injected into brain turns without storing every sensor tick in the prompt.
+
+
+## Hybrid local brain + OpenAI teacher
+
+Normal conversation, planning, awareness, goals and Minecraft behavior use the
+local model by default.
+
+OpenAI is reserved for rare learning/escalation events. The local brain can
+queue a learning request with the MCP `learn` tool, but it cannot directly
+spend cloud tokens. The host processes the queue under a per-topic cooldown.
+
+Automatic escalation currently occurs after repeated failures of the same local
+skill. A successful teacher answer is saved into the local SQLite database as a
+high-importance skill memory and is available to future local reasoning.
+
+Default teacher model:
+
+```text
+gpt-6-luna
+```
+
+Sol models are refused for both the normal brain and the teacher.
+
+Environment controls:
+
+```powershell
+# Normal brain remains local.
+$env:COMPANION_MODEL_PROVIDER = "local"
+
+# Enable or disable the cloud teacher.
+$env:COMPANION_CLOUD_TEACHER = "on"   # default
+# $env:COMPANION_CLOUD_TEACHER = "off"
+
+# Optional teacher model override. Sol names are rejected.
+$env:COMPANION_TEACHER_MODEL = "gpt-6-luna"
+```
+
+The teacher requires `OPENAI_API_KEY`. If the key is absent, the local brain
+and local skills continue to work; only teacher requests fail.
+
+Teacher calls use a 30-minute cooldown per topic by default. They return a
+compact reusable lesson rather than controlling the Minecraft body directly.
