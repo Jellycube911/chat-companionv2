@@ -71,10 +71,11 @@ Allowed actions:
 - move_forward: only for a deliberate short test; prefer move_to for a known
   standable destination
 - look_at: x,y,z
-- mine: x,y,z, optional tool item id. IMPORTANT: mine already makes the body
-  approach, face, reach, hold the mining action through real break progress,
-  and physically break the target. Once a target block coordinate is known,
-  prefer mine directly instead of move_to(target_block).
+- mine: x,y,z, optional tool item id, and expected_block or expected_contains.
+  IMPORTANT: mine already makes the body approach, face, reach, hold the mining
+  action through real break progress, and physically break the target. Once a
+  target block coordinate is known, prefer mine directly instead of
+  move_to(target_block). The host verifies the block identity before mining.
 - collect
 - place: item or slot, optional x,y,z, optional face
 - equip: item or slot
@@ -88,7 +89,7 @@ Required fields for every non-idle action:
 
 Examples of syntax only:
 {"intent":"locate logs","hypothesis":"nearby loaded logs can be found by scanning","action":"scan_blocks","contains":["_log"],"radius":20,"limit":12}
-{"intent":"harvest known log","hypothesis":"the mining primitive can approach and break the known block","action":"mine","x":100,"y":64,"z":100}
+{"intent":"harvest known log","hypothesis":"the mining primitive can approach and break the known block","action":"mine","x":100,"y":64,"z":100,"expected_contains":"_log"}
 {"intent":"reach a standable spot","hypothesis":"moving to nearby open ground will improve access","action":"move_to","x":98,"y":64,"z":100}
 
 If recent evidence says move_to is repath_pending with no position change, do
@@ -795,7 +796,12 @@ async def _report_planned_outcome(runtime, execution, source):
     streaks = runtime.setdefault("failure_streaks", {})
     streak_key = f"{plan.get('intent', '')}:{plan.get('action', '')}"
 
-    if execution.get("status") in {"physical_job_in_progress", "pending"}:
+    if execution.get("status") in {
+        "physical_job_in_progress",
+        "pending",
+        "post_goal_pause",
+        "goal_completed",
+    }:
         return
 
     if execution.get("ok"):
@@ -856,6 +862,20 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
             "ok": True,
             "status": "goal_completed",
             "completed": completed,
+        }
+
+    if (
+        source == "practice"
+        and time.monotonic() < float(runtime.get("post_goal_pause_until", 0.0) or 0.0)
+        and not any(
+            goal.get("source") == "user"
+            for goal in store.list_goals("active", 20)
+        )
+    ):
+        log_event("practice_host", "post_goal_pause")
+        return {
+            "ok": True,
+            "status": "post_goal_pause",
         }
 
     if state.get("jobActive"):
@@ -1928,6 +1948,10 @@ async def poll_minecraft_chat(input_queue, runtime, chat_agent):
                 if text:
                     runtime["last_user_activity"] = time.monotonic()
                     log_event("chat", "user_message", message=text)
+                    try:
+                        await update_awareness(runtime)
+                    except Exception:
+                        pass
                     _preempt_background_reasoning(runtime)
 
                     failure_answer = _instant_failure_explanation(text)
