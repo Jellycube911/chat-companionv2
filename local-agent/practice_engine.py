@@ -120,6 +120,49 @@ def _inventory_total(inventory):
     return sum(int(item.get("count", 0)) for item in inventory)
 
 
+def _generalized_procedure(plan):
+    action = plan.get("action")
+    procedure = {
+        "action": action,
+        "intent": plan.get("intent"),
+    }
+    if action == "scan_blocks":
+        procedure.update(
+            {
+                "contains": plan.get("contains") or [],
+                "exact": plan.get("exact") or [],
+                "radius": plan.get("radius", 16),
+                "exposed_only": bool(plan.get("exposed_only", False)),
+            }
+        )
+    elif action == "move_to":
+        procedure["target"] = "known standable destination coordinate"
+        procedure["verify"] = "distance to destination decreases or arrival completes"
+    elif action == "mine":
+        procedure["target"] = "known target block coordinate"
+        procedure["verify"] = "mining job completes and resulting world/inventory evidence changes"
+    elif action == "look_at":
+        procedure["target"] = "known world coordinate"
+    elif action == "collect":
+        procedure["verify"] = "inventory increases or collection job completes"
+    elif action == "place":
+        if plan.get("item"):
+            procedure["item"] = plan.get("item")
+        procedure["target"] = "valid nearby placement or explicit coordinate"
+    elif action == "equip":
+        if plan.get("item"):
+            procedure["item"] = plan.get("item")
+    elif action == "craft":
+        procedure.update(
+            {
+                "width": plan.get("width"),
+                "height": plan.get("height"),
+                "grid": plan.get("grid"),
+            }
+        )
+    return json.dumps(procedure, ensure_ascii=False, separators=(",", ":"))
+
+
 def _item_count(inventory, item_id):
     wanted = str(item_id or "").strip().lower()
     return sum(
@@ -269,6 +312,18 @@ def _execute_action(plan, before):
     if action == "move_to":
         if x is None or y is None or z is None:
             return {"ok": False, "error": "move_to requires x, y, z"}
+        target = [float(x), float(y), float(z)]
+        current_distance = _distance(before["state"]["pos"], target)
+        if current_distance <= 4.25:
+            return {
+                "ok": False,
+                "error": (
+                    "move_to target is already within interaction range. "
+                    "If this coordinate is a block to mine/use, call that physical "
+                    "action directly instead of trying to stand inside the block."
+                ),
+                "distance": round(current_distance, 2),
+            }
         started = _post("/move-to", {"x": float(x), "y": float(y), "z": float(z)})
         return started if _failed(started) else _wait_for_job(12)
 
@@ -295,7 +350,7 @@ def _execute_action(plan, before):
             "/mine-block",
             {"x": int(round(float(x))), "y": int(round(float(y))), "z": int(round(float(z)))},
         )
-        return started if _failed(started) else _wait_for_job(15)
+        return started if _failed(started) else _wait_for_job(22)
 
     if action == "place":
         inventory = before["inventory"]
@@ -404,10 +459,11 @@ def _objective_success(plan, before, after, result):
     return False
 
 
-def _record_learning(plan, result, before, after, success):
+def _record_learning(plan, result, before, after, success, promotable=True):
     intent = plan["intent"]
     hypothesis = plan["hypothesis"]
     actions = json.dumps(plan, ensure_ascii=False, separators=(",", ":"))
+    reusable_procedure = _generalized_procedure(plan)
     outcome = json.dumps(
         {"result": result, "before": before, "after": after},
         ensure_ascii=False,
@@ -429,11 +485,11 @@ def _record_learning(plan, result, before, after, success):
     failures = [item for item in history if not item["success"]]
 
     promoted = None
-    if success and trial.get("skill") is None and len(successes) >= 2:
+    if success and promotable and trial.get("skill") is None and len(successes) >= 2:
         promoted = store.save_learned_skill(
             str(plan.get("name") or intent)[:120],
             intent,
-            actions,
+            reusable_procedure,
             source="self",
         )
 
@@ -496,7 +552,19 @@ def execute_plan(plan):
         success = _objective_success(plan, before, after, result)
         learning = None
         if plan["action"] != "idle":
-            learning = _record_learning(plan, result, before, after, success)
+            terminal = result.get("state") if isinstance(result, dict) else None
+            promotable = not (
+                plan["action"] in {"move_to", "mine"}
+                and terminal == "RUNNING"
+            )
+            learning = _record_learning(
+                plan,
+                result,
+                before,
+                after,
+                success,
+                promotable=promotable,
+            )
 
         summary = {
             "ok": success,
