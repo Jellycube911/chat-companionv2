@@ -647,6 +647,15 @@ def build_practice_plan_input(runtime, directive=None):
                 f"outcome={_trim(trial['outcome'], 280)}"
             )
 
+    blocked = [
+        (key, value) for key, value in runtime.get("invalid_targets", {}).items()
+        if time.monotonic() - value[0] < 180.0
+    ]
+    if blocked:
+        parts.append("RECENTLY INVALID TARGETS: do not retry these without a new observation:")
+        for key, (_, reason) in blocked[-8:]:
+            parts.append(f"- {key}: {reason}")
+
     if events:
         parts.append("RECENT EVENTS/OBSERVATIONS:")
         for event in events:
@@ -661,7 +670,9 @@ def build_practice_plan_input(runtime, directive=None):
         "approaches/faces/reaches the target block. Never move_to the coordinate "
         "of a solid block you intend to mine. move_to is only for a standable "
         "destination. Respect Alik's corrections and teacher hints above. Do not "
-        "repeat a failed target unchanged. Output JSON only."
+        "repeat a failed target unchanged. A user-assigned crafting goal takes "
+        "priority over self-practice; inspect inventory and try crafting before "
+        "gathering unrelated resources. Output JSON only."
     )
     return "\n".join(parts)
 
@@ -705,6 +716,16 @@ def _reconcile_user_goals(execution):
             if has_pickaxe:
                 store.update_goal(goal["id"], status="completed")
                 messages.append("got the stone pickaxe, task done")
+                continue
+
+        if normalized in {"obtain an axe", "get an axe"}:
+            has_axe = _inventory_count(
+                inventory,
+                lambda item: item.startswith("minecraft:") and item.endswith("_axe"),
+            ) > 0
+            if has_axe:
+                store.update_goal(goal["id"], status="completed")
+                messages.append("crafted an axe, task done")
                 continue
 
         if normalized in {"obtain a crafting table", "get a crafting table"}:
@@ -801,6 +822,7 @@ async def _report_planned_outcome(runtime, execution, source):
         "pending",
         "post_goal_pause",
         "goal_completed",
+        "skipped_repeat",
     }:
         return
 
@@ -826,6 +848,17 @@ async def _report_planned_outcome(runtime, execution, source):
             _format_ingame_reply(f"having trouble with {intent}: {reason}"),
             cooldown=45.0,
         )
+
+
+def _plan_target_key(plan):
+    action = str(plan.get("action") or "")
+    if action not in {"mine", "move_to", "place"}:
+        return None
+    try:
+        xyz = ",".join(str(int(math.floor(float(plan[axis])))) for axis in ("x", "y", "z"))
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    return f"{action}@{xyz}"
 
 
 async def run_planned_action(planner_agent, runtime, directive=None, source="practice"):
@@ -963,11 +996,32 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         )
         return None
 
+    target_key = _plan_target_key(plan)
+    invalid = runtime.setdefault("invalid_targets", {})
+    if (
+        source == "practice"
+        and target_key in invalid
+        and time.monotonic() - invalid[target_key][0] < 180.0
+    ):
+        log_event("practice_host", "repeat_invalid_target_skipped", target=target_key)
+        store.record_event(
+            "practice_error",
+            f"Skipping known invalid {target_key}; re-observe or vary the target.",
+        )
+        return {"ok": False, "status": "skipped_repeat", "plan": plan}
+
     runtime["physical_action_active"] = True
     try:
         execution = await asyncio.to_thread(execute_plan, plan)
     finally:
         runtime["physical_action_active"] = False
+    reason = str((execution.get("result") or {}).get("error") or "")
+    if target_key and reason in {
+        "target_block_mismatch", "target_block_is_air", "destination_occupied"
+    }:
+        invalid[target_key] = (time.monotonic(), reason)
+    elif target_key and execution.get("ok"):
+        invalid.pop(target_key, None)
     await update_awareness(runtime)
     log_event(
         "practice_host",
@@ -1304,6 +1358,8 @@ def _normalize_request_text(text):
         "c'mon ",
         "mate ",
         "hey ",
+        "sorry ",
+        "actually ",
     )
     changed = True
     while changed:
@@ -1357,8 +1413,19 @@ def _looks_like_direct_request(text):
 
 async def fast_task_intent(text):
     normalized = _normalize_request_text(text)
+    if normalized in {"make it", "craft it", "get it"}:
+        return next(
+            (goal for goal in store.list_goals("active", 20) if goal["source"] == "user"),
+            None,
+        )
     if not _looks_like_direct_request(text):
         return None
+
+    if (
+        re.search(r"\b(?:make|craft|get|obtain)\s+(?:an?\s+)?(?:wooden|stone|iron|golden|diamond|netherite)?\s*axe\b", normalized)
+        and "pickaxe" not in normalized
+    ):
+        return _ensure_user_goal("Obtain an axe", text, 9)
 
     if (
         "build" in normalized

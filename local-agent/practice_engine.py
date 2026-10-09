@@ -135,6 +135,47 @@ def _inventory_total(inventory):
     return sum(int(item.get("count", 0)) for item in inventory)
 
 
+def _choose_mining_tool(block_type, inventory, requested=""):
+    """Explore real tools, then reuse the fastest observed tool for this block.
+
+    Tool classes are only an inventory filter, never a block-to-tool recipe.
+    """
+    candidates = [
+        item for item in inventory
+        if re.search(
+            r"(?:_axe|_pickaxe|_shovel|_hoe|_sword|:shears)$",
+            str(item.get("item", "")).lower(),
+        )
+    ]
+    if not candidates:
+        return requested or None
+
+    options = {str(item["item"]).lower(): item for item in candidates}
+    requested = str(requested or "").lower()
+    if requested in options:
+        return requested
+
+    history = {
+        row["option"]: row
+        for row in store.list_efficiency(50, context=f"mine:{block_type}")
+    }
+    # Sample each available tool before exploiting rewards. A newly crafted
+    # tool gets a chance, and all outcomes remain tied to the observed block.
+    unexplored = [
+        item for item in candidates
+        if int(history.get(str(item["item"]).lower(), {}).get("attempts", 0)) == 0
+    ]
+    if unexplored:
+        return str(unexplored[0]["item"]).lower()
+    return max(
+        options,
+        key=lambda option: (
+            float(history.get(option, {}).get("avg_reward", 0.0)),
+            int(history.get(option, {}).get("successes", 0)),
+        ),
+    )
+
+
 def _generalized_procedure(plan):
     action = plan.get("action")
     procedure = {
@@ -351,16 +392,25 @@ def _execute_action(plan, before):
             return {"ok": False, "error": "move_to requires x, y, z"}
         target = [float(x), float(y), float(z)]
         current_distance = _distance(before["state"]["pos"], target)
+        if current_distance <= 0.8:
+            return {"ok": True, "state": "COMPLETED", "reason": "already_at_destination"}
         if current_distance <= 4.25:
-            return {
-                "ok": False,
-                "error": (
-                    "move_to target is already within interaction range. "
-                    "If this coordinate is a block to mine/use, call that physical "
-                    "action directly instead of trying to stand inside the block."
-                ),
-                "distance": round(current_distance, 2),
-            }
+            # Proximity alone is not an error. Check whether the coordinate
+            # is occupied instead of blocking legitimate short movements.
+            observed = _post("/block-at", {
+                "x": int(math.floor(float(x))),
+                "y": int(math.floor(float(y))),
+                "z": int(math.floor(float(z))),
+            })
+            if _failed(observed):
+                return observed
+            if not observed.get("air", False):
+                return {
+                    "ok": False,
+                    "error": "destination_occupied",
+                    "block": observed.get("type"),
+                    "target": target,
+                }
         started = _post("/move-to", {"x": float(x), "y": float(y), "z": float(z)})
         return started if _failed(started) else _wait_for_job(12)
 
@@ -420,7 +470,9 @@ def _execute_action(plan, before):
                 "target": target,
             }
 
-        requested_tool = str(plan.get("tool") or "").strip()
+        requested_tool = _choose_mining_tool(
+            observed_type, before["inventory"], plan.get("tool")
+        )
         if requested_tool:
             slot = _slot_for_item(requested_tool, before["inventory"])
             if slot is None:
@@ -630,7 +682,37 @@ def _record_learning(plan, result, before, after, success, promotable=True):
     failures = [item for item in history if not item["success"]]
 
     promoted = None
-    if success and promotable and trial.get("skill") is None and len(successes) >= 2:
+    # Two arbitrary successful steps are not proof of a reusable procedure.
+    # Require repeatable success on the same mined block + actual tool, and
+    # reject histories dominated by errors (such as stale target coordinates).
+    def evidence_key(item):
+        try:
+            action_data = json.loads(item.get("actions") or "{}")
+            if action_data.get("action") == "mine":
+                outcome_data = json.loads(item.get("outcome") or "{}")
+                metrics = _parse_mining_metrics(outcome_data.get("result"))
+                if not metrics:
+                    return None
+                return ("mine", metrics["block"], metrics["tool"])
+            return ("other", _generalized_procedure(action_data))
+        except (TypeError, ValueError, AttributeError):
+            return None
+
+    current = {
+        "actions": actions,
+        "outcome": outcome,
+    }
+    matching = sum(
+        1 for item in successes
+        if evidence_key(item) == evidence_key(current)
+    )
+    reliable = (
+        len(history) >= 3
+        and len(successes) / len(history) >= 0.75
+        and matching >= 3
+        and evidence_key(current) is not None
+    )
+    if success and promotable and trial.get("skill") is None and reliable:
         promoted = store.save_learned_skill(
             str(plan.get("name") or intent)[:120],
             intent,
