@@ -761,7 +761,14 @@ async def _notify_once(runtime, key, message, cooldown=30.0):
     last = float(notices.get(key, 0.0) or 0.0)
     if now - last < cooldown:
         return False
+    # Routine background failures should not flood the user's chat. Explicit
+    # user-command failures and completed goals always get priority.
+    urgent = key.startswith(("goal_complete:", "command_fail:"))
+    if not urgent and now - float(notices.get("_last_routine", 0.0)) < 90.0:
+        return False
     notices[key] = now
+    if not urgent:
+        notices["_last_routine"] = now
     await _send_ingame(message, reason="proactive_status")
     log_event(
         "chat",
@@ -804,7 +811,7 @@ async def _report_planned_outcome(runtime, execution, source):
             cooldown=120.0,
         )
 
-    if teacher and (teacher.get("ok") or teacher.get("deferred")):
+    if teacher and teacher.get("ok") and not teacher.get("reused"):
         intent = str((execution.get("plan") or {}).get("intent") or "this")
         await _notify_once(
             runtime,
@@ -832,6 +839,12 @@ async def _report_planned_outcome(runtime, execution, source):
 
     streaks[streak_key] = int(streaks.get(streak_key, 0)) + 1
     reason = _execution_failure_reason(execution)
+    short_reasons = {
+        "target_block_mismatch": "wrong block, rechecking",
+        "target_block_is_air": "block is already gone",
+        "destination_occupied": "that spot is blocked",
+    }
+    reason = short_reasons.get(reason, reason.split(".")[0][:60])
 
     if source == "command":
         await _notify_once(
@@ -845,8 +858,8 @@ async def _report_planned_outcome(runtime, execution, source):
         await _notify_once(
             runtime,
             f"blocked:{streak_key}:{reason}",
-            _format_ingame_reply(f"having trouble with {intent}: {reason}"),
-            cooldown=45.0,
+            _format_ingame_reply(f"stuck on {intent}: {reason}"),
+            cooldown=90.0,
         )
 
 

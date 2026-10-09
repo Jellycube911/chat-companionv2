@@ -83,6 +83,34 @@ class PracticeRegressions(unittest.TestCase):
                 ensure.assert_called_once()
         asyncio.run(check())
 
+    def test_background_status_rate_limit_and_goal_priority(self):
+        from unittest.mock import AsyncMock
+        async def check():
+            with patch.object(agent, "_send_ingame", new_callable=AsyncMock) as send, patch.object(
+                agent.time, "monotonic", return_value=1000.0
+            ), patch.object(agent, "log_event"):
+                runtime = {}
+                self.assertTrue(await agent._notify_once(runtime, "blocked:a", "blocked a"))
+                self.assertFalse(await agent._notify_once(runtime, "blocked:b", "blocked b"))
+                self.assertTrue(await agent._notify_once(runtime, "goal_complete:1", "task done"))
+                self.assertEqual(send.await_count, 2)
+        asyncio.run(check())
+
+    def test_deferred_teacher_does_not_claim_new_consultation(self):
+        from unittest.mock import AsyncMock
+        async def check():
+            execution = {
+                "ok": True,
+                "plan": {"intent": "mining", "action": "mine"},
+                "learning": {"teacher_request": {"deferred": True, "ok": False}},
+            }
+            with patch.object(agent, "_reconcile_user_goals", return_value=[]), patch.object(
+                agent, "_notify_once", new_callable=AsyncMock
+            ) as notify:
+                await agent._report_planned_outcome({}, execution, "practice")
+                notify.assert_not_awaited()
+        asyncio.run(check())
+
     def test_target_key_ignores_hypothesis_wording(self):
         a = {"action": "mine", "x": 205, "y": 71, "z": -120, "hypothesis": "A"}
         b = dict(a, hypothesis="B", tool="minecraft:string")
