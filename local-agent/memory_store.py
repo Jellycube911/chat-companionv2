@@ -164,6 +164,18 @@ class MemoryStore:
                 """,
                 (now,),
             )
+            db.execute(
+                """
+                DELETE FROM memories
+                WHERE kind IN ('lesson','skill')
+                  AND (
+                    lower(content) LIKE '%player is not connected to a world%'
+                    OR lower(content) LIKE '%owner player is unavailable%'
+                    OR lower(content) LIKE '%companion server service is not ready%'
+                    OR lower(content) LIKE '%no loaded companion found%'
+                  )
+                """
+            )
             goal_count = db.execute("SELECT COUNT(*) FROM goals").fetchone()[0]
             if goal_count == 0:
                 db.execute(
