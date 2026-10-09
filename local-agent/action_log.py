@@ -92,12 +92,21 @@ def start_session(build=None, model=None):
 
 
 def log_event(component, event, **fields):
+    safe_fields = {}
+    for key, value in fields.items():
+        key_text = str(key)
+        lowered = key_text.lower()
+        if any(fragment in lowered for fragment in SENSITIVE_FRAGMENTS):
+            safe_fields[key_text] = "<redacted>"
+        else:
+            safe_fields[key_text] = _safe(value)
+
     record = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
         "unix": round(time.time(), 3),
         "component": str(component),
         "event": str(event),
-        **{str(key): _safe(value) for key, value in fields.items()},
+        **safe_fields,
     }
 
     line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
