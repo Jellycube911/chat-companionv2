@@ -1911,6 +1911,11 @@ def _looks_like_action_request(text):
 
 async def fast_chat_reflex(text, runtime=None):
     normalized = _normalize_request_text(text)
+    if (
+        ("didnt say follow" in normalized or "didn't say follow" in normalized)
+        and "said come" in normalized
+    ):
+        normalized = "come to me"
 
     goal = await fast_task_intent(text)
     if goal is not None:
