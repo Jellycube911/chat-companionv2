@@ -556,7 +556,12 @@ public final class CompanionService implements AutoCloseable {
     }
     private FakePlayer fake(CompanionEntity companion, ServerLevel world, int slot) {
         FakePlayer fake = FakePlayerFactory.get(world, new GameProfile(companion.getUUID(), "[ChatCompanion]"));
-        fake.setPos(companion.getX(), companion.getY(), companion.getZ()); fake.gameMode.changeGameModeForPlayer(GameType.SURVIVAL);
+        fake.setPos(companion.getX(), companion.getY(), companion.getZ());
+        // Breaking speed depends on the miner's physical state. A freshly
+        // created FakePlayer is otherwise treated as airborne and learns
+        // misleadingly slow break times for tools.
+        fake.setOnGround(companion.onGround());
+        fake.gameMode.changeGameModeForPlayer(GameType.SURVIVAL);
         fake.getInventory().selected = 0; fake.getInventory().setItem(0, companion.companionInventory().getItem(slot).copy());
         return fake;
     }

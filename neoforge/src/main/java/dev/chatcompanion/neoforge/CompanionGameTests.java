@@ -145,6 +145,10 @@ public final class CompanionGameTests {
                         "Completed mining must change the physical world");
                 helper.assertTrue(companion.reason().contains("break_ticks="),
                         "Successful mining must report observed break timing");
+                String reason = companion.reason();
+                int ticks = Integer.parseInt(reason.substring(reason.indexOf("break_ticks=") + 12));
+                helper.assertTrue(ticks > 8 && ticks < 80,
+                        "An on-ground wooden pickaxe must not mine at airborne speed; ticks=" + ticks);
                 owner.connection.disconnect(net.minecraft.network.chat.Component.literal("test complete"));
                 helper.succeed();
             });
