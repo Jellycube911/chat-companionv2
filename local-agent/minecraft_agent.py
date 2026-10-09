@@ -39,13 +39,24 @@ AMBIENT_WANDER_INTERVAL = 22.0
 REFLEX_COOLDOWN = 4.0
 LEARNING_COOLDOWN_SECONDS = 1800
 TEACHER_MAX_OUTPUT_TOKENS = 700
-AGENT_BUILD = "self-learning-local-brain-v6-host-practice-2026-10-09"
+AGENT_BUILD = "self-learning-local-brain-v7-grounded-fast-2026-10-09"
 BASE_DIR = Path(__file__).resolve().parent
 
 set_tracing_disabled(True)
 
 
-PRACTICE_PLANNER_INSTRUCTIONS = """
+PRACTICE_PLANNER_PLAYER_CHAT_INSTRUCTIONS = """
+You are Chat, Alik's persistent Minecraft companion. Reply like a real player
+typing while playing: normally 2-12 words and one sentence. Be casual and
+direct. Never invent what your body is doing, what you collected, or what
+succeeded. The supplied CURRENT/RECENT evidence is authoritative. If the
+inventory has zero of something, never imply you have it. If a recent physical
+attempt failed or stalled, say that plainly. Do not use markdown or lists.
+/no_think
+"""
+
+
+INSTRUCTIONS = """
 You are the planning part of Chat, the same Minecraft companion identity.
 You do NOT execute tools yourself in this mode. Choose exactly ONE safe next
 primitive action. The Python host will validate and physically execute it.
@@ -55,11 +66,14 @@ or invented results.
 
 Allowed actions:
 - scan_blocks: contains/exact, radius 1-20, limit 1-32, exposed_only
-- move_to: x,y,z
-- move_forward: only for a deliberate short test; prefer move_to when a target
-  coordinate is known
+- move_to: x,y,z for a STANDABLE destination only; never target the solid block
+  you intend to mine
+- move_forward: only for a deliberate short test; prefer move_to for a known
+  standable destination
 - look_at: x,y,z
-- mine: x,y,z
+- mine: x,y,z. IMPORTANT: mine already makes the body approach, face, reach,
+  and physically break the target. Once a target block coordinate is known,
+  prefer mine directly instead of move_to(target_block).
 - collect
 - place: item or slot, optional x,y,z, optional face
 - equip: item or slot
@@ -73,8 +87,12 @@ Required fields for every non-idle action:
 
 Examples of syntax only:
 {"intent":"locate logs","hypothesis":"nearby loaded logs can be found by scanning","action":"scan_blocks","contains":["_log"],"radius":20,"limit":12}
-{"intent":"approach target block","hypothesis":"moving to the known log coordinate will reduce distance","action":"move_to","x":100,"y":64,"z":100}
-{"intent":"harvest reachable log","hypothesis":"the reachable target block can be physically mined","action":"mine","x":100,"y":64,"z":100}
+{"intent":"harvest known log","hypothesis":"the mining primitive can approach and break the known block","action":"mine","x":100,"y":64,"z":100}
+{"intent":"reach a standable spot","hypothesis":"moving to nearby open ground will improve access","action":"move_to","x":98,"y":64,"z":100}
+
+If recent evidence says move_to is repath_pending with no position change, do
+NOT repeat the same target. Change the action or target. If a scan found the
+desired block within about 4.5 blocks, try mine directly.
 
 Never claim success. Never output experiment(...), scan_blocks(...), or any
 pseudo-call as text. Output JSON only. The host decides whether the action
@@ -215,6 +233,78 @@ def _post(path, payload=None):
     response = requests.post(f"{MINECRAFT_URL}{path}", **kwargs)
     response.raise_for_status()
     return response.json()
+
+
+def _ollama_root():
+    base = _local_endpoint()
+    if base.endswith("/v1"):
+        return base[:-3].rstrip("/")
+    return base.rstrip("/")
+
+
+def _native_local_completion(
+    model_name,
+    system_prompt,
+    user_prompt,
+    *,
+    json_mode=False,
+    max_tokens=80,
+):
+    payload = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "stream": False,
+        "think": False,
+        "options": {
+            "num_predict": int(max_tokens),
+            "temperature": 0.2,
+        },
+    }
+    if json_mode:
+        payload["format"] = "json"
+
+    response = requests.post(
+        f"{_ollama_root()}/api/chat",
+        json=payload,
+        timeout=35,
+    )
+    response.raise_for_status()
+    data = response.json()
+    return str((data.get("message") or {}).get("content") or "").strip()
+
+
+async def _local_fast_completion(
+    runtime,
+    system_prompt,
+    user_prompt,
+    *,
+    json_mode=False,
+    max_tokens=80,
+):
+    label = str(runtime.get("model_label") or "")
+    if not label.startswith("local:"):
+        return None
+    model_name = label.split(":", 1)[1]
+    try:
+        return await asyncio.to_thread(
+            _native_local_completion,
+            model_name,
+            system_prompt,
+            user_prompt,
+            json_mode=json_mode,
+            max_tokens=max_tokens,
+        )
+    except Exception as error:
+        log_exception(
+            "agent",
+            "native_local_fallback",
+            error,
+            json_mode=json_mode,
+        )
+        return None
 
 
 async def _send_ingame(message, *, reason="reply", retry=True):
@@ -455,12 +545,33 @@ def _chat_awareness_text(runtime):
     except Exception:
         pos = "unknown"
         owner_distance = "unknown"
+    recent_events = store.recent_events(3)
+    evidence = [
+        f"[{event['kind']}] {_trim(event['summary'], 260)}"
+        for event in recent_events
+        if event.get("kind") in {
+            "practice_result",
+            "practice_observation",
+            "practice_error",
+            "tool_failure",
+            "user_feedback",
+            "learning_complete",
+        }
+    ]
+    job = (
+        f"{state.get('jobType')} {state.get('jobState')} {state.get('jobReason')}"
+        if state.get("jobActive")
+        else "none"
+    )
     return (
         "QUICK CHAT CONTEXT:\n"
         f"- pos={pos}\n"
         f"- Alik distance={owner_distance}\n"
+        f"- physical job={job}\n"
         f"- activity={_current_activity_text()}\n"
-        f"- inventory={items or ['empty']}"
+        f"- inventory={items or ['empty']}\n"
+        f"- recent physical evidence={evidence or ['none']}\n"
+        "- Never claim progress not supported by this evidence."
     )
 
 
@@ -474,6 +585,7 @@ def build_practice_plan_input(runtime, directive=None):
         + [f"{goal['title']} {goal['description']}" for goal in goals[:3]]
     )
     learned = store.find_learned_skills(learning_query, 3)
+    relevant_memory = store.recall(learning_query, 4)
 
     parts = [_awareness_text(runtime)]
     if directive:
@@ -495,6 +607,13 @@ def build_practice_plan_input(runtime, directive=None):
                 f"{_trim(skill['procedure'], 420)}"
             )
 
+    if relevant_memory:
+        parts.append("RELEVANT DURABLE LESSONS / USER HINTS:")
+        for memory in relevant_memory:
+            parts.append(
+                f"- [{memory['kind']}] {_trim(memory['content'], 500)}"
+            )
+
     if trials:
         parts.append("RECENT EXPERIMENT EVIDENCE:")
         for trial in trials:
@@ -513,9 +632,12 @@ def build_practice_plan_input(runtime, directive=None):
 
     parts.append(
         "Choose ONE next primitive that best advances the current user directive "
-        "or, if there is none, the highest-priority active goal. If a specific "
-        "resource location is unknown, scan first. If target coordinates are "
-        "known, use move_to rather than guessing compass movement. Output JSON only."
+        "or, if there is none, the highest-priority active goal. If a resource "
+        "location is unknown, scan first. IMPORTANT API SEMANTICS: mine already "
+        "approaches/faces/reaches the target block. Never move_to the coordinate "
+        "of a solid block you intend to mine. move_to is only for a standable "
+        "destination. Respect Alik's corrections and teacher hints above. Do not "
+        "repeat a failed target unchanged. Output JSON only."
     )
     return "\n".join(parts)
 
@@ -532,11 +654,19 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
     )
 
     try:
-        result = await asyncio.wait_for(
-            Runner.run(planner_agent, prompt, max_turns=1),
-            timeout=30.0,
+        raw = await _local_fast_completion(
+            runtime,
+            PRACTICE_PLANNER_INSTRUCTIONS,
+            prompt,
+            json_mode=True,
+            max_tokens=180,
         )
-        raw = str(result.final_output or "").strip()
+        if not raw:
+            result = await asyncio.wait_for(
+                Runner.run(planner_agent, prompt, max_turns=1),
+                timeout=30.0,
+            )
+            raw = str(result.final_output or "").strip()
     except asyncio.TimeoutError as error:
         log_exception(
             "practice_host",
@@ -566,7 +696,11 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         )
         return None
 
-    execution = await asyncio.to_thread(execute_plan, plan)
+    runtime["physical_action_active"] = True
+    try:
+        execution = await asyncio.to_thread(execute_plan, plan)
+    finally:
+        runtime["physical_action_active"] = False
     await update_awareness(runtime)
     log_event(
         "practice_host",
@@ -774,8 +908,18 @@ async def run_turn(agent, message, source, reply_in_game, runtime):
     )
 
     try:
-        result = await Runner.run(agent, prepared, max_turns=max_turns)
-        answer = str(result.final_output or "").strip()
+        answer = None
+        if source in {"minecraft", "console"}:
+            answer = await _local_fast_completion(
+                runtime,
+                PLAYER_CHAT_INSTRUCTIONS,
+                prepared,
+                json_mode=False,
+                max_tokens=48,
+            )
+        if answer is None:
+            result = await Runner.run(agent, prepared, max_turns=max_turns)
+            answer = str(result.final_output or "").strip()
         if source in {"minecraft", "console"}:
             answer = _format_ingame_reply(answer)
     except MaxTurnsExceeded as error:
@@ -998,6 +1142,30 @@ def _feedback_reply(text):
     if any(
         phrase in normalized
         for phrase in (
+            "you are just ",
+            "you're just ",
+            "ur just ",
+            "not actually ",
+            "there is no ",
+            "there are no ",
+            "not an issue",
+            "isn't an issue",
+            "is not an issue",
+            "no ur not",
+            "no you're not",
+            "no you are not",
+            "thats wrong",
+            "that's wrong",
+            "right tool",
+            "correct tool",
+            "should use ",
+        )
+    ):
+        return "got it", True
+
+    if any(
+        phrase in normalized
+        for phrase in (
             "you are close enough",
             "you're close enough",
             "ur close enough",
@@ -1189,6 +1357,24 @@ async def fast_chat_reflex(text):
             "user_feedback",
             f"Alik said: {text}",
         )
+        normalized_feedback = text.lower()
+        if any(
+            phrase in normalized_feedback
+            for phrase in (
+                "right tool",
+                "correct tool",
+                "should use ",
+                "use an axe",
+                "use a ",
+            )
+        ):
+            safe_key = re.sub(r"[^a-z0-9]+", ".", normalized_feedback).strip(".")[:90]
+            store.remember(
+                "lesson",
+                f"user_hint.{safe_key or 'correction'}",
+                f"Alik taught/corrected: {text}",
+                8,
+            )
         return {
             "handled": True,
             "reply": reply,
@@ -1229,14 +1415,39 @@ def _current_activity_text():
     ]
     if meaningful:
         goal = meaningful[0]
-        trials = store.recent_trials(1)
-        if trials:
-            trial = trials[-1]
-            return _format_ingame_reply(
-                f"{goal['title']} rn. trying: {trial['hypothesis']}"
-            )
         return _format_ingame_reply(f"working on {goal['title'].lower()}")
     return "just looking around rn"
+
+
+def _is_learning_status_question(text):
+    normalized = text.lower().strip().rstrip(".!?")
+    return any(
+        phrase in normalized
+        for phrase in (
+            "did u finish learning",
+            "did you finish learning",
+            "are u done learning",
+            "are you done learning",
+            "did u learn it",
+            "did you learn it",
+        )
+    )
+
+
+def _learning_status_text():
+    requests_ = store.list_learning(6)
+    recent = requests_[0] if requests_ else None
+    trials = store.recent_trials(4)
+
+    if recent and recent.get("status") in {"queued", "running"}:
+        return "still learning it"
+    if recent and recent.get("status") == "completed":
+        if trials:
+            return "got a hint, still testing it"
+        return "got the hint, haven't tested it yet"
+    if trials:
+        return "still testing it"
+    return "haven't learned it yet"
 
 
 def _is_activity_question(text):
@@ -1260,6 +1471,7 @@ def _preempt_background_reasoning(runtime):
         task is not None
         and not task.done()
         and source in {"autonomy", "event", "task", "learning", "practice", "command"}
+        and not runtime.get("physical_action_active", False)
     ):
         task.cancel()
         store.record_event(
@@ -1280,6 +1492,18 @@ async def poll_minecraft_chat(input_queue, runtime):
                     runtime["last_user_activity"] = time.monotonic()
                     log_event("chat", "user_message", message=text)
                     _preempt_background_reasoning(runtime)
+
+                    if _is_learning_status_question(text):
+                        answer = _learning_status_text()
+                        await _send_ingame(
+                            answer,
+                            reason="instant_learning_status",
+                        )
+                        print(f"\n[MINECRAFT] Alik: {text}")
+                        print(f"\nAI [learning status]: {answer}")
+                        store.record_episode(text, answer)
+                        log_event("chat", "instant_reply", message=text, reply=answer)
+                        continue
 
                     if _is_activity_question(text):
                         answer = _current_activity_text()
@@ -1454,20 +1678,17 @@ async def cloud_learning_worker(input_queue, runtime):
             )
             store.record_event(
                 "learning_complete",
-                f"Teacher #{request['id']} ({model}) learned {request['topic']} "
-                f"using {input_tokens} input / {output_tokens} output tokens.",
+                (
+                    f"Teacher #{request['id']} ({model}) hint for {request['topic']}: "
+                    f"{_trim(lesson, 700)}"
+                ),
             )
             print(
                 f"[TEACHER] Stored lesson from {model} "
                 f"({input_tokens} in / {output_tokens} out)."
             )
-            await enqueue(
-                input_queue,
-                runtime,
-                1,
-                "learning",
-                f"Teacher lesson completed for {request['topic']}: {lesson}",
-            )
+            # The lesson is persisted and will be injected into the next planner
+            # turn. Do not waste a second LLM turn paraphrasing the teacher.
         except Exception as error:
             store.finish_learning(
                 request["id"],
@@ -1863,9 +2084,12 @@ async def main():
         "self_improvement_attempted": False,
         "reasoning_task": None,
         "reasoning_source": None,
+        "physical_action_active": False,
+        "model_label": None,
     }
 
     model, model_label = choose_model()
+    runtime["model_label"] = model_label
     start_session(build=AGENT_BUILD, model=model_label)
     log_event(
         "agent",
