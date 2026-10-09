@@ -515,7 +515,7 @@ def skills(
 @mcp.tool()
 @_tool_guard
 def skill_memory(
-    action: Literal["search", "save", "trial", "history", "list"],
+    action: Literal["search", "save", "trial", "history", "list", "link", "graph"],
     query: str | None = None,
     name: str | None = None,
     intent: str | None = None,
@@ -525,10 +525,32 @@ def skill_memory(
     actions: str | None = None,
     outcome: str | None = None,
     success: bool | None = None,
+    parent_skill_id: int | None = None,
+    child_skill_id: int | None = None,
+    relation: str | None = None,
 ):
     """Persistent self-learned skills and experiment evidence. Procedures are plans over safe MCP primitives, never executable code."""
     if action == "list":
         return store.list_learned_skills(12)
+
+    if action == "graph":
+        target_id = skill_id if skill_id is not None else parent_skill_id
+        if target_id is None:
+            return {"ok": False, "error": "graph requires skill_id"}
+        graph = store.skill_graph(target_id)
+        return graph or {"ok": False, "error": "skill not found"}
+
+    if action == "link":
+        if parent_skill_id is None or child_skill_id is None:
+            return {
+                "ok": False,
+                "error": "link requires parent_skill_id and child_skill_id",
+            }
+        return store.link_learned_skills(
+            parent_skill_id,
+            child_skill_id,
+            relation or "subskill",
+        )
 
     if action == "search":
         return store.find_learned_skills(query or intent or "", 6)
