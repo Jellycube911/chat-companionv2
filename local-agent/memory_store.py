@@ -108,6 +108,39 @@ class MemoryStore:
                 """
             )
             db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS learned_skills (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    intent TEXT NOT NULL UNIQUE,
+                    procedure TEXT NOT NULL,
+                    successes INTEGER NOT NULL DEFAULT 0,
+                    failures INTEGER NOT NULL DEFAULT 0,
+                    confidence REAL NOT NULL DEFAULT 0.5,
+                    source TEXT NOT NULL DEFAULT 'self',
+                    last_outcome TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    last_used REAL NOT NULL
+                )
+                """
+            )
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS skill_trials (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    skill_id INTEGER,
+                    intent TEXT NOT NULL,
+                    hypothesis TEXT NOT NULL,
+                    actions TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    success INTEGER NOT NULL,
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY(skill_id) REFERENCES learned_skills(id)
+                )
+                """
+            )
+            db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_memories_updated ON memories(updated_at DESC)"
             )
             db.execute(
@@ -127,6 +160,12 @@ class MemoryStore:
             )
             db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_learning_topic ON learning_requests(topic, updated_at DESC)"
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_learned_skills_updated ON learned_skills(updated_at DESC)"
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_skill_trials_intent ON skill_trials(intent, created_at DESC)"
             )
 
             now = time.time()
@@ -782,6 +821,257 @@ class MemoryStore:
             for row in rows
         ]
 
+    def save_learned_skill(
+        self,
+        name,
+        intent,
+        procedure,
+        source="self",
+    ):
+        name = str(name).strip()[:120]
+        intent = str(intent).strip().lower()[:240]
+        procedure = str(procedure).strip()[:8000]
+        source = str(source).strip().lower()[:40] or "self"
+        if not name or not intent or not procedure:
+            raise ValueError("name, intent and procedure are required")
+        now = time.time()
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT id FROM learned_skills WHERE intent=?",
+                (intent,),
+            ).fetchone()
+            if row is None:
+                cursor = db.execute(
+                    """
+                    INSERT INTO learned_skills(
+                        name, intent, procedure, successes, failures,
+                        confidence, source, last_outcome,
+                        created_at, updated_at, last_used
+                    )
+                    VALUES (?, ?, ?, 0, 0, 0.5, ?, '', ?, ?, ?)
+                    """,
+                    (name, intent, procedure, source, now, now, now),
+                )
+                skill_id = cursor.lastrowid
+            else:
+                skill_id = row["id"]
+                db.execute(
+                    """
+                    UPDATE learned_skills
+                    SET name=?, procedure=?, source=?, updated_at=?, last_used=?
+                    WHERE id=?
+                    """,
+                    (name, procedure, source, now, now, skill_id),
+                )
+        return self.learned_skill(skill_id)
+
+    def learned_skill(self, skill_id):
+        with self._connect() as db:
+            row = db.execute(
+                """
+                SELECT id, name, intent, procedure, successes, failures,
+                       confidence, source, last_outcome, updated_at
+                FROM learned_skills
+                WHERE id=?
+                """,
+                (int(skill_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "intent": row["intent"],
+            "procedure": row["procedure"],
+            "successes": row["successes"],
+            "failures": row["failures"],
+            "confidence": round(float(row["confidence"]), 3),
+            "source": row["source"],
+            "last_outcome": row["last_outcome"],
+        }
+
+    def find_learned_skills(self, query, limit=5):
+        query = str(query).strip().lower()
+        limit = max(1, min(12, int(limit)))
+        tokens = set(TOKEN_RE.findall(query))
+        with self._connect() as db:
+            rows = db.execute(
+                """
+                SELECT id, name, intent, procedure, successes, failures,
+                       confidence, source, last_outcome, updated_at
+                FROM learned_skills
+                ORDER BY confidence DESC, updated_at DESC
+                LIMIT 200
+                """
+            ).fetchall()
+
+        ranked = []
+        for row in rows:
+            haystack = f"{row['name']} {row['intent']} {row['procedure']}".lower()
+            overlap = len(tokens & set(TOKEN_RE.findall(haystack)))
+            score = overlap * 4.0 + float(row["confidence"]) * 5.0
+            if query and query in haystack:
+                score += 8.0
+            if query and overlap == 0 and query not in haystack:
+                continue
+            ranked.append((score, row))
+
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        selected = ranked[:limit]
+        if selected:
+            now = time.time()
+            ids = [row["id"] for _, row in selected]
+            placeholders = ",".join("?" for _ in ids)
+            with self._connect() as db:
+                db.execute(
+                    f"UPDATE learned_skills SET last_used=? WHERE id IN ({placeholders})",
+                    [now, *ids],
+                )
+        return [
+            {
+                "id": row["id"],
+                "name": row["name"],
+                "intent": row["intent"],
+                "procedure": row["procedure"],
+                "successes": row["successes"],
+                "failures": row["failures"],
+                "confidence": round(float(row["confidence"]), 3),
+                "source": row["source"],
+                "last_outcome": row["last_outcome"],
+            }
+            for _, row in selected
+        ]
+
+    def list_learned_skills(self, limit=12):
+        limit = max(1, min(50, int(limit)))
+        with self._connect() as db:
+            rows = db.execute(
+                """
+                SELECT id FROM learned_skills
+                ORDER BY confidence DESC, updated_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [self.learned_skill(row["id"]) for row in rows]
+
+    def record_skill_trial(
+        self,
+        intent,
+        hypothesis,
+        actions,
+        outcome,
+        success,
+        skill_id=None,
+    ):
+        intent = str(intent).strip().lower()[:240]
+        hypothesis = str(hypothesis).strip()[:2400]
+        actions = str(actions).strip()[:5000]
+        outcome = str(outcome).strip()[:3000]
+        success = bool(success)
+        if not intent or not hypothesis or not actions or not outcome:
+            raise ValueError("intent, hypothesis, actions and outcome are required")
+        now = time.time()
+
+        with self._connect() as db:
+            resolved_skill_id = None
+            if skill_id is not None:
+                row = db.execute(
+                    "SELECT id FROM learned_skills WHERE id=?",
+                    (int(skill_id),),
+                ).fetchone()
+                resolved_skill_id = row["id"] if row is not None else None
+            if resolved_skill_id is None:
+                row = db.execute(
+                    "SELECT id FROM learned_skills WHERE intent=?",
+                    (intent,),
+                ).fetchone()
+                resolved_skill_id = row["id"] if row is not None else None
+
+            db.execute(
+                """
+                INSERT INTO skill_trials(
+                    skill_id, intent, hypothesis, actions, outcome, success, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    resolved_skill_id,
+                    intent,
+                    hypothesis,
+                    actions,
+                    outcome,
+                    1 if success else 0,
+                    now,
+                ),
+            )
+
+            skill = None
+            if resolved_skill_id is not None:
+                db.execute(
+                    """
+                    UPDATE learned_skills
+                    SET successes=successes+?,
+                        failures=failures+?,
+                        last_outcome=?,
+                        confidence=CAST(successes + ? + 1 AS REAL)
+                            / CAST(successes + failures + 3 AS REAL),
+                        updated_at=?,
+                        last_used=?
+                    WHERE id=?
+                    """,
+                    (
+                        1 if success else 0,
+                        0 if success else 1,
+                        outcome,
+                        1 if success else 0,
+                        now,
+                        now,
+                        resolved_skill_id,
+                    ),
+                )
+                skill = self.learned_skill(resolved_skill_id)
+
+            db.execute(
+                """
+                DELETE FROM skill_trials
+                WHERE id NOT IN (
+                    SELECT id FROM skill_trials ORDER BY created_at DESC LIMIT 2000
+                )
+                """
+            )
+
+        return {
+            "ok": True,
+            "success": success,
+            "skill": skill,
+        }
+
+    def recent_skill_trials(self, intent, limit=6):
+        intent = str(intent).strip().lower()[:240]
+        limit = max(1, min(20, int(limit)))
+        with self._connect() as db:
+            rows = db.execute(
+                """
+                SELECT skill_id, hypothesis, actions, outcome, success, created_at
+                FROM skill_trials
+                WHERE intent=?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (intent, limit),
+            ).fetchall()
+        return [
+            {
+                "skill_id": row["skill_id"],
+                "hypothesis": row["hypothesis"],
+                "actions": row["actions"],
+                "outcome": row["outcome"],
+                "success": bool(row["success"]),
+            }
+            for row in rows
+        ]
+
     def stats(self):
         with self._connect() as db:
             memory_count = db.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
@@ -796,6 +1086,12 @@ class MemoryStore:
             queued_learning = db.execute(
                 "SELECT COUNT(*) FROM learning_requests WHERE status IN ('queued','running')"
             ).fetchone()[0]
+            learned_skills = db.execute(
+                "SELECT COUNT(*) FROM learned_skills"
+            ).fetchone()[0]
+            skill_trials = db.execute(
+                "SELECT COUNT(*) FROM skill_trials"
+            ).fetchone()[0]
         return {
             "memories": memory_count,
             "episodes": episode_count,
@@ -803,6 +1099,8 @@ class MemoryStore:
             "events": event_count,
             "active_tasks": active_tasks,
             "queued_learning": queued_learning,
+            "learned_skills": learned_skills,
+            "skill_trials": skill_trials,
             "database": str(self.path),
         }
 
