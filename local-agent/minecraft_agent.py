@@ -393,7 +393,63 @@ def _awareness_text(runtime):
     )
 
 
+def _chat_awareness_text(runtime):
+    awareness = runtime.get("awareness") or {}
+    state = awareness.get("state") or {}
+    owner = state.get("owner") or {}
+    inventory = awareness.get("inventory") or []
+    items = [
+        f"{item.get('item')}x{item.get('count')}"
+        for item in inventory[:8]
+    ]
+    try:
+        pos = (
+            f"({float(state.get('x', 0)):.1f},"
+            f"{float(state.get('y', 0)):.1f},"
+            f"{float(state.get('z', 0)):.1f})"
+        )
+        owner_distance = f"{float(owner.get('distance', 0)):.1f}"
+    except Exception:
+        pos = "unknown"
+        owner_distance = "unknown"
+    return (
+        "QUICK CHAT CONTEXT:\n"
+        f"- pos={pos}\n"
+        f"- Alik distance={owner_distance}\n"
+        f"- activity={_current_activity_text()}\n"
+        f"- inventory={items or ['empty']}"
+    )
+
+
 def build_turn_input(message, source, runtime):
+    if source in {"minecraft", "console"}:
+        parts = [_chat_awareness_text(runtime)]
+        recent = store.recent_episodes(2)
+        if recent:
+            parts.append("RECENT CHAT:")
+            for episode in recent:
+                parts.append(f"Alik: {_trim(episode['user'], 160)}")
+                parts.append(
+                    f"Chat: {_trim(_format_ingame_reply(episode['assistant']), 120)}"
+                )
+
+        relevant = store.recall(message, 2)
+        if relevant:
+            parts.append("RELEVANT MEMORY:")
+            for memory in relevant:
+                parts.append(
+                    f"- {_trim(memory['content'], 220)}"
+                )
+
+        parts.append("CURRENT MESSAGE FROM ALIK:")
+        parts.append(message)
+        parts.append(
+            "Reply like an in-game player. One short natural sentence unless "
+            "Alik explicitly asks for detail."
+        )
+        parts.append("/no_think")
+        return "\n".join(parts)
+
     relevant = store.recall(message, 4)
     goals = store.list_goals("active", 4)
     learning_query = " ".join(
@@ -536,7 +592,7 @@ def build_turn_input(message, source, runtime):
 
 async def run_turn(agent, message, source, reply_in_game, runtime):
     prepared = build_turn_input(message, source, runtime)
-    max_turns = 10 if source in {"autonomy", "event", "task", "learning", "practice", "command"} else MAX_AGENT_TURNS
+    max_turns = 10 if source in {"autonomy", "event", "task", "learning", "practice", "command"} else min(MAX_AGENT_TURNS, 4)
     turn_started = time.monotonic()
     ack_task = (
         asyncio.create_task(_delayed_chat_ack())
@@ -569,8 +625,13 @@ async def run_turn(agent, message, source, reply_in_game, runtime):
         answer = (
             ""
             if source in {"autonomy", "event", "task", "learning", "practice", "command"}
-            else "I stopped that reasoning loop instead of retrying indefinitely."
+            else "got stuck thinking, one sec"
         )
+    except asyncio.CancelledError:
+        if ack_task is not None and not ack_task.done():
+            ack_task.cancel()
+            await asyncio.gather(ack_task, return_exceptions=True)
+        raise
 
     if answer and source in {"minecraft", "console"}:
         print(f"\nAI: {answer}")
