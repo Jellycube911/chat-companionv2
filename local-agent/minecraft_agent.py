@@ -2081,7 +2081,7 @@ def _learning_status_text():
 def _is_movement_feedback(text):
     normalized = _normalize_request_text(text)
     return (
-        bool(re.search(r"\b(?:u|you)\s+(?:didnt|didn't|did not|havent|haven't)\s+mov", normalized))
+        bool(re.search(r"\b(?:u|you)\s+(?:didnt|didn't|did not|havent|haven't)\s+(?:\w+\s+){0,3}mov\w*", normalized))
         or normalized in {"stuck on what", "why are you stuck", "why are u stuck"}
     )
 
@@ -2113,7 +2113,7 @@ def _ground_chat_reply(answer, runtime):
     ):
         return "haven't checked the recipe yet"
     attempted_movement = bool(re.search(
-        r"\bi\s+(?:tried\s+(?:to\s+)?mov|moved|walked)\b", answer, re.I,
+        r"\bi\s+(?:tried\s+(?:to\s+)?mov\w*|moved|walked)\b", answer, re.I,
     ))
     recent = (runtime or {}).get("last_move_command") or {}
     if attempted_movement and not recent:
