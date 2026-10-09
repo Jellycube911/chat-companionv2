@@ -39,7 +39,7 @@ AMBIENT_WANDER_INTERVAL = 22.0
 REFLEX_COOLDOWN = 4.0
 LEARNING_COOLDOWN_SECONDS = 1800
 TEACHER_MAX_OUTPUT_TOKENS = 700
-AGENT_BUILD = "self-learning-local-brain-v8-live-efficiency-2026-10-09"
+AGENT_BUILD = "self-learning-local-brain-v9-task-state-2026-10-09"
 BASE_DIR = Path(__file__).resolve().parent
 
 set_tracing_disabled(True)
@@ -545,7 +545,7 @@ def _chat_awareness_text(runtime):
     inventory = awareness.get("inventory") or []
     items = [
         f"{item.get('item')}x{item.get('count')}"
-        for item in inventory[:8]
+        for item in inventory[:36]
     ]
     try:
         pos = (
@@ -704,6 +704,19 @@ def _reconcile_user_goals(execution):
             if has_pickaxe:
                 store.update_goal(goal["id"], status="completed")
                 messages.append("got the stone pickaxe, task done")
+                continue
+
+        if normalized in {"obtain a crafting table", "get a crafting table"}:
+            table_count = _inventory_count(
+                inventory,
+                lambda item: item == "minecraft:crafting_table",
+            )
+            if table_count > 0:
+                store.update_goal(goal["id"], status="completed")
+                messages.append(
+                    f"already got {table_count} crafting table"
+                    + ("s, task done" if table_count != 1 else ", task done")
+                )
 
     return messages
 
@@ -782,6 +795,9 @@ async def _report_planned_outcome(runtime, execution, source):
     streaks = runtime.setdefault("failure_streaks", {})
     streak_key = f"{plan.get('intent', '')}:{plan.get('action', '')}"
 
+    if execution.get("status") in {"physical_job_in_progress", "pending"}:
+        return
+
     if execution.get("ok"):
         streaks.pop(streak_key, None)
         return
@@ -809,16 +825,71 @@ async def _report_planned_outcome(runtime, execution, source):
 async def run_planned_action(planner_agent, runtime, directive=None, source="practice"):
     started = time.monotonic()
 
-    awareness_inventory = (runtime.get("awareness") or {}).get("inventory") or []
-    for message in _reconcile_user_goals(
+    try:
+        await update_awareness(runtime)
+    except Exception:
+        pass
+
+    awareness = runtime.get("awareness") or {}
+    state = awareness.get("state") or {}
+    awareness_inventory = awareness.get("inventory") or []
+
+    completed = _reconcile_user_goals(
         {"after": {"inventory": awareness_inventory}}
-    ):
+    )
+    for message in completed:
         await _notify_once(
             runtime,
             "goal_complete:" + message,
             message,
             cooldown=2.0,
         )
+
+    if completed and source == "practice":
+        runtime["post_goal_pause_until"] = time.monotonic() + 20.0
+        log_event(
+            "practice_host",
+            "goal_satisfied_before_planning",
+            completed=completed,
+        )
+        return {
+            "ok": True,
+            "status": "goal_completed",
+            "completed": completed,
+        }
+
+    if state.get("jobActive"):
+        if source == "command":
+            try:
+                await asyncio.to_thread(_post, "/stop-action")
+                await asyncio.sleep(0.1)
+                await update_awareness(runtime)
+            except Exception as error:
+                log_exception(
+                    "practice_host",
+                    "command_preemption_error",
+                    error,
+                    directive=directive,
+                )
+        else:
+            log_event(
+                "practice_host",
+                "physical_job_in_progress",
+                job_type=state.get("jobType"),
+                job_state=state.get("jobState"),
+                job_reason=state.get("jobReason"),
+                job_progress=state.get("jobProgress"),
+            )
+            return {
+                "ok": True,
+                "status": "physical_job_in_progress",
+                "job": {
+                    "type": state.get("jobType"),
+                    "state": state.get("jobState"),
+                    "reason": state.get("jobReason"),
+                    "progress": state.get("jobProgress"),
+                },
+            }
 
     prompt = build_practice_plan_input(runtime, directive=directive)
     log_event(
@@ -1196,8 +1267,37 @@ def _extract_count(text, default):
     return max(1, min(64, int(match.group(1))))
 
 
+def _normalize_request_text(text):
+    normalized = str(text or "").lower().strip().rstrip(".!?")
+    prefixes = (
+        "yeah so ",
+        "yea so ",
+        "yep so ",
+        "ok so ",
+        "okay so ",
+        "alright so ",
+        "right so ",
+        "well ",
+        "so ",
+        "come on ",
+        "cmon ",
+        "c'mon ",
+        "mate ",
+        "hey ",
+    )
+    changed = True
+    while changed:
+        changed = False
+        for prefix in prefixes:
+            if normalized.startswith(prefix):
+                normalized = normalized[len(prefix):].lstrip(" ,")
+                changed = True
+                break
+    return normalized
+
+
 def _looks_like_direct_request(text):
-    normalized = text.lower().strip().rstrip(".!?")
+    normalized = _normalize_request_text(text)
     if any(
         phrase in normalized
         for phrase in (
@@ -1236,7 +1336,7 @@ def _looks_like_direct_request(text):
 
 
 async def fast_task_intent(text):
-    normalized = text.lower().strip()
+    normalized = _normalize_request_text(text)
     if not _looks_like_direct_request(text):
         return None
 
@@ -1271,7 +1371,78 @@ async def fast_task_intent(text):
             8,
         )
 
+    if (
+        "crafting table" in normalized
+        and any(word in normalized for word in ("make", "craft", "get", "build"))
+    ):
+        return _ensure_user_goal(
+            "Obtain a crafting table",
+            text,
+            9,
+        )
+
     return None
+
+def _inventory_summary(runtime):
+    inventory = ((runtime or {}).get("awareness") or {}).get("inventory") or []
+    counts = {}
+    for entry in inventory:
+        item = str(entry.get("item") or "")
+        counts[item] = counts.get(item, 0) + int(entry.get("count", 0) or 0)
+    return inventory, counts
+
+
+def _inventory_fact_reply(text, runtime):
+    normalized = str(text or "").lower().strip().rstrip(".!?")
+    inventory, counts = _inventory_summary(runtime)
+
+    log_count = sum(
+        count for item, count in counts.items()
+        if item.startswith("minecraft:") and item.endswith("_log")
+    )
+    plank_count = sum(
+        count for item, count in counts.items()
+        if item.startswith("minecraft:") and item.endswith("_planks")
+    )
+    table_count = counts.get("minecraft:crafting_table", 0)
+
+    asks_have = any(
+        phrase in normalized
+        for phrase in (
+            "do you have",
+            "do u have",
+            "you do have",
+            "u do have",
+            "you have",
+            "u have",
+            "got any",
+            "do you got",
+            "do u got",
+        )
+    )
+
+    if asks_have and "wood" in normalized:
+        if log_count or plank_count:
+            parts = []
+            if log_count:
+                parts.append(f"{log_count} logs")
+            if plank_count:
+                parts.append(f"{plank_count} planks")
+            return "yea, i've got " + " and ".join(parts)
+        return "nah, no logs or planks rn"
+
+    if asks_have and ("log" in normalized or "logs" in normalized):
+        return f"yea, {log_count} logs" if log_count else "nah, no logs rn"
+
+    if asks_have and "crafting table" in normalized:
+        return (
+            f"yea, i've got {table_count}"
+            if table_count
+            else "nah, no crafting table rn"
+        )
+
+    return None
+
 
 def _simple_chat_reply(text):
     normalized = text.lower().strip().rstrip(".!?")
@@ -1381,10 +1552,7 @@ def _feedback_reply(text):
 
 
 def _looks_like_action_request(text):
-    normalized = text.lower().strip().rstrip(".!?")
-    for prefix in ("come on ", "cmon ", "c'mon ", "mate ", "hey "):
-        if normalized.startswith(prefix):
-            normalized = normalized[len(prefix):].lstrip()
+    normalized = _normalize_request_text(text)
     if any(
         phrase in normalized
         for phrase in ("explain", "tell me how", "how do", "how can", "what is", "why ")
@@ -1417,11 +1585,22 @@ def _looks_like_action_request(text):
     return False
 
 
-async def fast_chat_reflex(text):
-    normalized = text.lower().strip().rstrip(".!?")
+async def fast_chat_reflex(text, runtime=None):
+    normalized = _normalize_request_text(text)
 
     goal = await fast_task_intent(text)
     if goal is not None:
+        if str(goal.get("title", "")).lower() == "obtain a crafting table":
+            _, counts = _inventory_summary(runtime)
+            table_count = counts.get("minecraft:crafting_table", 0)
+            if table_count > 0:
+                store.update_goal(goal["id"], status="completed")
+                return {
+                    "handled": True,
+                    "reply": f"already got {table_count} crafting table"
+                    + ("s" if table_count != 1 else ""),
+                    "background": False,
+                }
         return {
             "handled": True,
             "reply": "yep, on it",
@@ -1792,6 +1971,23 @@ async def poll_minecraft_chat(input_queue, runtime, chat_agent):
                         log_event("chat", "instant_reply", message=text, reply=answer)
                         continue
 
+                    inventory_reply = _inventory_fact_reply(text, runtime)
+                    if inventory_reply is not None:
+                        await _send_ingame(
+                            inventory_reply,
+                            reason="instant_inventory_fact",
+                        )
+                        print(f"\n[MINECRAFT] Alik: {text}")
+                        print(f"\nAI [inventory]: {inventory_reply}")
+                        store.record_episode(text, inventory_reply)
+                        log_event(
+                            "chat",
+                            "instant_reply",
+                            message=text,
+                            reply=inventory_reply,
+                        )
+                        continue
+
                     simple = _simple_chat_reply(text)
                     if simple is not None:
                         await _send_ingame(
@@ -1804,7 +2000,7 @@ async def poll_minecraft_chat(input_queue, runtime, chat_agent):
                         log_event("chat", "instant_reply", message=text, reply=simple)
                         continue
 
-                    reflex = await fast_chat_reflex(text)
+                    reflex = await fast_chat_reflex(text, runtime)
                     if reflex and reflex.get("handled"):
                         reply = reflex.get("reply") or "yep"
                         await _send_ingame(
@@ -2274,6 +2470,12 @@ async def autonomy_sensor(input_queue, runtime):
             continue
 
         if (
+            now < float(runtime.get("post_goal_pause_until", 0.0) or 0.0)
+            and not any(goal.get("source") == "user" for goal in meaningful_goals)
+        ):
+            continue
+
+        if (
             not meaningful_goals
             and now - runtime["last_user_activity"] > 8.0
             and owner_distance <= 16.0
@@ -2368,6 +2570,7 @@ async def main():
         "chat_tasks": set(),
         "notices": {},
         "failure_streaks": {},
+        "post_goal_pause_until": 0.0,
     }
 
     model, model_label = choose_model()
