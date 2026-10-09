@@ -79,7 +79,10 @@ Allowed actions:
 - collect
 - place: item or slot, optional x,y,z, optional face
 - equip: item or slot
-- craft: width,height,grid,times
+- craft: width,height,grid,times. Grid has EXACTLY width*height item-ID
+  strings, in row-major order; use "" for empty positions.
+  A 1x1 grid contains ONE entry, a 2x2 grid FOUR, and 3x3 NINE.
+  A 3x3 recipe requires a PLACED crafting table near your body.
 - idle: only if no useful safe action exists
 
 Required fields for every non-idle action:
@@ -93,6 +96,13 @@ Examples of syntax only:
 {"intent":"reach a standable spot","hypothesis":"moving to nearby open ground will improve access","action":"move_to","x":98,"y":64,"z":100}
 {"intent":"try an observed ingredient in crafting","hypothesis":"the inventory item may craft into a useful ingredient","action":"craft","width":1,"height":1,"grid":["minecraft:oak_log"],"times":1}
 {"intent":"place a stored work surface","hypothesis":"a table may allow larger crafting recipes","action":"place","item":"minecraft:crafting_table"}
+
+Vanilla crafting reference for a WOODEN AXE (a hypothesis the world must
+verify): requires three matching planks and two sticks, arranged in 3x3:
+{"intent":"craft wooden axe","hypothesis":"test standard 3x3 axe recipe","action":"craft","width":3,"height":3,"grid":["minecraft:jungle_planks","minecraft:jungle_planks","","minecraft:jungle_planks","minecraft:stick","","","minecraft:stick",""],"times":1}
+Only use that example if the required items are actually carried and a crafting
+table is nearby. This example is not proof of success, and it does NOT
+authorize imaginary separate "axe heads" or crafting with a pickaxe.
 
 If recent evidence says move_to is repath_pending with no position change, do
 NOT repeat the same target. Change the action or target. If a scan found the
@@ -659,12 +669,12 @@ def build_practice_plan_input(runtime, directive=None):
 
     blocked = [
         (key, value) for key, value in runtime.get("invalid_targets", {}).items()
-        if time.monotonic() - value[0] < 180.0
+        if time.monotonic() - value[0] < _invalid_target_ttl(key)
     ]
     if blocked:
-        parts.append("RECENTLY INVALID TARGETS: do not retry these without a new observation:")
+        parts.append("REJECTED ACTIONS: do not repeat exact coordinates or crafting grids:")
         for key, (_, reason) in blocked[-8:]:
-            parts.append(f"- {key}: {reason}")
+            parts.append(f"- {_trim(key, 280)}: {_trim(reason, 180)}")
 
     if events:
         parts.append("RECENT EVENTS/OBSERVATIONS:")
@@ -700,7 +710,10 @@ def build_practice_plan_input(runtime, directive=None):
         "priority over self-practice. If resources are in the inventory, "
         "experiment with craft/place before searching for more resources. "
         "craft takes width,height,grid (use empty strings for empty slots),times. "
-        "Do not invent recipe outcomes. Output JSON only."
+        "For 3x3, array length MUST be 9, not 1 or 2; a placed table must "
+        "be close enough. Match ingredient counts to the actual inventory. "
+        "Do not put a pickaxe in the crafting grid to make an axe or invent "
+        "a separate axe-head recipe. Do not invent recipe outcomes. Output JSON only."
     )
     return "\n".join(parts)
 
@@ -983,8 +996,11 @@ def _current_user_subgoal(runtime):
 
 
 def _target_failure_needs_replan(execution):
-    """Quarantine invalid target coordinates after observed physical failures."""
+    """Quarantine invalid targets and rejected recipe hypotheses."""
     result = (execution or {}).get("result") or {}
+    plan = (execution or {}).get("plan") or {}
+    if plan.get("action") == "craft":
+        return (execution or {}).get("ok") is False
     reason = str(result.get("error") or result.get("reason") or "")
     return reason in {
         "target_block_mismatch", "target_block_is_air", "destination_occupied",
@@ -992,8 +1008,17 @@ def _target_failure_needs_replan(execution):
     } or reason.startswith("mining_blocked|")
 
 
+def _invalid_target_ttl(key):
+    return 1800.0 if str(key).startswith("craft@") else 180.0
+
+
 def _plan_target_key(plan):
     action = str(plan.get("action") or "")
+    if action == "craft":
+        return "craft@" + json.dumps(
+            [plan.get("width"), plan.get("height"), plan.get("grid")],
+            ensure_ascii=False, separators=(",", ":")
+        )[:550]
     if action not in {"mine", "move_to", "place"}:
         return None
     try:
@@ -1231,16 +1256,43 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
     target_key = _plan_target_key(plan)
     invalid = runtime.setdefault("invalid_targets", {})
     if (
-        source == "practice"
-        and target_key in invalid
-        and time.monotonic() - invalid[target_key][0] < 180.0
+        target_key in invalid
+        and time.monotonic() - invalid[target_key][0] < _invalid_target_ttl(target_key)
     ):
-        log_event("practice_host", "repeat_invalid_target_skipped", target=target_key)
-        store.record_event(
-            "practice_error",
-            f"Skipping known invalid {target_key}; re-observe or vary the target.",
+        why = str(invalid[target_key][1])
+        log_event(
+            "practice_host", "repeat_invalid_target_skipped",
+            target=target_key, reason=why,
         )
-        return {"ok": False, "status": "skipped_repeat", "plan": plan}
+        # Don't burn another HTTP request on an identical rejected recipe.
+        # Give the planner one chance to form a new, testable hypothesis.
+        alternate = await _local_fast_completion(
+            runtime, PRACTICE_PLANNER_INSTRUCTIONS,
+            prompt + "\nYOUR LAST ACTION IS ALREADY KNOWN TO FAIL: "
+            + _trim(target_key, 450) + "\nObserved error: " + _trim(why, 250)
+            + "\nChoose DIFFERENT valid crafting dimensions/grid or a "
+            "different physical action. Repeating the same grid is forbidden. "
+            "Return ONE JSON object.",
+            json_mode=True, max_tokens=220,
+        )
+        revised = parse_plan(alternate)
+        revised_key = _plan_target_key(revised) if revised is not None else None
+        if (
+            revised is None or revised_key == target_key
+            or not _plan_matches_user_goal(
+                revised, user_goal, directive or _current_user_subgoal(runtime)
+            )
+            or (
+                revised_key in invalid
+                and time.monotonic() - invalid[revised_key][0] < _invalid_target_ttl(revised_key)
+            )
+        ):
+            runtime["planner_backoff_until"] = time.monotonic() + 25.0
+            log_event("practice_host", "repeated_recipe_backoff", rejected=target_key, revision=revised)
+            return {"ok": False, "status": "skipped_repeat", "plan": plan}
+        log_event("practice_host", "invalid_target_replanned", old=plan, new=revised)
+        plan = revised
+        target_key = revised_key
 
     runtime["physical_action_active"] = True
     try:
@@ -1248,9 +1300,17 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
     finally:
         runtime["physical_action_active"] = False
     result = execution.get("result") or {}
-    reason = str(result.get("error") or result.get("reason") or "")
+    reason = str(
+        result.get("error") or result.get("reason")
+        or execution.get("error") or ""
+    )
     if target_key and _target_failure_needs_replan(execution):
         invalid[target_key] = (time.monotonic(), reason)
+        if plan.get("action") == "craft":
+            log_event(
+                "practice_host", "craft_recipe_rejected",
+                recipe_key=target_key, reason=reason,
+            )
     elif target_key and execution.get("ok"):
         invalid.pop(target_key, None)
         if plan.get("action") == "mine":
