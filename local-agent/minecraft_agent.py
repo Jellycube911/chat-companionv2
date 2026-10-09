@@ -37,7 +37,7 @@ AMBIENT_WANDER_INTERVAL = 22.0
 REFLEX_COOLDOWN = 4.0
 LEARNING_COOLDOWN_SECONDS = 1800
 TEACHER_MAX_OUTPUT_TOKENS = 700
-AGENT_BUILD = "self-learning-local-brain-v1-2026-10-09"
+AGENT_BUILD = "self-learning-local-brain-v2-2026-10-09"
 BASE_DIR = Path(__file__).resolve().parent
 
 set_tracing_disabled(True)
@@ -127,7 +127,10 @@ PHYSICAL BEHAVIOR
 - combat is limited by the server to hostile targets;
 - crafting uses registered Minecraft recipes;
 - use navigate(look_at, ...) then observe(vision) when you deliberately inspect
-  a direction or object.
+  a direction or object;
+- for world_action(place), pass item="minecraft:..." when you know what item
+  should be placed. Coordinates are optional for nearby placement; do not guess
+  inventory slot numbers when the item name is known.
 
 EFFICIENCY
 Once a learned skill has good evidence, reuse its procedure instead of
@@ -414,8 +417,10 @@ def build_turn_input(message, source, runtime):
         if recent:
             parts.append("RECENT CONVERSATION:")
             for episode in recent:
-                parts.append(f"Alik: {_trim(episode['user'])}")
-                parts.append(f"Chat: {_trim(episode['assistant'])}")
+                parts.append(f"Alik: {_trim(episode['user'], 220)}")
+                parts.append(
+                    f"Chat: {_trim(_format_ingame_reply(episode['assistant']), 160)}"
+                )
 
     if relevant:
         parts.append("RELEVANT LONG-TERM MEMORY:")
@@ -459,16 +464,25 @@ def build_turn_input(message, source, runtime):
             "or possible. When the goal is visibly achieved, update the goal to "
             "completed. Keep this turn focused."
         )
+    elif source == "command":
+        parts.append(
+            "BACKGROUND USER COMMAND: Alik already received a short acknowledgement. "
+            "Act on this request now using tools. Do not spend the turn composing "
+            "a conversational reply. Prefer one concrete action or experiment, "
+            "then verify the result and record a skill trial when applicable."
+        )
     else:
         parts.append("CURRENT MESSAGE FROM ALIK:")
 
     parts.append(message)
+    if source in {"minecraft", "console"}:
+        parts.append("/no_think")
     return "\n".join(parts)
 
 
 async def run_turn(agent, message, source, reply_in_game, runtime):
     prepared = build_turn_input(message, source, runtime)
-    max_turns = 10 if source in {"autonomy", "event", "task", "learning", "practice"} else MAX_AGENT_TURNS
+    max_turns = 10 if source in {"autonomy", "event", "task", "learning", "practice", "command"} else MAX_AGENT_TURNS
     turn_started = time.monotonic()
     log_event(
         "agent",
@@ -495,7 +509,7 @@ async def run_turn(agent, message, source, reply_in_game, runtime):
         )
         answer = (
             ""
-            if source in {"autonomy", "event", "task", "learning", "practice"}
+            if source in {"autonomy", "event", "task", "learning", "practice", "command"}
             else "I stopped that reasoning loop instead of retrying indefinitely."
         )
 
@@ -599,12 +613,25 @@ async def fast_task_intent(text):
 
     return None
 
+def _simple_chat_reply(text):
+    normalized = text.lower().strip().rstrip(".!?")
+    if normalized in {"hey", "hi", "hello", "yo", "sup", "hey chat", "hi chat"}:
+        return "hey"
+    if normalized in {"thanks", "thank you", "thx", "ty"}:
+        return "np"
+    return None
+
+
 async def fast_chat_reflex(text):
     normalized = text.lower().strip().rstrip(".!?")
 
-    task = await fast_task_intent(text)
-    if task is not None:
-        return
+    goal = await fast_task_intent(text)
+    if goal is not None:
+        return {
+            "handled": True,
+            "reply": "yep, on it",
+            "background": True,
+        }
 
     try:
         if normalized in {
@@ -631,7 +658,7 @@ async def fast_chat_reflex(text):
                 "motor_reflex",
                 f"Alik asked Chat to come to him; movement started immediately: {result}",
             )
-            return
+            return {"handled": True, "reply": "coming", "background": False}
 
         if normalized in {"follow me", "follow"}:
             store.cancel_tasks()
@@ -640,7 +667,7 @@ async def fast_chat_reflex(text):
                 "motor_reflex",
                 f"Alik asked Chat to follow; follow started immediately: {result}",
             )
-            return
+            return {"handled": True, "reply": "yep", "background": False}
 
         if normalized in {"stop", "stop moving", "stay here", "wait here", "cancel"}:
             store.cancel_tasks()
@@ -649,7 +676,7 @@ async def fast_chat_reflex(text):
                 "motor_reflex",
                 f"Alik asked Chat to stop; body/tasks stopped immediately: {result}",
             )
-            return
+            return {"handled": True, "reply": "stopping", "background": False}
 
         if normalized in {
             "pick that up",
@@ -663,11 +690,15 @@ async def fast_chat_reflex(text):
                 "motor_reflex",
                 f"Alik asked Chat to collect nearby items; collection started immediately: {result}",
             )
+            return {"handled": True, "reply": "got it", "background": False}
     except Exception as error:
         store.record_event(
             "motor_reflex_error",
             f"Fast chat reflex failed: {type(error).__name__}: {error}",
         )
+        return None
+
+    return None
 
 
 def _current_activity_text():
@@ -720,7 +751,7 @@ def _preempt_background_reasoning(runtime):
     if (
         task is not None
         and not task.done()
-        and source in {"autonomy", "event", "task", "learning", "practice"}
+        and source in {"autonomy", "event", "task", "learning", "practice", "command"}
     ):
         task.cancel()
         store.record_event(
@@ -754,9 +785,56 @@ async def poll_minecraft_chat(input_queue, runtime):
                         print(f"\n[MINECRAFT] Alik: {text}")
                         print(f"\nAI [instant status]: {answer}")
                         store.record_episode(text, answer)
+                        log_event("chat", "instant_reply", message=text, reply=answer)
                         continue
 
-                    await fast_chat_reflex(text)
+                    simple = _simple_chat_reply(text)
+                    if simple is not None:
+                        try:
+                            await asyncio.to_thread(
+                                _post,
+                                "/say",
+                                {"message": simple},
+                            )
+                        except Exception:
+                            pass
+                        print(f"\n[MINECRAFT] Alik: {text}")
+                        print(f"\nAI [instant chat]: {simple}")
+                        store.record_episode(text, simple)
+                        log_event("chat", "instant_reply", message=text, reply=simple)
+                        continue
+
+                    reflex = await fast_chat_reflex(text)
+                    if reflex and reflex.get("handled"):
+                        reply = reflex.get("reply") or "yep"
+                        try:
+                            await asyncio.to_thread(
+                                _post,
+                                "/say",
+                                {"message": reply},
+                            )
+                        except Exception:
+                            pass
+                        print(f"\n[MINECRAFT] Alik: {text}")
+                        print(f"\nAI [instant action]: {reply}")
+                        store.record_episode(text, reply)
+                        log_event(
+                            "chat",
+                            "instant_action_ack",
+                            message=text,
+                            reply=reply,
+                            background=bool(reflex.get("background")),
+                        )
+                        if reflex.get("background"):
+                            await enqueue(
+                                input_queue,
+                                runtime,
+                                0,
+                                "command",
+                                f"Alik asked: {text}",
+                            )
+                        continue
+
                     await enqueue(input_queue, runtime, 0, "minecraft", text)
         except Exception:
             pass
@@ -1156,17 +1234,27 @@ async def autonomy_sensor(input_queue, runtime):
             and not runtime["self_improvement_attempted"]
             and owner_distance <= 20.0
         ):
-            goal = store.create_goal(
-                "Improve practical capability",
-                "Discover and test one useful way to become more capable in the current environment.",
-                4,
-                "self",
+            existing = next(
+                (
+                    goal
+                    for goal in store.list_goals("active", 20)
+                    if goal["title"].strip().lower() == "improve practical capability"
+                    and goal.get("source") == "self"
+                ),
+                None,
             )
+            if existing is None:
+                goal = store.create_goal(
+                    "Improve practical capability",
+                    "Discover and test one useful way to become more capable in the current environment.",
+                    4,
+                    "self",
+                )
+                store.record_event(
+                    "drive",
+                    f"Self-improvement drive created exploratory goal #{goal['id']}.",
+                )
             runtime["self_improvement_attempted"] = True
-            store.record_event(
-                "drive",
-                f"Self-improvement drive created exploratory goal #{goal['id']}.",
-            )
 
         meaningful_goals = [
             goal
@@ -1396,7 +1484,7 @@ async def main():
                         except Exception:
                             pass
                 finally:
-                    if source in {"autonomy", "event", "task", "learning"}:
+                    if source in {"autonomy", "event", "task", "learning", "practice"}:
                         runtime["autonomy_pending"] = False
         finally:
             log_event("agent", "session_stop")
