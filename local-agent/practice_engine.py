@@ -584,9 +584,10 @@ def _execute_action(plan, before):
                 "target": target,
             }
 
-        requested_tool = _choose_mining_tool(
-            observed_type, before["inventory"], plan.get("tool")
-        )
+        # Qwen may select a tool using recorded performance evidence.
+        # The executor must not silently pick its own optimal tool; when
+        # unspecified, the character mines with its currently held item.
+        requested_tool = str(plan.get("tool") or "").strip()
         if requested_tool:
             slot = _slot_for_item(requested_tool, before["inventory"])
             if slot is None:
