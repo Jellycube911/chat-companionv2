@@ -1,5 +1,51 @@
 # Chat Companion local brain
 
+## Autonomous physical training lab v1
+
+The first training laboratory lives in local-agent/training_lab.py. It tests
+five progressively useful physical capabilities in the ACTUAL loaded Minecraft
+world: observe nearby blocks, turn to an observed block, walk to a server-checked
+standable location, mine an observed natural block, and collect an existing
+dropped item. No fake game success, item grants, teleports, world resets, or
+pre-programmed gameplay solutions. Qwen proposes an action; the existing body
+executor actually performs it. The host separately evaluates outcome evidence.
+
+**Windows, single command:** With Ollama and your Minecraft world open, stop
+the normal Chat brain (close run.bat) and double-click train.bat in the brain
+folder. The normal brain and trainer both use an OS lock to prevent concurrent
+body control. Minecraft itself does NOT need to be restarted.
+
+You can also run:
+
+    python training_lab.py --rounds 2 --steps 3 --seed 7
+
+Requirements: Python dependencies from requirements.txt; local Ollama reachable
+at 127.0.0.1:11434 and the loaded NeoForge Chat bridge at 127.0.0.1:8765.
+The default local model is qwen3:8b, overridable using COMPANION_LOCAL_MODEL.
+The training runner forces the cloud teacher OFF and never uses an OpenAI model.
+
+Training changes natural terrain. Use a dedicated spare survival world/area.
+It does not create a new world or prepare ideal test scenarios automatically.
+A trial is marked unavailable when there is no real suitable block, standable
+location or dropped item. Those are not counted as successes. The collection
+stage cannot run until a dropped item actually exists.
+
+Reports are saved under data/training_reports/training-*.json, including each
+attempt, the validated hypothesis, real outcome evidence, timing, counts,
+failure reasons, and a basic reward. Observed episodes and skill trials are
+stored in the SAME existing data/companion_memory.sqlite3 for reuse across
+sessions, without erasing or replacing old memory. Skills are eligible for
+promotion only after multiple successful trials at different positions.
+
+Training automatically stops when a physical job remains pending so it cannot
+start another one on top of it. Tests with fake worlds exist ONLY for unit and
+regression checks; they must not be confused with actual verified Minecraft
+practice. A training run is not a guarantee of 90% task competence, neural-weight
+fine-tuning, headless gameplay, or automatically provisioned/reset scenarios.
+Those remain future milestones. Only Minecraft observations count as real
+training successes.
+
+
 This folder contains the local MCP brain used by the Minecraft companion.
 
 ## Negative search evidence (v16)
