@@ -511,6 +511,28 @@ class PracticeRegressions(unittest.TestCase):
         self.assertGreater(runtime["planner_backoff_until"], 0)
         post.assert_called_once()
 
+    def test_http_404_workstation_probe_recovers_without_main_loop_crash(self):
+        import requests
+        goal = {"source": "user", "id": 9, "title": "Obtain an axe"}
+        grid = ["minecraft:jungle_planks"] * 3 + [
+            "minecraft:stick"] * 2 + [""] * 4
+        runtime = {"pending_craft": {"goal_id": 9, "plan": {
+            "action": "craft", "intent": "craft wooden axe",
+            "width": 3, "height": 3, "grid": grid,
+        }}}
+        inventory = [
+            {"item": "minecraft:crafting_table", "count": 2},
+            {"item": "minecraft:jungle_planks", "count": 6},
+            {"item": "minecraft:stick", "count": 5},
+        ]
+        with patch.object(agent, "_post", side_effect=requests.HTTPError(
+            "404 Client Error: Not Found for url: http://127.0.0.1:8765/find-blocks"
+        )) as post, patch.object(agent, "log_event"):
+            plan = agent._resume_blocked_crafting(runtime, goal, inventory)
+        self.assertIsNone(plan)
+        self.assertGreater(runtime["planner_backoff_until"], 0)
+        post.assert_called_once()
+
     def test_missing_workstation_places_one_table_then_retries_recipe(self):
         craft = {"action": "craft", "intent": "craft wooden axe",
                  "width": 3, "height": 3,
