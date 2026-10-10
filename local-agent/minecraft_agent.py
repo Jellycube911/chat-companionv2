@@ -1170,6 +1170,27 @@ def _bind_planner_goal(plan, goal):
                   proposed_id=plan["goal_id"], real_id=goal["id"],
                   rationale=plan.get("goal_reason"), action=plan.get("action"))
         return corrected
+    # This is goal-ID reconciliation, NOT choosing a block or action.
+    # Qwen sometimes emits a symbolic "mine:minecraft:oak_log" ID.
+    # Rebind only if the action itself clearly targets the user's log goal.
+    if re.fullmatch(r"gather \d+ logs?", str(goal.get("title") or "").lower()):
+        if plan.get("action") == "scan_blocks":
+            filters = plan.get("contains") or plan.get("exact") or plan.get("filters") or []
+            if isinstance(filters, str):
+                filters = [filters]
+            relevant = (isinstance(filters, list) and bool(filters)
+                        and all(isinstance(item, str) and
+                                ("_log" in item or "logs" in item)
+                                for item in filters))
+        elif plan.get("action") == "mine":
+            block_type = str(plan.get("expected_block") or
+                             plan.get("expected_contains") or "")
+            relevant = block_type.endswith("_log") or block_type == "_log"
+        else:
+            relevant = False
+        if relevant:
+            return dict(plan, goal_id=goal["id"],
+                        goal_reason="test observed logs for the active gather instruction")
     return plan
 
 
