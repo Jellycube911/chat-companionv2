@@ -254,8 +254,11 @@ def _select_challenge(name, world, snapshot, rng):
             distance = _distance(origin, pos)
             if 1.0 <= distance <= 9.5:
                 usable.append((distance, block["type"], pos))
-        usable.sort(key=lambda sample: sample[0])
-        for _, block_type, pos in usable[:18]:
+        # During this introductory curriculum, tree trunks get the first
+        # chance to be evaluated: dense ground surfaces can otherwise exhaust
+        # the bounded target-probe budget before a nearby tree is considered.
+        usable.sort(key=lambda sample: (not sample[1].endswith("_log"), sample[0]))
+        for _, block_type, pos in usable[:24]:
             standable = []
             for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
                 neighbour = [pos[0] + dx, pos[1], pos[2] + dz]
