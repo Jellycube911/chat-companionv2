@@ -1358,5 +1358,114 @@ class GoalResourceRecoveryRegressions(unittest.TestCase):
         self.assertNotIn("pending_mining_obstruction", runtime)
 
 
+    def test_mining_approach_failure_forces_different_observed_target(self):
+        """Actual 2026-10-10 loop: never mine (203,67,-95) fourteen times."""
+        self.runtime["awareness"]["state"].update(
+            {"x": 203.5, "y": 71.0, "z": -94.51}
+        )
+        self.runtime["last_resource_scan"] = {
+            "at": agent.time.monotonic(),
+            "origin": {"x": 203.5, "y": 71.0, "z": -94.51},
+            "blocks": [
+                {"type": "minecraft:stone", "pos": [203, 67, -95]},
+                {"type": "minecraft:stone", "pos": [204, 67, -95]},
+            ],
+        }
+        attempted = []
+
+        def fail_approach(plan):
+            attempted.append(dict(plan))
+            return {"ok": False, "plan": plan,
+                    "result": {"state": "FAILED",
+                               "reason": "mining_no_standable_approach"}}
+
+        async def scenario():
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(
+                    agent, "store",
+                    __import__("memory_store").MemoryStore(
+                        Path(stack.enter_context(tempfile.TemporaryDirectory()))
+                        / "memory.sqlite3")))
+                stack.enter_context(patch.object(
+                    agent.store, "list_goals", return_value=[self.goal]))
+                stack.enter_context(patch.object(agent, "update_awareness"))
+                stack.enter_context(patch.object(agent, "_notify_once"))
+                stack.enter_context(patch.object(agent, "_report_planned_outcome"))
+                stack.enter_context(patch.object(agent, "_goal_progress_evidence"))
+                stack.enter_context(patch.object(agent, "record_body_action"))
+                stack.enter_context(patch.object(
+                    agent, "_resume_blocked_crafting", return_value=None))
+                stack.enter_context(patch.object(
+                    agent, "_general_recipe_goal_action", return_value=None))
+                stack.enter_context(patch.object(
+                    agent, "_local_fast_completion",
+                    side_effect=AssertionError("cached observation needs no model")))
+                stack.enter_context(patch.object(
+                    agent, "execute_plan", side_effect=fail_approach))
+                first = await agent.run_planned_action(None, self.runtime)
+                second = await agent.run_planned_action(None, self.runtime)
+                self.assertFalse(first["ok"])
+                self.assertFalse(second["ok"])
+                self.assertEqual(
+                    [tuple(plan[axis] for axis in ("x", "y", "z"))
+                     for plan in attempted],
+                    [(203, 67, -95), (204, 67, -95)]
+                )
+                self.assertEqual(len(self.runtime["invalid_targets"]), 2)
+        asyncio.run(scenario())
+
+    def test_approach_failures_are_quarantined(self):
+        for reason in ("mining_approach_stalled",
+                       "mining_no_standable_approach", "task_deadline"):
+            execution = {
+                "ok": False,
+                "plan": {"action": "mine", "x": 203, "y": 67, "z": -95},
+                "result": {"state": "FAILED", "reason": reason},
+            }
+            self.assertTrue(agent._target_failure_needs_replan(execution))
+
+    def test_late_minecraft_terminal_overrides_old_running_poll(self):
+        plan = {"action": "mine", "intent": "test stone approach",
+                "hypothesis": "walking should bring stone into reach",
+                "x": 203, "y": 67, "z": -95}
+        before = {"state": {"pos": [203.5, 71.0, -94.51],
+                            "job_active": False}, "inventory": []}
+        after = {"state": {
+            "pos": [203.5, 71.0, -94.51],
+            "job_active": False,
+            "last_job": {"type": "MINE", "state": "FAILED",
+                         "reason": "task_deadline"},
+        }, "inventory": []}
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(
+                practice, "_snapshot", side_effect=[before, after]))
+            stack.enter_context(patch.object(
+                practice, "_execute_action",
+                return_value={"state": "RUNNING", "reason": "approaching_block"}))
+            stack.enter_context(patch.object(
+                practice, "_record_learning", return_value=None))
+            stack.enter_context(patch.object(
+                practice, "_record_efficiency", return_value=None))
+            stack.enter_context(patch.object(practice.store, "record_event"))
+            result = practice.execute_plan(plan)
+        self.assertFalse(result["ok"])
+        self.assertNotEqual(result.get("status"), "pending")
+        self.assertEqual(result["result"]["state"], "FAILED")
+        self.assertEqual(result["result"]["reason"], "task_deadline")
+
+    def test_java_mining_distance_timeout_and_no_solid_fallback(self):
+        source = (
+            Path(__file__).resolve().parent.parent /
+            "neoforge/src/main/java/dev/chatcompanion/neoforge/CompanionService.java"
+        ).read_text(encoding="utf-8")
+        self.assertIn('companion.failJob("mining_approach_stalled")', source)
+        self.assertIn('companion.failJob("mining_no_standable_approach")', source)
+        self.assertIn("MiningApproach", source)
+        self.assertNotIn(
+            "getNavigation().moveTo(block.getX() + 0.5, block.getY(),",
+            source,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
