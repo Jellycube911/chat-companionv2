@@ -112,6 +112,10 @@ class FakeLocalPlanner:
             return plan
         if task == "collect":
             return {**base, "action": "collect"}
+        if task == "explore":
+            candidate = target["standable_candidates"][0]
+            return {**base, "action": "move_to",
+                    **dict(zip(("x", "y", "z"), candidate))}
         raise AssertionError(task)
 
 
@@ -160,6 +164,17 @@ class TrainingLabRegressions(unittest.TestCase):
              {"x": 61, "y": 87, "z": 180}),
             ({"action": "move_to", "target_pos": [54, 87, 173]},
              {"x": 54, "y": 87, "z": 173}),
+            ({"action": "move_to", "position": [71, 86, 175]},
+             {"x": 71, "y": 86, "z": 175}),
+            ({"action": "move_to", "standable_pos": [72, 86, 175]},
+             {"x": 72, "y": 86, "z": 175}),
+            ({"action": "move_to", "action_specific": {"pos": [73, 86, 175]}},
+             {"x": 73, "y": 86, "z": 175}),
+            ({"action": "look_at", "pos": [76, 86, 175]},
+             {"x": 76, "y": 86, "z": 175}),
+            ({"action": "move_to", "action_specific":
+              {"x": 77, "y": 86, "z": 175}},
+             {"x": 77, "y": 86, "z": 175}),
         ]
         for original, expected in examples:
             with self.subTest(original=original):
@@ -491,6 +506,84 @@ class TrainingLabRegressions(unittest.TestCase):
         # Not a failed movement or mining test: there is no reason to move.
         self.assertIsNotNone(lab._select_challenge(
             "mine", world, world.snapshot(), __import__("random").Random(0)))
+
+    def test_resources_with_lower_approach_y_are_not_falsely_unavailable(self):
+        """The uploaded report saw nearby logs but the old same-Y probe found
+        no safe approach under overhanging oak leaves."""
+        class SlopedWorld(FakePhysicalWorld):
+            def find(self, block_id, radius=7):
+                ids = [block_id] if isinstance(block_id, str) else list(block_id)
+                if "minecraft:oak_log" in ids:
+                    return [{"type": "minecraft:oak_log", "x": 13,
+                             "y": 65, "z": 11}]
+                return []
+            def at(self, x, y, z):
+                # Feet on ground Y=64, log base Y=65, solid at Y=63.
+                # Canopies make same-Y tree neighbors occupied.
+                return {"ok": True, "air": y == 64,
+                        "solid_support_up": y == 63}
+        world = SlopedWorld()
+        found = lab._select_challenge(
+            "mine", world, world.snapshot(), __import__("random").Random(4))
+        self.assertIsNotNone(found)
+        self.assertEqual(found.target["pos"], [13, 65, 11])
+        self.assertTrue(all(p[1] == 64 for p in found.target["standable_candidates"]))
+
+    def test_environment_deadlock_uses_model_chosen_physical_exploration(self):
+        class NoResources(FakePhysicalWorld):
+            def find(self, block_id, radius=7):
+                return []
+        world = NoResources()
+        with tempfile.TemporaryDirectory() as tmp:
+            db = MemoryStore(Path(tmp) / "memory.sqlite3")
+            with patch.object(lab, "store", db), patch.object(lab, "log_event"):
+                result = lab.run_training(
+                    world, FakeLocalPlanner(), rounds=2, max_steps=2,
+                    report_dir=Path(tmp))
+            explore = [e for e in result["episodes"] if e["task"] == "explore"]
+            self.assertEqual(len(explore), 2)
+            self.assertTrue(all(e["status"] == "passed" for e in explore), explore)
+            self.assertEqual(result["summary"]["exploration_moves"], 2)
+            self.assertEqual(len(db.recent_skill_trials("training.navigate")), 0)
+            self.assertEqual(len(db.recent_skill_trials("training.mine")), 0)
+            self.assertEqual(len(db.recent_skill_trials("training.explore")), 2)
+            self.assertGreater(lab._distance(world.pos, [10.5, 64.0, 10.5]), 3)
+
+    def test_exploration_only_allows_world_verified_standing_spots(self):
+        world = FakePhysicalWorld()
+        snapshot = world.snapshot()
+        scenario = lab._exploration_challenge(world, snapshot)
+        self.assertIsNotNone(scenario)
+        self.assertTrue(scenario.target["standable_candidates"])
+        legitimate = scenario.target["standable_candidates"][0]
+        self.assertEqual(lab._plan_allowed({
+            "action": "move_to", **dict(zip(("x", "y", "z"), legitimate))
+        }, scenario), (True, "ok"))
+        self.assertEqual(lab._plan_allowed({
+            "action": "move_to", "x": 999, "y": 64, "z": 999
+        }, scenario)[1], "unobserved_coordinates")
+        self.assertFalse(lab._verify(scenario, snapshot, snapshot, {
+            "ok": True, "plan": {"action": "move_to"},
+            "result": {"state": "COMPLETED"}
+        })[0])
+
+    def test_unchanged_terrain_cannot_drive_infinite_observe_orient_loop(self):
+        class NoPossibleGround(FakePhysicalWorld):
+            def find(self, block_id, radius=7):
+                return []
+            def at(self, x, y, z):
+                return {"ok": True, "air": False, "solid_support_up": False}
+        world = NoPossibleGround()
+        with tempfile.TemporaryDirectory() as tmp:
+            db = MemoryStore(Path(tmp) / "memory.sqlite3")
+            with patch.object(lab, "store", db), patch.object(lab, "log_event"):
+                report = lab.run_training(
+                    world, FakeLocalPlanner(), rounds=30, max_steps=1,
+                    report_dir=Path(tmp))
+            self.assertTrue(report["summary"]["stopped_due_to_environment"])
+            self.assertEqual(len(report["episodes"]), 18)
+            self.assertEqual(report["summary"]["physical_actions"], 3)
+            self.assertEqual(report["summary"]["exploration_moves"], 0)
 
     def test_mining_eligibility_uses_observed_exposed_block_beyond_five_blocks(self):
         class TreeSixBlocksAway(FakePhysicalWorld):
