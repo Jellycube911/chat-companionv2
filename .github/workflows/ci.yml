@@ -381,7 +381,9 @@ jobs:
           asyncio.run(main())
           PY
       - name: Practice loop regression tests
-        run: python -m unittest discover -s local-agent -p 'test_practice_regressions.py' -v
+        run: |
+          python -m py_compile local-agent/training_lab.py local-agent/training_progress.py
+          python -m unittest discover -s local-agent -p 'test_practice_regressions.py' -v
       - name: Core tests, loader builds and real server GameTests
         env:
           JAVA_TOOL_OPTIONS: -Xverify:all
@@ -402,6 +404,9 @@ jobs:
             local-agent/skill_executor.py
             local-agent/action_log.py
             local-agent/practice_engine.py
+            local-agent/training_lab.py
+            local-agent/training_progress.py
+            local-agent/train.bat
             local-agent/knowledge_engine.py
             local-agent/body_truth.py
             local-agent/requirements.txt
