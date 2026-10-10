@@ -353,6 +353,93 @@ class PracticeRegressions(unittest.TestCase):
             agent._handle_craft_learning(runtime, plan, {"ok": True}, goal, [])
             self.assertEqual(runtime["failed_craft_attempts"], 0)
 
+    def test_nearby_place_probes_real_support_before_trying(self):
+        tried = []
+        def post(path, payload=None):
+            tried.append((path, payload))
+            if path == "/block-at":
+                if payload["y"] == 65:
+                    return {"ok": True, "air": True, "replaceable": True}
+                return {"ok": True, "air": False, "solid_support_up": True}
+            return {"ok": True}
+        with patch.object(practice, "_get", return_value={
+            "x": 10.5, "y": 65.0, "z": 20.5
+        }), patch.object(practice, "_post", side_effect=post), patch.object(
+            practice, "_wait_for_job", return_value={
+                "state": "COMPLETED", "reason": "block_placed"
+            }
+        ):
+            done = practice._place_nearby(7)
+        self.assertEqual(done["state"], "COMPLETED")
+        self.assertEqual(done["placed_at"], [11, 65, 20])
+        placed = [payload for path, payload in tried if path == "/place-block"]
+        self.assertEqual(len(placed), 1)
+        self.assertEqual(placed[0]["inventory_slot"], 7)
+
+    def test_no_solid_support_never_attempts_placement(self):
+        attempts = []
+        def post(path, payload=None):
+            attempts.append(path)
+            if payload["y"] == 65:
+                return {"ok": True, "air": True, "replaceable": True}
+            return {"ok": True, "air": True, "solid_support_up": False}
+        with patch.object(practice, "_get", return_value={
+            "x": 10.5, "y": 65.0, "z": 20.5
+        }), patch.object(practice, "_post", side_effect=post):
+            result = practice._place_nearby(7)
+        self.assertFalse(result["ok"])
+        self.assertIn("no empty target with solid upper support", result["error"])
+        self.assertNotIn("/place-block", attempts)
+
+    def test_failed_place_preserves_actual_job_reason(self):
+        def post(path, payload=None):
+            if path == "/block-at":
+                if payload["y"] == 65:
+                    return {"ok": True, "air": True, "replaceable": True}
+                return {"ok": True, "air": False, "solid_support_up": True}
+            return {"ok": True}
+        with patch.object(practice, "_get", return_value={
+            "x": 10.5, "y": 65.0, "z": 20.5
+        }), patch.object(practice, "_post", side_effect=post), patch.object(
+            practice, "_wait_for_job", return_value={
+                "state": "FAILED", "reason": "placement_alignment_timeout"
+            }
+        ):
+            result = practice._place_nearby(7)
+        self.assertFalse(result["ok"])
+        self.assertIn("placement_alignment_timeout", result["error"])
+        self.assertTrue(result["failures"])
+
+    def test_crafting_table_placement_unlocks_previously_rejected_recipe(self):
+        axe_plan = {
+            "action": "craft", "width": 3, "height": 3,
+            "grid": ["minecraft:jungle_planks"] * 3 + [""] * 6,
+        }
+        recipe_key = agent._plan_target_key(axe_plan)
+        malformed = agent._plan_target_key({
+            "action": "craft", "width": 1, "height": 1,
+            "grid": ["minecraft:stick", "minecraft:stick"],
+        })
+        runtime = {"invalid_targets": {
+            recipe_key: (100.0, "A 3x3 recipe requires a crafting table within reach."),
+            malformed: (100.0, "craft_grid_size_mismatch: requires 1 item"),
+        }}
+        place = {"action": "place", "item": "minecraft:crafting_table"}
+        near_key = agent._plan_target_key(place)
+        runtime["invalid_targets"][near_key] = (100.0, "no_valid_placement")
+        cleared = agent._clear_resolved_placement_blockers(
+            runtime, place, {"ok": True}
+        )
+        self.assertIn(recipe_key, cleared)
+        self.assertNotIn(recipe_key, runtime["invalid_targets"])
+        self.assertNotIn(near_key, runtime["invalid_targets"])
+        self.assertIn(malformed, runtime["invalid_targets"])
+        self.assertEqual(agent._invalid_target_ttl(near_key), 90.0)
+        self.assertTrue(agent._target_failure_needs_replan({
+            "ok": False, "plan": place,
+            "result": {"ok": False, "error": "no_valid_placement"},
+        }))
+
     def test_target_key_ignores_hypothesis_wording(self):
         a = {"action": "mine", "x": 205, "y": 71, "z": -120, "hypothesis": "A"}
         b = dict(a, hypothesis="B", tool="minecraft:string")
