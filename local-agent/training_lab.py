@@ -194,11 +194,45 @@ def _walkable(world, xyz):
             and bool(support.get("solid_support_up")))
 
 
-def _select_challenge(name, world, snapshot, rng):
+def _resource_candidates(world, origin):
+    """Observe actual exposed resources and find walkable mining approaches.
+
+    This only chooses safe test scenarios. The local model still decides what
+    action to try and the game verifies whether it worked.
+    """
+    logs = tuple(v for v in PRACTICE_MATERIALS if v.endswith("_log"))
+    terrain = tuple(v for v in PRACTICE_MATERIALS if not v.endswith("_log"))
+    seen = world.find(logs, radius=10) + world.find(terrain, radius=10)
+    usable = []
+    for block in seen:
+        pos = [block.get(k) for k in ("x", "y", "z")]
+        if block.get("type") not in PRACTICE_MATERIALS:
+            continue
+        if not all(isinstance(v, int) and not isinstance(v, bool) for v in pos):
+            continue
+        if abs(pos[1] - origin[1]) > 3.0:
+            continue
+        distance = _distance(origin, [v + 0.5 for v in pos])
+        if 1.0 <= distance <= 9.5:
+            usable.append((distance, block["type"], pos))
+    usable.sort(key=lambda sample: (not sample[1].endswith("_log"), sample[0]))
+    candidates = []
+    for _, block_type, pos in usable[:24]:
+        standable = []
+        for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            neighbour = [pos[0] + dx, pos[1], pos[2] + dz]
+            if _walkable(world, neighbour):
+                standable.append(neighbour)
+        if standable:
+            candidates.append({"type": block_type, "pos": pos,
+                               "standable_candidates": standable})
+    return candidates
+
+
+def _select_challenge(name, world, snapshot, rng, preferred_resource=None):
     state, blocks = snapshot["state"], snapshot["blocks"]
     origin = _position(state)
     dim = str(state.get("dimension") or "unknown")
-    # The curriculum picks scenarios from live observations, NOT action plans.
     candidates = [
         b for b in blocks
         if b.get("type") and b.get("nearestX") is not None
@@ -222,78 +256,60 @@ def _select_challenge(name, world, snapshot, rng):
                           "pos": [int(b["nearestX"]), int(b["nearestY"]),
                                   int(b["nearestZ"])]},
                          ("look_at",), dim)
-    if name == "navigate":
-        bx, by, bz = (math.floor(v) for v in origin)
-        offsets = [(dx, dz) for dx in (-4, -3, 3, 4)
-                   for dz in (-4, -3, 3, 4)]
-        rng.shuffle(offsets)
-        for dx, dz in offsets:
-            point = [bx + dx, by, bz + dz]
-            if _walkable(world, point):
-                return Challenge(name,
-                                 "Walk to this world-confirmed standable location",
-                                 {"pos": point}, ("move_to",), dim)
-        return None
-    if name == "mine":
-        # /nearby-blocks aggregates only each block type's nearest position.
-        # It misses reachable trees if the target is >5 blocks away, and often
-        # shows stone under the companion's feet. Ask the REAL bridge for
-        # exposed candidate blocks instead; never conjure mining coordinates.
-        # Use separate observation filters so a crowded field of nearby
-        # ground blocks cannot consume the server's result limit and hide a
-        # physically reachable tree. Both lists come from actual block scans.
-        logs = tuple(v for v in PRACTICE_MATERIALS if v.endswith("_log"))
-        terrain = tuple(v for v in PRACTICE_MATERIALS if not v.endswith("_log"))
-        seen = world.find(logs, radius=10) + world.find(terrain, radius=10)
-        usable = []
-        for block in seen:
-            pos = [block.get(k) for k in ("x", "y", "z")]
-            if block.get("type") not in PRACTICE_MATERIALS:
-                continue
-            if not all(isinstance(v, int) and not isinstance(v, bool)
-                       for v in pos):
-                continue
-            if abs(pos[1] - origin[1]) > 3.0:
-                continue
-            distance = _distance(origin, pos)
-            if 1.0 <= distance <= 9.5:
-                usable.append((distance, block["type"], pos))
-        # During this introductory curriculum, tree trunks get the first
-        # chance to be evaluated: dense ground surfaces can otherwise exhaust
-        # the bounded target-probe budget before a nearby tree is considered.
-        usable.sort(key=lambda sample: (not sample[1].endswith("_log"), sample[0]))
-        for _, block_type, pos in usable[:24]:
-            standable = []
-            for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                neighbour = [pos[0] + dx, pos[1], pos[2] + dz]
-                if _walkable(world, neighbour):
-                    standable.append(neighbour)
-            if standable:
-                return Challenge(
-                    name, "Mine a confirmed exposed natural block physically",
-                    {"type": block_type, "pos": pos,
-                     "standable_candidates": standable},
-                    ("mine", "scan_blocks", "look_at", "move_to"), dim)
-        return None
-    if name == "gather_wood":
-        # Stage 2 only receives real, exposed logs with a server-checked
-        # standing location. It must still choose and physically execute
-        # scanning, approach, mining and pickup actions.
-        trial = _select_challenge("mine", world, snapshot, rng)
-        if trial is None or not trial.target["type"].endswith("_log"):
+    if name in {"navigate", "mine", "gather_wood"}:
+        resources = _resource_candidates(world, origin)
+        if name == "navigate":
+            # Navigate toward a *resource*, not an unrelated random waypoint.
+            # Choose an actual, walkable standing spot next to the target.
+            # Near-enough resources are for mining practice instead.
+            for resource in resources:
+                center = [v + 0.5 for v in resource["pos"]]
+                before_resource = _distance(origin, center)
+                if before_resource < 3.5:
+                    continue
+                choices = []
+                for standing in resource["standable_candidates"]:
+                    approach = [standing[0] + 0.5, standing[1],
+                                standing[2] + 0.5]
+                    if (_distance(origin, approach) >= 2.0 and
+                        before_resource - _distance(approach, center) >= 0.6):
+                        choices.append(( _distance(origin, approach), standing))
+                if choices:
+                    choices.sort(key=lambda row: row[0])
+                    return Challenge(
+                        name, "Approach the observed " + resource["type"] +
+                        " by walking to a world-verified standing position beside it",
+                        {"pos": choices[0][1], "resource_pos": resource["pos"],
+                         "resource_type": resource["type"],
+                         "standable_candidates": resource["standable_candidates"]},
+                        ("move_to",), dim)
+            return None
+        if name == "mine":
+            if not resources:
+                return None
+            selected = next((
+                r for r in resources if preferred_resource
+                and r["pos"] == preferred_resource.get("pos")
+                and r["type"] == preferred_resource.get("type")
+            ), resources[0])
+            return Challenge(
+                name, "Mine a confirmed exposed natural block physically",
+                selected, ("mine", "scan_blocks", "look_at", "move_to"), dim)
+        # Stage 2 must choose an actual existing log, not whatever terrain
+        # happens to be nearest. It must prove the item was really acquired.
+        wood = next((r for r in resources if r["type"].endswith("_log")), None)
+        if wood is None:
             return None
         return Challenge(
-            name,
-            "Independently gather one naturally occurring log, from finding it "
+            name, "Independently gather one naturally occurring log, from finding it "
             "to physical mining and possession in companion inventory",
-            trial.target,
-            ("scan_blocks", "look_at", "move_to", "mine", "collect"), dim)
+            wood, ("scan_blocks", "look_at", "move_to", "mine", "collect"), dim)
     if name == "collect":
         entities = [e for e in snapshot["entities"]
                     if e.get("droppedItem")
                     and float(e.get("distance") or 99) <= 5.5]
         if not entities:
-            return None  # Cannot create a drop out of nothing.
+            return None
         e = rng.choice(entities[:5])
         return Challenge(name, "Physically pick up the observed dropped item",
                          {"item": e["droppedItem"],
@@ -542,9 +558,25 @@ def _verify(challenge, before, after, execution, previous_attempts=(),
     if challenge.name == "navigate":
         prior = _distance(_position(before["state"]), target["pos"])
         current = _distance(_position(after["state"]), target["pos"])
-        return (action == "move_to" and current <= 2.5
-                and prior - current > 0.5,
-                "distance_before=%.2f after=%.2f" % (prior, current))
+        resource_pos = target.get("resource_pos")
+        if resource_pos is None:
+            # Preserve evaluation of old single-waypoint examples in tests;
+            # new challenges always have an observed resource as well.
+            return (action == "move_to" and current <= 2.5
+                    and prior - current > 0.5,
+                    "distance_before=%.2f after=%.2f" % (prior, current))
+        center = [v + 0.5 for v in resource_pos]
+        resource_before = _distance(_position(before["state"]), center)
+        resource_after = _distance(_position(after["state"]), center)
+        passed = (action == "move_to" and current <= 2.5
+                  and prior - current > 0.5
+                  and resource_after <= 4.5
+                  and resource_before - resource_after > 0.5)
+        return passed, (
+            "waypoint_before=%.2f after=%.2f|resource=%s|"
+            "resource_before=%.2f after=%.2f" %
+            (prior, current, target["resource_type"],
+             resource_before, resource_after))
     if challenge.name == "mine":
         result = execution.get("result") or {}
         metrics = practice._parse_mining_metrics(result)
@@ -704,6 +736,7 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
     finished_due_to_time = False
     unproductive_rounds = 0
     for repetition in range(rounds):
+        preferred_resource = None
         round_actions_start = sum(
             len([a for a in episode.get("experiments", [])
                  if a.get("status") in {"completed", "failed", "progress"}])
@@ -718,7 +751,9 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
                 finished_due_to_time = True
                 break
             initial = world.snapshot()
-            challenge = _select_challenge(task, world, initial, rng)
+            challenge = _select_challenge(
+                task, world, initial, rng,
+                preferred_resource if task == "mine" else None)
             if challenge is None:
                 record = {"round": repetition + 1, "task": task,
                           "status": "unavailable", "reason": "no_natural_valid_scenario",
@@ -821,6 +856,11 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
                 "reason": outcome, "experiments": attempts,
             }
             report["episodes"].append(record)
+            if task == "navigate" and verified:
+                preferred_resource = {
+                    "type": challenge.target["resource_type"],
+                    "pos": challenge.target["resource_pos"],
+                }
             print("[TRAIN] %-8s %-11s %d action(s)  %s" %
                   (task, record["status"], record["attempts"], outcome[:90]),
                   flush=True)
