@@ -18,10 +18,11 @@ def output_for_goal(title):
 
 
 def item_counts(inventory):
-    return Counter({
-        str(row.get("item")): int(row.get("count") or 0)
-        for row in inventory or [] if row.get("item")
-    })
+    counts = Counter()
+    for row in inventory or []:
+        if row.get("item"):
+            counts[str(row["item"])] += int(row.get("count") or 0)
+    return counts
 
 
 def recipe_grid(recipe, inventory):
