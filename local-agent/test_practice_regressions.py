@@ -672,6 +672,95 @@ class PracticeRegressions(unittest.TestCase):
         post.assert_called_once()
         self.assertEqual(post.call_args.args[0], "/find-blocks")
 
+    def test_generic_crafting_goal_without_handwritten_item_rule(self):
+        with patch.object(agent, "_remember_behavior_feedback"), patch.object(
+            agent, "_ensure_user_goal",
+            return_value={"id": 51, "title": "Craft minecraft:furnace"},
+        ) as goal:
+            request = asyncio.run(agent.fast_task_intent("craft a furnace"))
+        self.assertEqual(request["title"], "Craft minecraft:furnace")
+        goal.assert_called_once_with("Craft minecraft:furnace", "craft a furnace", 9)
+
+    def test_recipe_knowledge_handles_inventory_alternatives_and_modded_items(self):
+        import knowledge_engine as knowledge
+        inventory = [
+            {"item": "minecraft:jungle_planks", "count": 2},
+            {"item": "minecraft:jungle_planks", "count": 1},
+            {"item": "minecraft:stick", "count": 2},
+        ]
+        recipes = [{
+            "recipe_id": "examplemod:axe_like_item",
+            "output": "examplemod:axe_like_item",
+            "count": 1, "width": 3, "height": 3,
+            "ingredients": [
+                ["minecraft:oak_planks", "minecraft:jungle_planks"],
+                ["minecraft:oak_planks", "minecraft:jungle_planks"],
+                [], ["minecraft:oak_planks", "minecraft:jungle_planks"],
+                ["minecraft:stick"], [], [], ["minecraft:stick"], [],
+            ],
+        }]
+        goal = {"id": 51, "title": "Craft examplemod:axe_like_item"}
+        plan, reason, trace = knowledge.decide_recipe(
+            goal, inventory, lambda _: {"ok": True, "recipes": recipes},
+        )
+        self.assertEqual(reason, "ready")
+        self.assertEqual(plan["grid"][0], "minecraft:jungle_planks")
+        self.assertEqual(plan["expected_output"], "examplemod:axe_like_item")
+        self.assertEqual(plan["recipe_id"], "examplemod:axe_like_item")
+        self.assertEqual(trace[0]["missing"], {})
+
+    def test_general_recipe_dependencies_make_intermediate_items_first(self):
+        import knowledge_engine as knowledge
+        items = {
+            "minecraft:torch": [{
+                "recipe_id": "minecraft:torch", "output": "minecraft:torch",
+                "width": 1, "height": 2,
+                "ingredients": [["minecraft:coal"], ["minecraft:stick"]],
+            }],
+            "minecraft:stick": [{
+                "recipe_id": "minecraft:stick", "output": "minecraft:stick",
+                "width": 1, "height": 2,
+                "ingredients": [["minecraft:jungle_planks"], ["minecraft:jungle_planks"]],
+            }],
+        }
+        inventory = [
+            {"item": "minecraft:coal", "count": 2},
+            {"item": "minecraft:jungle_planks", "count": 3},
+        ]
+        plan, reason, chain = knowledge.decide_recipe(
+            {"id": 72, "title": "Craft minecraft:torch"}, inventory,
+            lambda output: {"ok": True, "recipes": items.get(output, [])},
+        )
+        self.assertEqual(plan["expected_output"], "minecraft:stick")
+        self.assertEqual(plan["grid"], ["minecraft:jungle_planks"] * 2)
+        self.assertTrue(reason.startswith("intermediate:"))
+
+    def test_recipe_bridge_failure_does_not_invent_a_knowledge_result(self):
+        import knowledge_engine as knowledge
+        action, reason, chain = knowledge.decide_recipe(
+            {"id": 51, "title": "Craft minecraft:furnace"}, [],
+            lambda _: {"ok": False, "error": "404"},
+        )
+        self.assertIsNone(action)
+        self.assertEqual(reason, "recipe_service_unavailable")
+        self.assertFalse(chain)
+
+    def test_generic_craft_goal_requires_authoritative_result(self):
+        goal = {"id": 71, "title": "Craft minecraft:furnace", "source": "user"}
+        with patch.object(agent.store, "list_goals", return_value=[goal]), patch.object(
+            agent.store, "update_goal"
+        ) as update:
+            self.assertEqual(agent._reconcile_user_goals({
+                "after": {"inventory": [{"item": "minecraft:furnace", "count": 1}]}
+            }), [])
+            update.assert_not_called()
+            result = agent._reconcile_user_goals({
+                "ok": True, "plan": {"action": "craft"},
+                "result": {"ok": True, "item": "minecraft:furnace"},
+            })
+            self.assertTrue(result)
+            update.assert_called_once_with(71, status="completed")
+
     def test_static_http_routes_exist_in_neoforge_bridge(self):
         # A previous regression invented /scan-blocks, and the test suite
         # accidentally reinforced the typo. Check against real Java routes.
