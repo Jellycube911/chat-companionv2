@@ -119,11 +119,27 @@ def assess_training(memory, session_episodes=()):
             "graduated": all(requirements.values()),
         }
     pending_any = any(e.get("status") == "pending" for e in session_episodes)
-    ready = all(s["graduated"] for s in skills.values()) and not pending_any
+    basics_ready = all(s["graduated"] for s in skills.values()) and not pending_any
+    exam_trials = memory.recent_skill_trials("training.stage1_exam", 100)
+    exam_successes = [e for e in exam_trials
+                      if e.get("success") and e.get("evidence_status") == "verified"]
+    # The practical is a separate physical gate: five rehearsed skills alone
+    # never imply the agent can combine them without individual prompts.
+    practical_passed = bool(exam_successes)
+    ready = basics_ready and practical_passed
     return {
         "stage": 2 if ready else 1,
         "stage_name": "independent_wood_gathering" if ready else "basic_physical_skills",
         "stage_1_graduated": ready,
+        "basic_skills_ready_for_exam": basics_ready,
+        "practical_exam": {
+            "passed": practical_passed,
+            "verified_successes": len(exam_successes),
+            "required_successes": 1,
+            "independent_full_sequence_required": True,
+            "physical_actions_required": [
+                "scan_blocks", "move_to", "look_at", "mine", "collect"],
+        },
         "skills": skills,
         "graduated_count": sum(s["graduated"] for s in skills.values()),
         "required_skill_count": len(BASIC_SKILLS),
@@ -139,5 +155,6 @@ def assess_training(memory, session_episodes=()):
             "pending_jobs_block_advancement": True,
             "format_only_failures_count": False,
             "unavailable_tasks_count": False,
+            "uncoached_practical_exam_required": True,
         },
     }
