@@ -42,7 +42,7 @@ AMBIENT_WANDER_INTERVAL = 22.0
 REFLEX_COOLDOWN = 4.0
 LEARNING_COOLDOWN_SECONDS = 1800
 TEACHER_MAX_OUTPUT_TOKENS = 700
-AGENT_BUILD = "self-learning-local-brain-v16-negative-scan-evidence-2026-10-10"
+AGENT_BUILD = "self-learning-local-brain-v17-verified-goal-boundaries-2026-10-10"
 BASE_DIR = Path(__file__).resolve().parent
 
 set_tracing_disabled(True)
@@ -652,9 +652,17 @@ def build_practice_plan_input(runtime, directive=None):
     if recent_subgoal:
         parts.append(f"RECENT USER INSTRUCTION (temporary subgoal): {recent_subgoal}")
 
+    user_objective = next((g for g in goals if g.get("source") == "user"), None)
+    if user_objective:
+        parts.append(
+            "AUTHORITATIVE USER OBJECTIVE: ID=" + str(user_objective["id"])
+            + " TITLE=" + str(user_objective["title"])
+            + ". All next actions must advance THIS objective. Other stored "
+            "goals are not alternative tasks. The host validates their goal IDs."
+        )
     if goals:
         parts.append("ACTIVE GOALS:")
-        for goal in goals:
+        for goal in ([user_objective] if user_objective else goals):
             parts.append(
                 f"- #{goal['id']} p{goal['priority']} {goal['title']}: "
                 f"{_trim(goal['description'], 220)}"
@@ -796,6 +804,16 @@ def build_practice_plan_input(runtime, directive=None):
         "try a different reachable target or change the approach. "
         "Show concise decisions and verified results in the brain console. "
         "Do not confuse a scanned resource with an obtained resource."
+    )
+    parts.append(
+        "ACTION JSON CONTRACT: scan_blocks MUST provide contains or exact "
+        "as a list of block-name filters (never just target or pos). "
+        "mine, move_to and look_at MUST provide numeric x,y,z coordinates "
+        "from actual Minecraft observations, never guessed or formatted as "
+        "target_block/pos. If coordinates are unknown, use scan_blocks first. "
+        "The active user's goal_id is the AUTHORITATIVE ID above, never an "
+        "older goal ID from memory. A failed plan will be returned for "
+        "correction, not physically executed. "
     )
     parts.append(
         "Choose ONE next primitive that best advances the current user directive "
@@ -1097,6 +1115,86 @@ def _plan_matches_user_goal(plan, goal, subgoal=""):
         }
         return bool(subgoal_words & set(re.findall(r"[a-z]{3,}", rationale)))
     return False
+
+
+
+def _bind_planner_goal(plan, goal):
+    """Resolve planner metadata using the authoritative active user goal.
+
+    A model-chosen numeric goal ID is a claim, not a source of truth.
+    Rebind ONLY when its written rationale unambiguously names the real goal.
+    Never permit this to supply unobserved physical coordinates.
+    """
+    if not goal or not isinstance(plan, dict) or plan.get("goal_id") is None:
+        return plan
+    try:
+        if int(plan["goal_id"]) == int(goal["id"]):
+            return plan
+    except (TypeError, ValueError, KeyError):
+        return plan
+    ignored = {"craft", "make", "obtain", "some", "another", "with", "from",
+               "the", "for", "your", "collect", "gather", "build", "an"}
+    required = set(re.findall(r"[a-z0-9]+",
+                      str(goal.get("title") or "").lower().replace("_", " "))) - ignored
+    claim = set(re.findall(r"[a-z0-9]+",
+                  str(plan.get("goal_reason") or "").lower().replace("_", " ")))
+    # Require two meaningful goal terms to avoid confusing an unrelated
+    # objective just because both involve 'stone' or 'wood'.
+    if len(required) >= 2 and required.issubset(claim):
+        corrected = dict(plan, goal_id=goal["id"])
+        log_event("practice_host", "planner_goal_id_rebound",
+                  proposed_id=plan["goal_id"], real_id=goal["id"],
+                  rationale=plan.get("goal_reason"), action=plan.get("action"))
+        return corrected
+    return plan
+
+
+def _normalize_planner_scan(plan):
+    """Interpret a block filter alias, never a fabricated mining coordinate."""
+    if not isinstance(plan, dict) or plan.get("action") != "scan_blocks":
+        return plan
+    if plan.get("contains") or plan.get("exact"):
+        return plan
+    block = plan.get("target_block")
+    if isinstance(block, str) and re.fullmatch(r"[a-z0-9_]+:[a-z0-9_./-]+", block):
+        return dict(plan, contains=[block], radius=12, limit=12)
+    return plan
+
+
+def _planner_shape_error(plan):
+    """Refuse non-executable plans before physical calls or skill recording."""
+    if not isinstance(plan, dict):
+        return "not_a_json_action"
+    action = plan.get("action")
+    if action == "scan_blocks":
+        if not (plan.get("contains") or plan.get("exact")):
+            return "scan_requires_contains_or_exact"
+        try:
+            scan_query(plan)
+        except (ValueError, TypeError, OverflowError):
+            return "invalid_scan_parameters"
+    if action in {"mine", "move_to", "look_at"} or (
+            action == "place" and any(plan.get(k) is not None for k in ("x", "y", "z"))):
+        try:
+            coords = [float(plan[k]) for k in ("x", "y", "z")]
+        except (KeyError, ValueError, TypeError, OverflowError):
+            return "physical_action_requires_numeric_xyz"
+        if not all(math.isfinite(v) for v in coords):
+            return "nonfinite_physical_coordinates"
+    if action == "equip" and plan.get("slot") is None and not plan.get("item"):
+        return "equip_requires_real_inventory_item_or_slot"
+    if action == "place" and plan.get("slot") is None and not plan.get("item"):
+        return "place_requires_inventory_item_or_slot"
+    if action == "craft":
+        try:
+            width, height = int(plan["width"]), int(plan["height"])
+            if not (1 <= width <= 3 and 1 <= height <= 3):
+                return "invalid_craft_dimensions"
+            if len(plan["grid"]) != width * height:
+                return "craft_grid_size_mismatch"
+        except (KeyError, ValueError, TypeError, OverflowError):
+            return "craft_requires_matching_dimensions_and_grid"
+    return None
 
 
 def _goal_navigation_count(runtime, goal, inventory):
@@ -2288,6 +2386,33 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         (goal for goal in store.list_goals("active", 20) if goal.get("source") == "user"),
         None,
     )
+    plan = _normalize_planner_scan(_bind_planner_goal(plan, user_goal))
+    malformed = _planner_shape_error(plan)
+    if malformed:
+        log_event("practice_host", "planner_schema_rejected",
+                  plan=plan, cause=malformed)
+        correction = await _local_fast_completion(
+            runtime, PRACTICE_PLANNER_INSTRUCTIONS,
+            prompt + "\nYOUR ACTION COULD NOT EXECUTE. Error: " + malformed
+            + "\nRejected: " + json.dumps(plan, ensure_ascii=False)[:850]
+            + "\nReturn one corrected JSON action with valid schema; "
+            "for mine use an OBSERVED x,y,z, for scan_blocks use contains/exact. "
+            "Use the current authoritative goal ID. JSON only.",
+            json_mode=True, max_tokens=220,
+        )
+        candidate = parse_plan(correction)
+        candidate = _normalize_planner_scan(_bind_planner_goal(candidate, user_goal))
+        if (candidate is None or _planner_shape_error(candidate)
+                or not _plan_matches_user_goal(
+                    candidate, user_goal, directive or _current_user_subgoal(runtime)
+                ) or not _scan_serves_user_goal(runtime, candidate, user_goal)):
+            runtime["planner_backoff_until"] = time.monotonic() + 20.0
+            log_event("practice_host", "planner_schema_stalled",
+                      initial=malformed, revision=candidate)
+            return {"ok": False, "status": "planner_schema_stalled",
+                    "plan": plan, "error": malformed}
+        log_event("practice_host", "planner_schema_repaired", plan=candidate)
+        plan = candidate
     exhausted = (
         source == "practice"
         and user_goal is not None
@@ -2356,9 +2481,9 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
             + "\n" + restriction + "\nReturn a DIFFERENT JSON action.",
             json_mode=True, max_tokens=180,
         )
-        revision = parse_plan(raw_revision)
+        revision = _normalize_planner_scan(_bind_planner_goal(parse_plan(raw_revision), user_goal))
         invalid = (
-            revision is None
+            revision is None or _planner_shape_error(revision) is not None
             or not _plan_matches_user_goal(
                 revision, user_goal, directive or _current_user_subgoal(runtime)
             )
@@ -2409,10 +2534,11 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
             "Return ONE JSON object.",
             json_mode=True, max_tokens=220,
         )
-        revised = parse_plan(alternate)
+        revised = _normalize_planner_scan(_bind_planner_goal(parse_plan(alternate), user_goal))
         revised_key = _plan_target_key(revised) if revised is not None else None
         if (
-            revised is None or revised_key == target_key
+            revised is None or _planner_shape_error(revised) is not None
+            or revised_key == target_key
             or not _plan_matches_user_goal(
                 revised, user_goal, directive or _current_user_subgoal(runtime)
             )
@@ -2442,10 +2568,11 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
             "radius is not new information. Do not invent coordinates. JSON only.",
             json_mode=True, max_tokens=220,
         )
-        revision = parse_plan(alternate)
+        revision = _normalize_planner_scan(_bind_planner_goal(parse_plan(alternate), user_goal))
         revised_key = _plan_target_key(revision) if revision else None
         if (
-            revision is None or _covered_empty_scan(runtime, revision)
+            revision is None or _planner_shape_error(revision) is not None
+            or _covered_empty_scan(runtime, revision)
             or not _plan_matches_user_goal(
                 revision, user_goal, directive or _current_user_subgoal(runtime)
             )
