@@ -211,7 +211,7 @@ def _select_challenge(name, world, snapshot, rng):
         if not facing:
             return None
         b = rng.choice(facing[:8])
-        return Challenge(name, "Physically turn to face the observed target block",
+        return Challenge(name, "Turn horizontally toward the observed target block",
                          {"type": b["type"],
                           "pos": [int(b["nearestX"]), int(b["nearestY"]),
                                   int(b["nearestZ"])]},
@@ -575,10 +575,16 @@ def run_training(world, planner, *, rounds=2, max_steps=3, seed=7,
 
     episodes = report["episodes"]
     eligible = [e for e in episodes if e["status"] in {"passed", "failed"}]
-    total_physical = sum(sum(
-        1 for a in e.get("experiments", [])
+    executed = [
+        a for e in eligible for a in e.get("experiments", [])
         if a.get("status") in {"completed", "failed"}
-    ) for e in eligible)
+    ]
+    total_physical = sum(
+        a.get("plan", {}).get("action") in {
+            "move_to", "move_forward", "look_at", "mine", "collect", "place",
+            "craft", "equip"
+        } for a in executed
+    )
     successes = sum(e["status"] == "passed" for e in eligible)
     report["summary"] = {
         "eligible": len(eligible), "passed": successes,
@@ -587,6 +593,9 @@ def run_training(world, planner, *, rounds=2, max_steps=3, seed=7,
         "pending": sum(e["status"] == "pending" for e in episodes),
         "completion_rate": round(successes / len(eligible), 3) if eligible else None,
         "physical_actions": total_physical,
+        "observation_actions": sum(
+            a.get("plan", {}).get("action") == "scan_blocks" for a in executed),
+        "executed_primitives": len(executed),
         "rejected_proposals": sum(sum(a.get("status") == "rejected"
                 for a in e.get("experiments", [])) for e in eligible),
         "duration_seconds": round(time.monotonic() - started, 2),
