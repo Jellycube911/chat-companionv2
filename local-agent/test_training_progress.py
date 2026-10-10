@@ -164,7 +164,8 @@ class TrainingProgressRegressions(unittest.TestCase):
                 report = lab.run_training(
                     world, WoodPlanner(), rounds=1, max_steps=4,
                     report_dir=Path(tmp) / "reports")
-            self.assertTrue(report["graduation"]["stage_2_unlocked"])
+            self.assertTrue(report["graduation"]["stage_2_unlocked"],
+                            report["graduation"]["skills"])
             self.assertEqual(report["summary"]["stage_2_wood_gather_successes"], 1)
             self.assertEqual(report["episodes"][-1]["task"], "gather_wood")
             self.assertEqual(report["episodes"][-1]["status"], "passed")
