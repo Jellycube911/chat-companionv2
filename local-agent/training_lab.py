@@ -110,11 +110,11 @@ class Challenge:
 
 
 class RealWorld:
-    def snapshot(self):
+    def snapshot(self, allow_busy=False):
         state = practice._get("/state")
         if state.get("serverState") != "running":
             raise RuntimeError("Minecraft is not open with a loaded companion")
-        if state.get("jobActive"):
+        if state.get("jobActive") and not allow_busy:
             raise RuntimeError(
                 "A physical job is already running. Stop the normal brain and its task."
             )
@@ -275,7 +275,9 @@ def _plan_allowed(plan, challenge, observed_extra=()):
             return False, "nonfinite_coordinates"
     except (ValueError, TypeError, KeyError, OverflowError):
         return False, "missing_xyz"
-    known = [challenge.target.get("pos")] + list(observed_extra)
+    known = [challenge.target.get("pos")] + [
+        b.get("pos") if isinstance(b, dict) else b for b in observed_extra
+    ]
     matched = any(
         isinstance(p, (tuple, list)) and len(p) == 3
         and all(abs(pos[i] - float(p[i])) <= 0.05 for i in range(3))
@@ -287,13 +289,30 @@ def _plan_allowed(plan, challenge, observed_extra=()):
         expected = challenge.target.get("type")
         matching_blocker = next(
             (b for b in observed_extra if isinstance(b, dict)
-             and b.get("pos") == pos), None
+             and isinstance(b.get("pos"), list)
+             and all(abs(pos[i] - b["pos"][i]) <= 0.05 for i in range(3))), None
         )
         if matching_blocker:
             expected = matching_blocker["type"]
         if plan.get("expected_block") != expected:
             return False, "block_identity_mismatch"
     return True, "ok"
+
+
+def _observed_obstruction(execution):
+    """Extract a blocker only when the Minecraft raycast identified it."""
+    reason = str((execution.get("result") or {}).get("reason") or "")
+    if not reason.startswith("mining_blocked|"):
+        return None
+    fields = dict(part.split("=", 1) for part in reason.split("|")[1:]
+                  if "=" in part)
+    try:
+        xyz = [int(v) for v in fields["at"].split(",")]
+    except (KeyError, TypeError, ValueError):
+        return None
+    if len(xyz) != 3 or not fields.get("block"):
+        return None
+    return {"type": fields["block"], "pos": xyz}
 
 
 def _bearing_error(state, pos):
@@ -360,10 +379,15 @@ def _record_episode(challenge, attempts, passed, elapsed, initial, reason):
     }, ensure_ascii=False)[:4700]
     hypothesis = (attempts[-1].get("hypothesis") if attempts else None) or \
                  "Test world-grounded " + challenge.name
+    rejections = sum(a.get("status") == "rejected" for a in attempts)
+    physical = sum(a.get("status") in {"completed", "failed"} for a in attempts)
+    reward = (1.0 if passed else -1.0) - (0.1 * rejections) - (
+        0.02 * elapsed) - (0.05 * max(0, physical - 1))
     store.record_skill_trial(
         intent, hypothesis, actions,
         json.dumps({"verified": bool(passed), "outcome": reason,
-                    "seconds": round(elapsed, 2)}),
+                    "seconds": round(elapsed, 2),
+                    "reward": round(reward, 3)}),
         bool(passed),
     )
     store.record_event(
@@ -398,13 +422,14 @@ def _record_episode(challenge, attempts, passed, elapsed, initial, reason):
             log_event("training", "skill_promoted", intent=intent)
 
 
-def _prompt(challenge, snapshot, attempts, history):
+def _prompt(challenge, snapshot, attempts, history, observed_extra=()):
     target = challenge.target
     # Do not hand model an arbitrary plan. It must choose a primitive.
     return json.dumps({
         "objective": challenge.objective,
         "task": challenge.name,
         "target_confirmed_by_minecraft": target,
+        "other_minecraft_confirmed_obstructions": list(observed_extra)[-3:],
         "permitted_actions": challenge.allowed,
         "minecraft_state": {
             "pos": _position(snapshot["state"]),
@@ -447,6 +472,7 @@ def run_training(world, planner, *, rounds=2, max_steps=3, seed=7,
                 continue
 
             attempts = []
+            observed_extra = []
             used = set()
             outcome = "no_verified_completion"
             verified = False
@@ -460,8 +486,9 @@ def run_training(world, planner, *, rounds=2, max_steps=3, seed=7,
                     outcome = "world_busy"
                     break
                 history = store.recent_skill_trials("training." + task, 6)
-                plan = planner.propose(_prompt(challenge, observed, attempts, history))
-                valid, why = _plan_allowed(plan, challenge)
+                plan = planner.propose(_prompt(
+                    challenge, observed, attempts, history, observed_extra))
+                valid, why = _plan_allowed(plan, challenge, observed_extra)
                 fingerprint = json.dumps({
                     k: (plan or {}).get(k)
                     for k in ("action", "x", "y", "z", "expected_block", "contains",
@@ -479,7 +506,7 @@ def run_training(world, planner, *, rounds=2, max_steps=3, seed=7,
                     continue
                 # All game actions run through the same physical practice engine.
                 result = world.execute(plan)
-                after = world.snapshot()
+                after = world.snapshot(allow_busy=True)
                 ok, evidence = _verify(challenge, observed, after, result)
                 attempts.append({
                     "step": step + 1, "status": "completed" if ok else "failed",
@@ -488,6 +515,11 @@ def run_training(world, planner, *, rounds=2, max_steps=3, seed=7,
                     "result": result.get("result"),
                 })
                 outcome = evidence
+                blocker = _observed_obstruction(result)
+                if blocker and blocker not in observed_extra:
+                    observed_extra.append(blocker)
+                    log_event("training", "occlusion_observed",
+                              task=task, blocker=blocker)
                 log_event("training", "physical_trial",
                           task=task, verified=ok, evidence=evidence,
                           action=plan.get("action"))
@@ -526,6 +558,8 @@ def run_training(world, planner, *, rounds=2, max_steps=3, seed=7,
         "unavailable": len(episodes) - len(eligible),
         "completion_rate": round(successes / len(eligible), 3) if eligible else None,
         "physical_actions": total_physical,
+        "rejected_proposals": sum(sum(a.get("status") == "rejected"
+                for a in e.get("experiments", [])) for e in eligible),
         "duration_seconds": round(time.monotonic() - started, 2),
         "teacher_calls": 0,
     }
