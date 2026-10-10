@@ -114,13 +114,13 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
     origin = _position(initial["state"])
     candidates = {}
     attempts = []
-    proofs = []
     mined = None
     approached = None
     faced = None
     empty_scans = 0
     exploration = None
     explored_sites = []
+    consecutive_rejected_proposals = 0
     last_reason = "exam_incomplete"
     pending = False
     started = time.monotonic()
@@ -133,8 +133,15 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
     learned = context.get("learned_procedures", [])
 
     def record(action, plan, result, verified, reason, target=None):
-        nonlocal last_reason
+        nonlocal last_reason, consecutive_rejected_proposals
         last_reason = reason
+        # Bad JSON or unsupported actions never become Minecraft evidence.
+        # Stop a stubborn model rather than spending an entire trial in a
+        # silent loop of unexecutable proposals.
+        if not result:
+            consecutive_rejected_proposals += 1
+        else:
+            consecutive_rejected_proposals = 0
         step = {
             "action": action, "plan": plan,
             "verified": bool(verified), "reason": reason,
@@ -146,6 +153,9 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
             checkpoint(attempts)
 
     for _ in range(max(1, int(max_steps))):
+        if consecutive_rejected_proposals >= 3:
+            last_reason = "planner_stalled_on_rejected_proposals"
+            break
         before = world.snapshot()
         current = _position(before["state"])
         if before["state"]["dimension"] != initial["state"]["dimension"]:
@@ -163,14 +173,44 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
         exploration_positions = (
             exploration.target["standable_candidates"]
             if exploration is not None and not candidates else [])
+        # The evaluator exposes actionable affordances, NOT a selected block
+        # or a scripted coordinate. Qwen still decides which real candidate to
+        # act on; host preconditions prevent redundant scans from consuming
+        # the entire practical after resources are already known.
+        if mined is not None:
+            permitted = ["collect"]
+            next_objective = "Collect the item from the block you actually mined."
+        elif faced is not None:
+            permitted = ["mine"]
+            next_objective = "Mine the observed resource you approached and faced."
+        elif approached is not None:
+            permitted = ["look_at"]
+            next_objective = "Face the observed resource you actually approached."
+        elif candidates:
+            permitted = ["move_to"]
+            next_objective = (
+                "Choose any own_observed_resources entry and physically walk "
+                "to one of that entry's standable_candidates. Scanning again "
+                "cannot advance this task.")
+        elif exploration_positions:
+            permitted = ["move_to"]
+            next_objective = (
+                "No usable resource is known here. Choose a confirmed "
+                "exploration_standable_position and physically walk there, "
+                "then search for resources in the new area.")
+        else:
+            permitted = ["scan_blocks"]
+            next_objective = (
+                "Scan for a natural log, dirt, or sand block using exact or "
+                "contains, a numeric radius <= 10 and a limit <= 32.")
         prompt = json.dumps({
             "task": "stage1_exam", "mode": "uncoached_practical",
             "goal": ("Independently find a naturally occurring log, dirt or sand "
                      "block, physically approach it, face it, break it and "
                      "pick up its dropped item. Choose your own resource and "
                      "each action. You must demonstrate ALL FIVE abilities."),
-            "permitted_actions": [
-                "scan_blocks", "move_to", "look_at", "mine", "collect"],
+            "permitted_actions": permitted,
+            "next_objective": next_objective,
             "safe_resource_types": EXAM_MATERIALS,
             "world_state": {
                 "position": current, "yaw": before["state"].get("yaw"),
@@ -191,13 +231,14 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
                 for a in attempts[-5:]],
             "previous_learned_experiences": skills,
             "learned_procedures": learned,
-            "rule": ("Choose one JSON primitive. Do not invent coordinates. "
-                     "Scan before approaching. If a scan finds no usable "
-                     "resource, choose a verified exploration_standable_position "
-                     "and move to search a different area. Move only to provided "
-                     "verified standable positions. Mining requires expected_block "
-                     "matching an observed resource. Physical Minecraft "
-                     "outcomes, not claims, decide success."),
+            "rule": ("Choose exactly one action from permitted_actions. "
+                     "Action field and its arguments must be valid JSON. "
+                     "For scan_blocks, supply exact or contains, radius as "
+                     "integer, limit as integer. For move_to/look_at/mine "
+                     "supply x, y, z or a three-number position array. "
+                     "Use only Minecraft-confirmed target and standing "
+                     "coordinates supplied here; do not invent coordinates. "
+                     "Minecraft receipts, not claims, decide success."),
         }, ensure_ascii=False)
         raw = planner.propose(prompt)
         plan = practice.parse_plan(json.dumps(raw)) if isinstance(raw, dict) else None
@@ -207,6 +248,10 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
         action = plan.get("action")
         if action not in {"scan_blocks", "move_to", "look_at", "mine", "collect"}:
             record(action, plan, {}, False, "unsupported_action")
+            continue
+        if action not in permitted:
+            record(action, plan, {}, False,
+                   "not_permitted_now_expected_" + "_or_".join(permitted))
             continue
         selected = None
         exploration_move = False
