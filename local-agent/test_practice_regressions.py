@@ -1473,9 +1473,17 @@ class GoalResourceRecoveryRegressions(unittest.TestCase):
                     agent, "_resume_blocked_crafting", return_value=None))
                 stack.enter_context(patch.object(
                     agent, "_general_recipe_goal_action", return_value=None))
-                stack.enter_context(patch.object(
-                    agent, "_local_fast_completion",
-                    side_effect=AssertionError("cached observation needs no model")))
+                proposed = [
+                    json.dumps({"action": "mine", "x": x, "y": 67, "z": -95,
+                                "expected_block": "minecraft:stone",
+                                "intent": "test accessible stone",
+                                "hypothesis": "test observed stone for crafting material",
+                                "goal_id": 12,
+                                "goal_reason": "mine stone to craft a stone pickaxe"})
+                    for x in (203, 204)
+                ]
+                llm = stack.enter_context(patch.object(
+                    agent, "_local_fast_completion", side_effect=proposed))
                 stack.enter_context(patch.object(
                     agent, "execute_plan", side_effect=fail_approach))
                 first = await agent.run_planned_action(None, self.runtime)
@@ -1488,6 +1496,7 @@ class GoalResourceRecoveryRegressions(unittest.TestCase):
                     [(203, 67, -95), (204, 67, -95)]
                 )
                 self.assertEqual(len(self.runtime["invalid_targets"]), 2)
+                self.assertEqual(llm.call_count, 2)
         asyncio.run(scenario())
 
     def test_approach_failures_are_quarantined(self):
