@@ -231,8 +231,18 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None):
             if action == "collect" and mined is None:
                 record(action, plan, {}, False, "mine_before_collect")
                 continue
+        # Persist an unverified in-flight command BEFORE issuing it. This
+        # remains honest if Minecraft/Python is terminated during the exam.
+        attempts.append({
+            "action": action, "plan": plan, "verified": False,
+            "reason": "issued_unverified", "status": "in_flight",
+            "target": selected, "result": None,
+        })
+        if checkpoint:
+            checkpoint(attempts)
         # Every world mutation is made by the real Minecraft bridge.
         result = world.execute(plan)
+        attempts.pop()
         if result.get("status") == "pending":
             result = _settle_pending_job(world, result)
         after = world.snapshot(allow_busy=True)
