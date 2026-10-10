@@ -64,11 +64,21 @@ def _trial_evidence(intent, actions, outcome, reported_success):
                     continue
                 receipt = step.get("result") or {}
                 if (step.get("verified") is not True or
-                    step.get("target") != target or
                     step.get("action") != stages[index]):
                     continue
-                if step["action"] == "scan_blocks" and not (
-                        receipt.get("ok") is True and receipt.get("blocks")):
+                if step["action"] == "scan_blocks":
+                    target_pos = target.get("pos")
+                    def same_scanned_block(block):
+                        pos = block.get("pos")
+                        if not isinstance(pos, (tuple, list)):
+                            pos = [block.get(k) for k in ("x", "y", "z")]
+                        return (block.get("type") == target.get("type")
+                                and pos == target_pos)
+                    if not (receipt.get("ok") is True and
+                            any(same_scanned_block(block)
+                                for block in receipt.get("blocks") or [])):
+                        continue
+                elif step.get("target") != target:
                     continue
                 if step["action"] in {"move_to", "mine", "collect"}:
                     if receipt.get("state") != "COMPLETED":
