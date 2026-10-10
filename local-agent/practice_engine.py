@@ -324,14 +324,29 @@ def parse_plan(text):
         # Alternate coordinate representations from Qwen are equivalent
         # only when explicitly three numeric values; never guess missing axes.
         if not all(plan.get(k) is not None for k in ("x", "y", "z")):
-            for wrapper in ("target_pos", "target"):
-                candidate = plan.get(wrapper)
+            # This translates syntax only. Neither the parser nor the
+            # executor chooses a coordinate: physical authorization checks
+            # independently against live Minecraft-confirmed locations.
+            proposals = [
+                plan.get(k) for k in
+                ("target_pos", "target", "position", "pos", "standable_pos",
+                 "action_specific")
+            ]
+            nested_specific = plan.get("action_specific")
+            if isinstance(nested_specific, dict):
+                proposals.extend(nested_specific.get(k) for k in (
+                    "pos", "position", "target_pos", "standable_pos", "target"))
+            for candidate in proposals:
+                if isinstance(candidate, dict) and all(
+                        candidate.get(axis) is not None for axis in ("x", "y", "z")):
+                    candidate = [candidate[axis] for axis in ("x", "y", "z")]
                 if (isinstance(candidate, (tuple, list)) and len(candidate) == 3
                         and all(isinstance(v, (int, float)) and
                                 not isinstance(v, bool) and math.isfinite(v)
                                 for v in candidate)):
                     for axis, number in zip(("x", "y", "z"), candidate):
-                        plan.setdefault(axis, number)
+                        if plan.get(axis) is None:
+                            plan[axis] = number
                     break
     plan["intent"] = str(plan.get("intent") or action).strip().lower()[:240]
     plan["hypothesis"] = str(
