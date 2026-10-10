@@ -296,7 +296,7 @@ def _ground_confirmed_coordinates(plan, challenge):
         return plan
     text = str(plan.get("hypothesis") or "")
     matches = re.findall(
-        r"\\[\\s*(-?\\d+)\\s*,\\s*(-?\\d+)\\s*,\\s*(-?\\d+)\\s*\\]",
+        r"\[\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*\]",
         text,
     )
     for match in matches:
