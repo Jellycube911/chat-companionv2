@@ -739,7 +739,14 @@ def _record_episode(challenge, attempts, passed, elapsed, initial, reason):
                 importance=5,
             )
         return
-    reward = (1.0 if passed else -1.0) - (0.1 * rejections) - (
+    # Observation/orientation are prerequisites, not equal to obtaining
+    # resources. Reward difficulty and verified world change, while charging
+    # for wasted time and repeated failed proposals.
+    task_value = {
+        "observe": 0.15, "orient": 0.2, "navigate": 0.7,
+        "mine": 1.5, "collect": 2.0, "gather_wood": 3.0,
+    }.get(challenge.name, 0.5)
+    reward = (task_value if passed else -0.7) - (0.1 * rejections) - (
         0.02 * elapsed) - (0.05 * max(0, executed - 1))
     store.record_skill_trial(
         intent, hypothesis, actions,
