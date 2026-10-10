@@ -7,15 +7,19 @@ import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.Tag;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.InteractionResult;
 import net.minecraft.world.SimpleContainer;
+import net.minecraft.world.SimpleMenuProvider;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.PathfinderMob;
 import net.minecraft.world.entity.ai.attributes.AttributeSupplier;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.ai.goal.FloatGoal;
-import net.minecraft.world.entity.ai.goal.LookAtPlayerGoal;
-import net.minecraft.world.entity.ai.goal.RandomLookAroundGoal;
+import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.inventory.ChestMenu;
+import net.minecraft.world.inventory.MenuType;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
@@ -23,13 +27,14 @@ import net.minecraft.world.phys.Vec3;
 /** Server-owned goals keep ticking while the Agent is disconnected or busy. */
 public final class CompanionEntity extends PathfinderMob {
     public enum JobState { SUSPENDED, RUNNING, COMPLETED, CANCELLED, FAILED, UNKNOWN }
-    public enum JobType { NONE, FOLLOW, MOVE, MINE, COLLECT, DEFEND }
+    public enum JobType { NONE, FOLLOW, MOVE, MINE, PLACE, COLLECT, DEFEND }
 
     private UUID owner;
     private UUID jobId;
     private JobType jobType = JobType.NONE;
     private JobState jobState = JobState.CANCELLED;
     private String reason = "idle";
+    private float jobProgress;
     private Vec3 destination;
     private double stopDistance = 3;
     private long repathTick;
@@ -49,14 +54,29 @@ public final class CompanionEntity extends PathfinderMob {
 
     public static AttributeSupplier.Builder attributes() {
         return createMobAttributes().add(Attributes.MAX_HEALTH, 20)
-                .add(Attributes.MOVEMENT_SPEED, 0.28).add(Attributes.FOLLOW_RANGE, 48)
+                .add(Attributes.MOVEMENT_SPEED, 0.36).add(Attributes.FOLLOW_RANGE, 48)
                 .add(Attributes.ATTACK_DAMAGE, 3);
     }
 
     @Override protected void registerGoals() {
         goalSelector.addGoal(0, new FloatGoal(this));
-        goalSelector.addGoal(7, new LookAtPlayerGoal(this, Player.class, 8));
-        goalSelector.addGoal(8, new RandomLookAroundGoal(this));
+    }
+
+    @Override
+    public InteractionResult mobInteract(Player player, InteractionHand hand) {
+        if (hand != InteractionHand.MAIN_HAND || !player.isShiftKeyDown()) {
+            return super.mobInteract(player, hand);
+        }
+        if (owner == null || !owner.equals(player.getUUID())) {
+            return InteractionResult.PASS;
+        }
+        if (!level().isClientSide() && player instanceof ServerPlayer serverPlayer) {
+            serverPlayer.openMenu(new SimpleMenuProvider(
+                    (containerId, playerInventory, ignored) ->
+                            new ChestMenu(MenuType.GENERIC_9x4, containerId, playerInventory, inventory, 4),
+                    getName().copy().append(" Inventory")));
+        }
+        return InteractionResult.sidedSuccess(level().isClientSide());
     }
 
     public UUID owner() { return owner; }
@@ -65,9 +85,14 @@ public final class CompanionEntity extends PathfinderMob {
     public JobType jobType() { return jobType; }
     public JobState jobState() { return jobState; }
     public String reason() { return reason; }
+    public float jobProgress() { return jobProgress; }
+    public void jobProgress(float value, String why) {
+        jobProgress = Math.clamp(value, 0.0F, 1.0F);
+        if (jobState == JobState.RUNNING && why != null && !why.isBlank()) reason = why;
+    }
     public SimpleContainer companionInventory() { return inventory; }
-    public boolean actionsAllowed() { return actionsAllowed; }
-    public void actionsAllowed(boolean value) { actionsAllowed = value; if (!value && jobType != JobType.FOLLOW && jobType != JobType.MOVE) stop("permission_revoked"); }
+    public boolean actionsAllowed() { return true; }
+    public void actionsAllowed(boolean value) { actionsAllowed = true; }
     public boolean remoteConsent() { return remoteConsent; }
     public void remoteConsent(boolean value) { remoteConsent = value; }
     public boolean speechConsent() { return speechConsent; }
@@ -86,13 +111,16 @@ public final class CompanionEntity extends PathfinderMob {
 
     public void suspend(String why) {
         getNavigation().stop();
-        if (jobState == JobState.RUNNING) jobState = JobState.SUSPENDED;
-        reason = why;
+        if (jobState == JobState.RUNNING) {
+            jobState = JobState.SUSPENDED;
+            reason = why;
+        }
     }
 
     public void stop(String why) {
         getNavigation().stop();
         jobState = JobState.CANCELLED;
+        jobProgress = 0.0F;
         reason = why;
     }
 
@@ -105,7 +133,7 @@ public final class CompanionEntity extends PathfinderMob {
     }
 
     public UUID externalJob(JobType type) { begin(type, null, 2); return jobId; }
-    public void complete(String why) { getNavigation().stop(); jobState = JobState.COMPLETED; reason = why; }
+    public void complete(String why) { getNavigation().stop(); jobProgress = 1.0F; jobState = JobState.COMPLETED; reason = why; }
     public void failJob(String why) { fail(why); }
 
     private void begin(JobType type, Vec3 target, double radius) {
@@ -113,6 +141,7 @@ public final class CompanionEntity extends PathfinderMob {
         jobId = UUID.randomUUID();
         jobType = type;
         jobState = JobState.RUNNING;
+        jobProgress = 0.0F;
         reason = "moving";
         destination = target;
         stopDistance = radius;
@@ -128,7 +157,24 @@ public final class CompanionEntity extends PathfinderMob {
 
     @Override public void tick() {
         super.tick();
-        if (!(level() instanceof ServerLevel world) || jobState != JobState.RUNNING) return;
+        if (!(level() instanceof ServerLevel world)) return;
+
+        // Player-like passive pickup: items must be very close to the body.
+        if (tickCount % 4 == 0) {
+            var nearbyItems = world.getEntitiesOfClass(
+                    ItemEntity.class,
+                    getBoundingBox().inflate(1.0, 0.5, 1.0),
+                    item -> item.isAlive() && !item.hasPickUpDelay());
+            for (ItemEntity item : nearbyItems) {
+                ItemStack original = item.getItem();
+                ItemStack remainder = inventory.addItem(original.copy());
+                if (remainder.getCount() == original.getCount()) continue;
+                if (remainder.isEmpty()) item.discard();
+                else item.setItem(remainder);
+            }
+        }
+
+        if (jobState != JobState.RUNNING) return;
         if (jobType != JobType.FOLLOW && jobType != JobType.MOVE) return;
         Vec3 target = destination;
         ServerPlayer player = owner == null ? null : world.getServer().getPlayerList().getPlayer(owner);
@@ -152,10 +198,10 @@ public final class CompanionEntity extends PathfinderMob {
             fail("hazard"); return;
         }
         long tick = world.getGameTime();
-        if (tick - repathTick >= 15) {
+        if (tick - repathTick >= 8) {
             boolean path = jobType == JobType.FOLLOW
-                    ? getNavigation().moveTo(player, 1.1)
-                    : getNavigation().moveTo(target.x, target.y, target.z, 1.1);
+                    ? getNavigation().moveTo(player, 1.28)
+                    : getNavigation().moveTo(target.x, target.y, target.z, 1.28);
             repathTick = tick;
             reason = path ? "moving" : "repath_pending";
         }
@@ -167,7 +213,7 @@ public final class CompanionEntity extends PathfinderMob {
         }
     }
 
-    private void fail(String why) { getNavigation().stop(); jobState = JobState.FAILED; reason = why; }
+    private void fail(String why) { getNavigation().stop(); jobProgress = 0.0F; jobState = JobState.FAILED; reason = why; }
 
     @Override public void addAdditionalSaveData(CompoundTag tag) {
         super.addAdditionalSaveData(tag);
