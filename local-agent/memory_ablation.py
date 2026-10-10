@@ -168,6 +168,7 @@ def run_comparison(world, planner, memory, *, trials=6, max_steps=18,
         return report
 
     start = time.monotonic()
+    no_physical_trials = 0
     try:
         for index, arm in enumerate(schedule, start=1):
             if time.monotonic() - start > float(max_minutes) * 60:
@@ -219,8 +220,29 @@ def run_comparison(world, planner, memory, *, trials=6, max_steps=18,
             print("[MEMORY TEST] %d/%d %-10s %-11s %d step(s)" %
                   (index, trials, arm, trial["status"], trial["attempts"]),
                   flush=True)
+            physical_attempts = [
+                step for step in trial["experiments"]
+                if step.get("action") in {"move_to", "look_at", "mine", "collect"}
+                and step.get("result") is not None
+            ]
+            print("[MEMORY TEST] Trial %d: %d actual body-action receipt(s)." %
+                  (index, len(physical_attempts)), flush=True)
+            no_physical_trials = (0 if physical_attempts
+                                  else no_physical_trials + 1)
             if trial["status"] == "pending":
                 report["status"] = "stopped_early_pending_job"
+                break
+            if no_physical_trials >= 2:
+                report["status"] = "stopped_no_physical_actions"
+                report["stop_reason"] = (
+                    "Two consecutive trials performed no physical actions. "
+                    "Inspect experiments and failure reasons; this is not "
+                    "a valid memory comparison."
+                )
+                checkpoint()
+                print("[MEMORY TEST] STOP: no physical actions in two trials. "
+                      "See report experiments; no learning benefit can be inferred.",
+                      flush=True)
                 break
     except BaseException as error:
         report["status"] = "interrupted" if isinstance(
