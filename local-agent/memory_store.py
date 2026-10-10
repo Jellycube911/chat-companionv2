@@ -51,6 +51,45 @@ def _trial_evidence(intent, actions, outcome, reported_success):
         executed = [a for a in attempts if isinstance(a, dict)
                     and a.get("status") == "completed"
                     and isinstance(a.get("result"), dict)]
+        if str(intent) == "training.stage1_exam":
+            proof = plan.get("proof") or {}
+            target = plan.get("target") or {}
+            steps = plan.get("steps") or []
+            # The practical needs five verified game actions IN ORDER for
+            # the same target. Its persisted proof must agree with receipts.
+            stages = ("scan_blocks", "move_to", "look_at", "mine", "collect")
+            index = 0
+            for step in steps:
+                if not isinstance(step, dict):
+                    continue
+                receipt = step.get("result") or {}
+                if (step.get("verified") is not True or
+                    step.get("target") != target or
+                    step.get("action") != stages[index]):
+                    continue
+                if step["action"] == "scan_blocks" and not (
+                        receipt.get("ok") is True and receipt.get("blocks")):
+                    continue
+                if step["action"] in {"move_to", "mine", "collect"}:
+                    if receipt.get("state") != "COMPLETED":
+                        continue
+                if step["action"] == "mine":
+                    if str(receipt.get("reason") or "").split("|")[0] != "block_mined":
+                        continue
+                    if ("block=" + str(target.get("type"))) not in str(receipt.get("reason")):
+                        continue
+                index += 1
+                if index == len(stages):
+                    break
+            return ("verified" if
+                    evidence.get("verified") is True and
+                    proof.get("passed") is True and
+                    proof.get("target") == target and
+                    proof.get("ordered_actions") is True and
+                    proof.get("inventory_increased") is True and
+                    int(proof.get("inventory_after", 0)) >
+                    int(proof.get("inventory_before", 0)) and
+                    index == len(stages) else "unverified")
         if evidence.get("verified") is not True or not executed:
             return "unverified"
         last_receipt = executed[-1]["result"]
