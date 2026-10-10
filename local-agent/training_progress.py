@@ -5,6 +5,7 @@ Use the latest ten genuinely executed/resolved trials for each basic skill.
 """
 import json
 import math
+from itertools import combinations
 
 BASIC_SKILLS = ("observe", "orient", "navigate", "mine", "collect")
 WINDOW = 10
@@ -47,19 +48,24 @@ def _decoded_record(record):
 
 
 def _distinct_success_sites(samples):
-    distinct = []
-    for sample in samples:
-        if not sample["success"]:
-            continue
-        if all(
-            sample["dimension"] != site["dimension"]
-            or math.hypot(sample["start"][0] - site["start"][0],
-                          sample["start"][2] - site["start"][2])
-            >= SITE_SEPARATION_BLOCKS
-            for site in distinct
-        ):
-            distinct.append(sample)
-    return len(distinct)
+    """Maximum pairwise-separated success sites, independent of trial order.
+
+    The graduation window has at most ten records, so exact search is tiny.
+    A greedy newest-first approach could incorrectly demote a capable agent
+    when its latest valid location falls BETWEEN older separated locations.
+    """
+    successes = [sample for sample in samples if sample["success"]]
+    for count in range(len(successes), 0, -1):
+        for group in combinations(successes, count):
+            if all(
+                left["dimension"] != right["dimension"]
+                or math.hypot(left["start"][0] - right["start"][0],
+                              left["start"][2] - right["start"][2])
+                >= SITE_SEPARATION_BLOCKS
+                for i, left in enumerate(group) for right in group[i + 1:]
+            ):
+                return count
+    return 0
 
 
 def assess_training(memory, session_episodes=()):
