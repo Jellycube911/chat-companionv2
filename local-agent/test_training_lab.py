@@ -187,7 +187,7 @@ class TrainingLabRegressions(unittest.TestCase):
                 if action == "scan_blocks":
                     return practice.parse_plan(json.dumps({
                         "action": action,
-                        "scan_blocks": {"contains": "minecraft:dirt",
+                        "scan_blocks": {"contains": p["exact"][0],
                                         "radius": 7, "limit": 50}
                     }))
                 if action == "look_at":
