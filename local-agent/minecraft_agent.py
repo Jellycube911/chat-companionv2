@@ -24,6 +24,8 @@ from skill_executor import run_task
 from action_log import DEFAULT_LOG, log_event, log_exception, start_session
 from practice_engine import execute_plan, parse_plan
 from knowledge_engine import decide_recipe, output_for_goal
+from body_truth import (record_action as record_body_action, grounded_chat as verify_chat_claims,
+                        grounded_status as body_grounded_status, summarize_action as body_action_summary)
 
 
 MINECRAFT_URL = "http://127.0.0.1:8765"
@@ -579,6 +581,13 @@ def _chat_awareness_text(runtime):
         pos = "unknown"
         owner_distance = "unknown"
     recent_events = store.recent_events(3)
+    user_goals = [
+        goal for goal in store.list_goals("active", 20)
+        if goal.get("source") == "user"
+    ]
+    active_player_goal = user_goals[0] if user_goals else None
+    last_body_action = runtime.get("body_last_action") or {}
+    last_body_verified = runtime.get("body_last_verified") or {}
     evidence = [
         f"[{event['kind']}] {_trim(event['summary'], 260)}"
         for event in recent_events
@@ -601,10 +610,15 @@ def _chat_awareness_text(runtime):
         f"- pos={pos}\n"
         f"- Alik distance={owner_distance}\n"
         f"- physical job={job}\n"
-        f"- activity={_current_activity_text(runtime)}\n"
+        f"- active player task={active_player_goal or 'none'}\n"
+        f"- verified activity summary={body_grounded_status(runtime, user_goals)}\n"
+        f"- latest actual body step={body_action_summary(last_body_action)}\n"
+        f"- last successful world-changing action={body_action_summary(last_body_verified)}\n"
         f"- inventory={items or ['empty']}\n"
         f"- recent physical evidence={evidence or ['none']}\n"
-        "- Never claim progress not supported by this evidence."
+        "- Chat does NOT perform the body action. A requested task is only QUEUED. "
+        "Do not claim it is done or describe imaginary crafting intermediates. "
+        "Reply casually in under 12 words; body outcomes outrank model guesses."
     )
 
 
@@ -2079,6 +2093,7 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
     finally:
         runtime["physical_action_active"] = False
     result = execution.get("result") or {}
+    record_body_action(runtime, plan, execution)
     _brain_console_result(plan, execution)
     if plan.get("action") == "scan_blocks" and execution.get("ok"):
         blocks = result.get("blocks") or []
@@ -2395,7 +2410,15 @@ async def run_turn(agent, message, source, reply_in_game, runtime):
             result = await Runner.run(agent, prepared, max_turns=max_turns)
             answer = str(result.final_output or "").strip()
         if source in {"minecraft", "console"}:
-            answer = _format_ingame_reply(_ground_chat_reply(answer, runtime))
+            # The body can change while Qwen generates text. Re-read the
+            # authoritative physical state immediately before publishing.
+            try:
+                await update_awareness(runtime)
+            except Exception:
+                pass
+            answer = _format_ingame_reply(
+                _ground_chat_reply(answer, runtime, message)
+            )
     except MaxTurnsExceeded as error:
         log_exception(
             "agent",
@@ -2924,6 +2947,12 @@ async def fast_chat_reflex(text, runtime=None):
 
     goal = await fast_task_intent(text)
     if goal is not None:
+        if runtime is not None:
+            runtime["accepted_player_goal"] = {
+                "id": goal.get("id"), "title": goal.get("title"),
+                "text": text, "at": time.monotonic()
+            }
+            runtime.pop("planner_backoff_until", None)
         if str(goal.get("title", "")).lower() == "obtain a crafting table":
             _, counts = _inventory_summary(runtime)
             table_count = counts.get("minecraft:crafting_table", 0)
@@ -3112,7 +3141,10 @@ def _current_activity_text(runtime=None):
             f"{task['skill'].replace('_', ' ')} rn, {progress}"
         )
 
-    goals = store.list_goals("active", 4)
+    goals = store.list_goals("active", 20)
+    user_goal = next((g for g in goals if g.get("source") == "user"), None)
+    if user_goal is not None:
+        return _format_ingame_reply(body_grounded_status(runtime or {}, goals))
     meaningful = [
         goal for goal in goals
         if goal.get("source") != "system" or goal.get("priority", 0) >= 6
@@ -3220,9 +3252,11 @@ def _motion_evidence_reply(runtime):
     return "you're right, no movement attempt recorded"
 
 
-def _ground_chat_reply(answer, runtime):
-    """Strip unsupported physical claims, not conversational personality."""
+def _ground_chat_reply(answer, runtime, user_message=""):
+    """Reconcile model speech against shared body evidence and live inventory."""
     answer = str(answer or "")
+    goals = store.list_goals("active", 20)
+    answer = verify_chat_claims(answer, user_message, runtime, goals)
     # No recipe lookup was performed by a chat-only turn. Never fabricate
     # quantitative requirements from the agent's inventory counts.
     if re.search(
@@ -3259,6 +3293,9 @@ def _ground_chat_reply(answer, runtime):
 def _is_activity_question(text):
     normalized = _normalize_request_text(text)
     return normalized in {
+        "what is ur task", "what is your task", "what's ur task",
+        "whats ur task", "what is my task", "what task are u doing",
+        "what task are you doing", "whats your task", "what's your task",
         "what are you doing",
         "what are u doing",
         "what're you doing",
@@ -3342,6 +3379,23 @@ async def poll_minecraft_chat(input_queue, runtime, chat_agent):
                     except Exception:
                         pass
                     _preempt_background_reasoning(runtime)
+
+                    # Register user commands before replies or shortcut chat
+                    # handlers, not only when a later planner turn happens.
+                    accepted_goal = await fast_task_intent(text)
+                    if accepted_goal is not None:
+                        runtime["accepted_player_goal"] = {
+                            "id": accepted_goal.get("id"),
+                            "title": accepted_goal.get("title"),
+                            "text": text,
+                            "at": time.monotonic(),
+                        }
+                        runtime.pop("planner_backoff_until", None)
+                        runtime.pop("last_resource_scan", None)
+                        log_event(
+                            "chat", "user_goal_registered",
+                            message=text, goal=accepted_goal,
+                        )
 
                     failure_answer = _instant_failure_explanation(text)
                     if failure_answer is not None:
