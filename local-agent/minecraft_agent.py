@@ -782,15 +782,17 @@ def build_practice_plan_input(runtime, directive=None):
             "goal_reason for a prerequisite action. If previous experiments "
             "failed, change strategy rather than repeating a failed mine."
         )
-    if goal and str(goal.get("title") or "").lower() == "craft a wooden pickaxe":
-        parts.append(
-            "UNTESTED VANILLA RECIPE HYPOTHESIS for a wooden pickaxe: "
-            "3x3 grid top row three wood planks, middle row empty/stick/empty, "
-            "bottom row empty/stick/empty. Use the inventory's actual wood "
-            "plank item ID. Exactly nine entries. Verify the output via /craft; "
-            "do not claim success without that Minecraft response."
-        )
     if goal:
+        progress = store.goal_progress(goal["id"])
+        if progress and progress["metric"] == "logs":
+            current = _inventory_count(
+                (runtime.get("awareness") or {}).get("inventory") or [],
+                lambda item: item.startswith("minecraft:") and item.endswith("_log"))
+            parts.append(
+                f"USER GOAL PROGRESS: gathered {max(0, current - progress['baseline'])}"
+                f" of {progress['target_delta']} NEW logs since assignment. "
+                "Previously owned logs do not count."
+            )
         missing = _missing_goal_materials(runtime, goal)
         if missing:
             parts.append(
@@ -2341,55 +2343,27 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         (goal for goal in store.list_goals("active", 20) if goal.get("source") == "user"),
         None,
     )
+    # Gameplay plans must originate from Qwen. The host can retrieve factual
+    # server recipes and obstacles, but cannot invent a next craft/mine action.
     continuation = None
-    if source in {"practice", "command"} and active_user_goal is not None:
-        continuation = await asyncio.to_thread(
-            _resume_blocked_crafting, runtime, active_user_goal, awareness_inventory
-        )
-        if continuation is None and not (
-            time.monotonic() < float(runtime.get("planner_backoff_until", 0.0) or 0.0)
-        ):
-            continuation = await asyncio.to_thread(
-                _general_recipe_goal_action, runtime, active_user_goal, awareness_inventory
-            )
-            if continuation is None and output_for_goal(active_user_goal.get("title")):
-                # A missing recipe/service should trigger learning or honest
-                # resource planning, not unbounded Qwen crafting guesses.
-                knowledge = runtime.get("knowledge_last") or {}
-                if knowledge.get("reason") == "recipe_service_unavailable":
-                    runtime["planner_backoff_until"] = time.monotonic() + 25
-                    log_event("knowledge", "recipe_api_unavailable",
-                              message="Install matching NeoForge mod JAR to expose /recipe-knowledge")
-
-        if continuation:
-            log_event(
-                "practice_host", "goal_continuation",
-                goal=active_user_goal.get("title"), plan=continuation,
-            )
-        # A failed workstation probe cannot justify new crafting-table
-        # placement, and must not fall through to unconstrained Qwen actions.
-        if time.monotonic() < float(runtime.get("planner_backoff_until", 0.0) or 0.0):
-            log_event("practice_host", "planner_probe_backoff")
-            return {"ok": False, "status": "planner_backoff"}
+    if active_user_goal is not None:
+        requested_output = output_for_goal(active_user_goal.get("title"))
+        if requested_output:
+            knowledge = await asyncio.to_thread(
+                _lookup_world_recipe, runtime, requested_output)
+            if isinstance(knowledge, dict) and knowledge.get("recipes"):
+                runtime["knowledge_last"] = {
+                    "target": requested_output, "source": "server_recipe_manager",
+                    "recipes": knowledge["recipes"][:3],
+                }
 
     obstacle = _mining_obstruction_recovery(
         runtime, active_user_goal
     ) if source == "practice" else None
     # A reported obstruction takes precedence over the stale positive scan.
     # Only Qwen chooses the recovery hypothesis, after seeing its evidence.
-    if continuation is None and obstacle is None and source == "practice":
-        scan_followup = _material_action_from_scan(
-            runtime, active_user_goal, awareness_inventory
-        )
-        if scan_followup:
-            continuation = scan_followup
-            log_event(
-                "practice_host", "scan_to_action",
-                goal=(active_user_goal or {}).get("title"),
-                plan=continuation,
-            )
-        if time.monotonic() < float(runtime.get("planner_backoff_until", 0.0) or 0.0):
-            return {"ok": True, "status": "planner_backoff"}
+    # The previous scan is evidence for Qwen, never permission for Python
+    # to pick the first ore or log and execute an autonomous mining plan.
 
     prompt = build_practice_plan_input(runtime, directive=directive)
     log_event(
@@ -3309,6 +3283,22 @@ async def fast_task_intent(text, runtime=None):
             if goal["source"] == "user"
         ]
         return max(user_goals, key=lambda goal: int(goal["id"]), default=None)
+    # Short follow-up commands refer to the newest active assignment, rather
+    # than accidentally reactivating the abandoned generic self-practice goal.
+    if normalized in {"get more", "gather more", "get more wood",
+                      "gather more wood", "get more logs", "gather more logs"}:
+        recent = next((g for g in store.list_goals("active", 20)
+                       if g.get("source") == "user"), None)
+        if recent and re.fullmatch(r"Gather \d+ logs", recent["title"]):
+            goal = register(recent["title"], text, 9)
+            carried = ((runtime or {}).get("awareness") or {}).get("inventory")
+            if isinstance(carried, list):
+                target = int(re.search(r"\d+", recent["title"]).group(0))
+                current = _inventory_count(
+                    carried, lambda item: item.startswith("minecraft:")
+                    and item.endswith("_log"))
+                store.set_goal_progress(goal["id"], "logs", current, target)
+            return goal
     # A user instruction embedded in corrective feedback is still a task.
     # Do not lose it merely because the sentence begins "you can't ...".
     if re.search(
