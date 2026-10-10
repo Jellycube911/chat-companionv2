@@ -114,6 +114,37 @@ class StageOneExamRegressions(unittest.TestCase):
             self.assertEqual(result["status"], "unavailable")
             self.assertFalse(db.recent_skill_trials("training.stage1_exam"))
 
+    def test_empty_scan_can_trigger_real_exploration_without_exam_credit(self):
+        class EmptyWorld(RealisticExamWorld):
+            def execute(self, plan):
+                if plan["action"] == "scan_blocks":
+                    self.calls.append(dict(plan))
+                    return {"ok": True, "plan": plan,
+                            "result": {"ok": True, "blocks": []}}
+                return super().execute(plan)
+
+        class ExploringPlanner:
+            def propose(self, prompt):
+                p = json.loads(prompt)
+                options = p["exploration_standable_positions"]
+                if options:
+                    return {"action": "move_to", "position": options[0],
+                            "hypothesis": "Explore confirmed open ground"}
+                return {"action": "scan_blocks", "exact": ["minecraft:oak_log"],
+                        "radius": 10, "limit": 32}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = MemoryStore(Path(tmp) / "memory.sqlite3")
+            world = EmptyWorld()
+            result = run_exam(world, ExploringPlanner(), db, max_steps=3)
+            self.assertEqual([r["action"] for r in world.calls],
+                             ["scan_blocks", "move_to", "scan_blocks"])
+            self.assertEqual(result["experiments"][1]["reason"],
+                             "explored_new_area")
+            self.assertTrue(result["experiments"][1]["verified"])
+            self.assertEqual(result["status"], "unavailable")
+            self.assertFalse(db.recent_skill_trials("training.stage1_exam"))
+
     def test_interrupted_training_writes_readable_progress_before_end(self):
         class InterruptedWorld(FakePhysicalWorld):
             def execute(self, plan):
