@@ -2119,20 +2119,36 @@ def _escalate_stalled_goal(runtime, goal, reason, inventory):
 
 
 def _goal_progress_evidence(runtime, goal, execution):
-    if not goal:
+    """Only terminal, action-relevant evidence may advance a stall counter.
+
+    A successful world observation, even one that finds zero blocks, is
+    not a failed physical attempt. Repeated empty searches are separately
+    tracked and bounded by _covered_empty_scan.
+    """
+    if not goal or not execution or execution.get("status") == "pending":
         return
-    if execution.get("ok") and (execution.get("plan") or {}).get("action") in {
+    plan = execution.get("plan") or {}
+    action = plan.get("action")
+    if action == "scan_blocks":
+        # A positive scan can unlock a target, but even an empty scan is
+        # valid evidence rather than proof the recipe/skill was attempted.
+        return
+    if execution.get("ok") and action in {
         "craft", "mine", "place", "collect"
     }:
         runtime.setdefault("goal_stalls", {}).pop(str(goal.get("id")), None)
-    else:
-        plan = execution.get("plan") or {}
-        _escalate_stalled_goal(
-            runtime, goal,
-            str(plan.get("action") or "no action") + ": " +
-            _execution_failure_reason(execution), 
-            ((runtime.get("awareness") or {}).get("inventory") or []),
-        )
+        return
+    if execution.get("ok") or action in {"idle", "look_at", "equip"}:
+        return
+    # Genuine failed physical trials are eligible for rare escalation.
+    if action not in {"craft", "mine", "place", "collect",
+                      "move_to", "move_forward"}:
+        return
+    _escalate_stalled_goal(
+        runtime, goal,
+        str(action) + ": " + _execution_failure_reason(execution),
+        ((runtime.get("awareness") or {}).get("inventory") or []),
+    )
 
 
 async def run_planned_action(planner_agent, runtime, directive=None, source="practice"):
