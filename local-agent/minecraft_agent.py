@@ -2579,8 +2579,8 @@ async def fast_task_intent(text):
     # Generic crafting goals are resolved through the world recipe registry,
     # rather than growing a separate hand-written if/else for each new item.
     matched = re.match(
-        r"^(?:make|craft)\\s+(?:(?:me|us)\\s+)?(?:(?:an?|some|more|another)\\s+)?"
-        r"([a-z0-9_:][a-z0-9_:\\s-]{1,76})$",
+        r"^(?:make|craft)\s+(?:(?:me|us)\s+)?(?:(?:an?|some|more|another)\s+)?"
+        r"([a-z0-9_:][a-z0-9_:\s-]{1,76})$",
         normalized,
     )
     if matched:
