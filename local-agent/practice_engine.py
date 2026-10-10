@@ -699,7 +699,9 @@ def _objective_success(plan, before, after, result):
         wanted = plan.get("item")
         if wanted:
             return _item_count(after["inventory"], wanted) > _item_count(before["inventory"], wanted)
-        return _inventory_total(after["inventory"]) > _inventory_total(before["inventory"]) or terminal == "COMPLETED"
+        # A completed pickup job with zero collected items is not a success.
+        # The before/after inventory is the authoritative acquisition signal.
+        return _inventory_total(after["inventory"]) > _inventory_total(before["inventory"])
 
     if action == "place":
         wanted = plan.get("item")
