@@ -48,6 +48,24 @@ A trial is marked unavailable when there is no real suitable block, standable
 location or dropped item. Those are not counted as successes. The collection
 stage cannot run until a dropped item actually exists.
 
+**Stage 1 exercise order and interface learning (v2):**
+The training cycle now runs `observe → navigate → orient → mine → collect`.
+After successful navigation, the orientation challenge faces the SAME resource
+again if Minecraft still observes it, and mining preferentially tests that
+world-confirmed resource. Moving after orientation no longer invalidates the
+meaning of the orientation test.
+
+Qwen sometimes emits a valid mining target and `expected_contains: "_log"`
+instead of the exact `expected_block` required by the training protocol.
+The host now converts that *schema field only* when the model's own XYZ match
+a server-confirmed eligible block and its declared filter matches the real
+identity. Wrong IDs, invented coordinates, unsafe blocks, and contradictory
+filters still fail without execution. The model continues deciding the actions.
+Identical failed proposals without new evidence end that exercise early;
+zero physically executed actions are marked `interface_error`, not a gameplay
+failure or eligible graduation trial. Tool-interface feedback persists separately
+in SQLite and is included in later local prompts without erasing prior memories.
+
 **Stage 1 resource-grounded movement:** The navigation exercise no longer
 chooses an arbitrary nearby waypoint. It checks Minecraft-observed exposed
 natural blocks and verified adjacent standing spots, and accepts navigation
