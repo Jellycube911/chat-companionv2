@@ -44,6 +44,37 @@ def train_basic_skills(db, successes=10):
                 db, name, (10 + 12 * (i % 3), 64, 11), i < successes)
 
 
+def record_full_exam(db):
+    """Fixture simulates Minecraft receipts to test the graduation evaluator.
+
+    It never replaces the mandatory *live* uncoached exam in training.
+    """
+    target = {"type": "minecraft:oak_log", "pos": [30, 64, 31],
+              "standable_candidates": [[29, 64, 31]]}
+    receipts = [
+        {"ok": True, "blocks": [{"type": "minecraft:oak_log", "pos": [30, 64, 31]}]},
+        {"state": "COMPLETED", "reason": "arrived"},
+        {"ok": True}, {"state": "COMPLETED",
+                       "reason": "block_mined|block=minecraft:oak_log|tool=minecraft:air|break_ticks=61"},
+        {"state": "COMPLETED", "reason": "collection_complete:1"},
+    ]
+    steps = [
+        {"action": a, "verified": True, "target": target,
+         "plan": {"action": a}, "result": receipt}
+        for a, receipt in zip(("scan_blocks", "move_to", "look_at", "mine", "collect"),
+                              receipts)
+    ]
+    proof = {"target": target, "passed": True, "ordered_actions": True,
+             "inventory_increased": True, "inventory_before": 0,
+             "inventory_after": 1}
+    db.record_skill_trial(
+        "training.stage1_exam", "test five independent actions",
+        json.dumps({"steps": steps, "proof": proof, "target": target,
+                    "start": [25, 64, 31], "dimension": "minecraft:overworld"}),
+        json.dumps({"verified": True, "outcome": "completed",
+                    "proof": proof}), True)
+
+
 class TrainingProgressRegressions(unittest.TestCase):
     def test_no_progress_or_unavailable_trial_can_graduate(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -71,7 +102,13 @@ class TrainingProgressRegressions(unittest.TestCase):
             db = MemoryStore(Path(tmp) / "memory.sqlite3")
             train_basic_skills(db, successes=9)
             status = assess_training(db)
+            self.assertTrue(status["basic_skills_ready_for_exam"])
+            self.assertFalse(status["stage_2_unlocked"])
+            self.assertFalse(status["practical_exam"]["passed"])
+            record_full_exam(db)
+            status = assess_training(db)
             self.assertTrue(status["stage_2_unlocked"])
+            self.assertTrue(status["practical_exam"]["passed"])
             self.assertEqual(status["graduated_count"], 5)
             self.assertEqual(status["skills"]["mine"]["successes"], 9)
             self.assertEqual(status["skills"]["mine"]["distinct_success_sites"], 3)
@@ -177,6 +214,7 @@ class TrainingProgressRegressions(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db = MemoryStore(Path(tmp) / "memory.sqlite3")
             train_basic_skills(db)
+            record_full_exam(db)
             world = WoodWorld()
             with patch.object(lab, "store", db), patch.object(lab, "log_event"):
                 report = lab.run_training(
