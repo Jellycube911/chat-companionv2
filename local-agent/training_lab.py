@@ -1083,13 +1083,6 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
         progressed = any(e.get("task") in {"navigate", "mine", "explore"}
                          and e.get("status") == "passed" for e in round_examples)
         stagnant_rounds = 0 if progressed else stagnant_rounds + 1
-        if stagnant_rounds >= 3:
-            # Avoid endless observe/orient success while no resources can be
-            # reached. Keep the diagnosis in the report for the next session.
-            finished_due_to_environment = True
-            print("[TRAIN] Three rounds without resource or exploration "
-                  "progress; halting instead of repeating scans.", flush=True)
-            break
         round_actions_end = sum(
             len([a for a in episode.get("experiments", [])
                  if a.get("status") in {"completed", "failed", "progress"}])
@@ -1103,6 +1096,13 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
         if unproductive_rounds >= 3:
             print("[TRAIN] No executed actions in 3 rounds; stopping to report the blocker.",
                   flush=True)
+            break
+        if stagnant_rounds >= 3:
+            # Do not keep rehearsing observe/orient when no actual resource
+            # or exploratory movement can progress. Report the blocker.
+            finished_due_to_environment = True
+            print("[TRAIN] Three rounds without resource or exploration "
+                  "progress; halting instead of repeating scans.", flush=True)
             break
 
     episodes = report["episodes"]
