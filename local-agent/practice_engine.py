@@ -298,6 +298,14 @@ def parse_plan(text):
         return None
 
     plan["action"] = action
+    if action == "scan_blocks" and isinstance(plan.get("query"), dict):
+        # Local models often echo the observation format {"query": {...}}
+        # instead of the primitive schema. This is a lossless argument
+        # adaptation, not a new gameplay action or inferred coordinate.
+        nested = plan["query"]
+        for field in ("contains", "exact", "radius", "limit", "exposed_only"):
+            if field not in plan and field in nested:
+                plan[field] = nested[field]
     plan["intent"] = str(plan.get("intent") or action).strip().lower()[:240]
     plan["hypothesis"] = str(
         plan.get("hypothesis") or f"{action} will advance the current goal"
