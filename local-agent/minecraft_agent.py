@@ -1002,6 +1002,14 @@ def _target_failure_needs_replan(execution):
     if plan.get("action") == "craft":
         return (execution or {}).get("ok") is False
     reason = str(result.get("error") or result.get("reason") or "")
+    if plan.get("action") == "place":
+        return (
+            (execution or {}).get("ok") is False
+            and (
+                reason.startswith("no_valid_placement")
+                or reason.startswith("placement_")
+            )
+        )
     return reason in {
         "target_block_mismatch", "target_block_is_air", "destination_occupied",
         "mining_alignment_timeout",
@@ -1009,7 +1017,33 @@ def _target_failure_needs_replan(execution):
 
 
 def _invalid_target_ttl(key):
-    return 1800.0 if str(key).startswith("craft@") else 180.0
+    if str(key).startswith("craft@"):
+        return 1800.0
+    if str(key).startswith("place@near:"):
+        return 90.0
+    return 180.0
+
+
+def _clear_resolved_placement_blockers(runtime, plan, execution):
+    """Crafting-table proximity failures become stale when a table is placed."""
+    if not execution.get("ok"):
+        return []
+    action = plan.get("action")
+    cleared = []
+    invalid = runtime.setdefault("invalid_targets", {})
+    if action == "place":
+        invalid.pop(_plan_target_key(plan), None)
+        if plan.get("item") == "minecraft:crafting_table":
+            for key, (_, why) in list(invalid.items()):
+                if key.startswith("craft@") and "crafting table within reach" in str(why).lower():
+                    invalid.pop(key, None)
+                    cleared.append(key)
+    elif action in {"move_to", "move_forward"}:
+        for key in list(invalid):
+            if key.startswith("place@near:"):
+                invalid.pop(key, None)
+                cleared.append(key)
+    return cleared
 
 
 def _handle_craft_learning(runtime, plan, execution, goal, inventory):
@@ -1058,6 +1092,8 @@ def _plan_target_key(plan):
             [plan.get("width"), plan.get("height"), plan.get("grid")],
             ensure_ascii=False, separators=(",", ":")
         )[:550]
+    if action == "place" and not all(plan.get(c) is not None for c in ("x", "y", "z")):
+        return "place@near:" + str(plan.get("item") or plan.get("slot")) + ":" + str(plan.get("face") or "up")
     if action not in {"mine", "move_to", "place"}:
         return None
     try:
@@ -1358,6 +1394,9 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
             for key, (_, why) in list(invalid.items()):
                 if why.startswith("mining_blocked|"):
                     invalid.pop(key, None)
+    cleared = _clear_resolved_placement_blockers(runtime, plan, execution)
+    if cleared:
+        log_event("practice_host", "prerequisite_resolved", cleared=cleared)
     _handle_craft_learning(runtime, plan, execution, user_goal, awareness_inventory)
     await update_awareness(runtime)
     log_event(
