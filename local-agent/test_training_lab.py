@@ -269,7 +269,8 @@ class TrainingLabRegressions(unittest.TestCase):
         self.assertEqual([bound[k] for k in ("x", "y", "z")], [54, 87, 180])
         self.assertEqual(lab._plan_allowed(bound, challenge), (True, "ok"))
         self.assertNotIn("x", proposal)  # do not mutate original LLM output
-        self.assertIn("schema_binding", bound["_schema_binding"])
+        self.assertEqual(bound["_schema_binding"],
+                         "exact_triple_confirmed_in_world_objective")
 
     def test_untrusted_textual_position_cannot_override_observed_target(self):
         challenge = lab.Challenge(
@@ -392,6 +393,9 @@ class TrainingLabRegressions(unittest.TestCase):
                     "nearestY": 64, "nearestZ": 12, "nearestDistance": 2,
                 }]
                 return original
+            def find(self, block_id, radius=7):
+                return [{"type": "minecraft:diamond_ore", "x": 12,
+                         "y": 64, "z": 12, "distance": 2}]
         world = ValuableOnly()
         self.assertIsNone(lab._select_challenge(
             "mine", world, world.snapshot(), __import__("random").Random(1)))
