@@ -1,5 +1,20 @@
 # Chat Companion local brain
 
+## Normal Windows launcher and updates
+
+Copy the `local-agent` Python files and `run.bat` into your existing
+`C:\\MinecraftAgent\\brain\\` folder. Keep your existing `.venv/`,
+configuration, and especially `data/companion_memory.sqlite3` intact.
+`run.bat` starts the normal local Qwen companion; `train.bat` is the
+separate physical training laboratory. You do not need to retrain Qwen or
+replace the Minecraft mod JAR for Python-only changes.
+
+The GitHub Actions `chat-companion-build` artifact includes `run.bat`,
+`train.bat`, `context_builder.py`, and their supporting Python modules.
+If you have personally customized `run.bat`, review differences before
+replacing it. The default launcher uses Qwen3 8B via Ollama and optionally
+enables an OpenAI teacher if `OPENAI_API_KEY` is available.
+
 ## Autonomous physical training lab v1
 
 The first training laboratory lives in local-agent/training_lab.py. It tests
