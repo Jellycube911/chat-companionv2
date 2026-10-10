@@ -1310,6 +1310,9 @@ def _wooden_pickaxe_goal_action(runtime, goal, inventory):
         if (time.monotonic() - when < _invalid_target_ttl(key)
                 and "crafting table within reach" not in str(reason).lower()):
             log_event("practice_host", "known_recipe_quarantined", key=key, reason=reason)
+            # The server's rejection is evidence. A new round of pointless
+            # log scans cannot fix a rejected recipe with available materials.
+            runtime["planner_backoff_until"] = time.monotonic() + 30.0
             return None
     return plan
 
