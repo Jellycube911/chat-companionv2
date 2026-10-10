@@ -43,8 +43,10 @@ jobs:
           trial = store.record_skill_trial(
               'ci approach target',
               'moving closer should reduce distance',
-              'observe(state) -> navigate(move_to) -> observe(state)',
-              'distance reduced in synthetic CI evidence',
+              '{"action":"move_to","x":1,"y":64,"z":0}',
+              '{"result":{"state":"COMPLETED","reason":"arrived"},'
+              '"before":{"state":{"pos":[0,64,0]}},'
+              '"after":{"state":{"pos":[1,64,0]}}}',
               True,
               skill_id=a['id'],
           )
