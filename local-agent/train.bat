@@ -24,9 +24,21 @@ REM Each cycle runs the full curriculum (observe, orient, navigate, mine, collec
 REM The trainer allows up to 100 cycles; use 120 minutes for long sessions.
 REM Existing no-progress and pending-job safety stops still apply.
 echo.
+:choose_cycles
 set "TRAIN_ROUNDS="
 set /p "TRAIN_ROUNDS=How many training cycles? (1-100, Enter for 30): "
 if not defined TRAIN_ROUNDS set "TRAIN_ROUNDS=30"
+
+REM Accept only whole-number input; invalid entries prompt again.
+echo(%TRAIN_ROUNDS%| findstr /r "^[1-9][0-9]*$" >nul
+if errorlevel 1 (
+    echo Please enter a whole number between 1 and 100.
+    goto choose_cycles
+)
+if %TRAIN_ROUNDS% GTR 100 (
+    echo The training lab supports at most 100 cycles per session.
+    goto choose_cycles
+)
 
 echo.
 echo Starting %TRAIN_ROUNDS% cycles (maximum session time: 120 minutes).
