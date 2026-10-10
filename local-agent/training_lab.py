@@ -236,9 +236,15 @@ def _select_challenge(name, world, snapshot, rng):
                 if (all(isinstance(v, int) for v in pos)
                         and _distance(origin, pos) <= 5.2
                         and abs(pos[1] - origin[1]) <= 2.0):
+                    standable = []
+                    for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                        neighbour = [pos[0] + dx, pos[1], pos[2] + dz]
+                        if _walkable(world, neighbour):
+                            standable.append(neighbour)
                     return Challenge(
                         name, "Mine this observed natural block through real breaking",
-                        {"type": b["type"], "pos": pos},
+                        {"type": b["type"], "pos": pos,
+                         "standable_candidates": standable},
                         ("mine", "scan_blocks", "look_at", "move_to"), dim)
         return None
     if name == "collect":
@@ -278,6 +284,11 @@ def _plan_allowed(plan, challenge, observed_extra=()):
     known = [challenge.target.get("pos")] + [
         b.get("pos") if isinstance(b, dict) else b for b in observed_extra
     ]
+    if action == "move_to":
+        # Only standable positions checked by block-at are valid destinations.
+        known = list(challenge.target.get("standable_candidates") or [])
+        if challenge.name == "navigate":
+            known = [challenge.target.get("pos")]
     matched = any(
         isinstance(p, (tuple, list)) and len(p) == 3
         and all(abs(pos[i] - float(p[i])) <= 0.05 for i in range(3))
@@ -294,6 +305,8 @@ def _plan_allowed(plan, challenge, observed_extra=()):
         )
         if matching_blocker:
             expected = matching_blocker["type"]
+            if expected not in PRACTICE_MATERIALS:
+                return False, "unsafe_obstruction_material"
         if plan.get("expected_block") != expected:
             return False, "block_identity_mismatch"
     return True, "ok"
