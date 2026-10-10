@@ -63,6 +63,23 @@ A trial is marked unavailable when there is no real suitable block, standable
 location or dropped item. Those are not counted as successes. The collection
 stage cannot run until a dropped item actually exists.
 
+**Stage 1 safe exploration recovery (v3):** If a round cannot
+navigate toward or mine any observed eligible resource, the trainer can
+offer a separate `explore` recovery objective: move to one of several
+Minecraft-confirmed standable positions in a different nearby area.
+Qwen chooses the candidate. Real pathfinding and collision still determine
+whether it can get there, and the actual distance moved is verified.
+Exploration is a distinct physical trial and **does not count as a navigation,
+mining, or collection success**. Broader checks for nearby standing spots
+at different elevations improve tree-canopy and slope handling without
+allowing teleporting, digging arbitrary obstructions, or fake observations.
+If neither real resource progress nor safe exploration occurs for three
+rounds, the session stops with `stopped_due_to_environment`, rather than
+circling indefinitely through observation and orientation.
+The plan parser also recognizes alternative numeric position wrappers
+(`position`, `pos`, `standable_pos`, `action_specific.pos`) but still
+authorizes only world-grounded candidate coordinates.
+
 **Stage 1 exercise order and interface learning (v2):**
 The training cycle now runs `observe → navigate → orient → mine → collect`.
 After successful navigation, the orientation challenge faces the SAME resource
