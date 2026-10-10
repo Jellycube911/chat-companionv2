@@ -10,6 +10,10 @@ from unittest.mock import patch
 import minecraft_agent as agent
 import practice_engine as practice
 
+# The existing CI suite discovers this file specifically. Include the new
+# offline training laboratory scenarios in that verified test entrypoint.
+from test_training_lab import TrainingLabRegressions
+
 
 class PracticeRegressions(unittest.TestCase):
     def test_another_wooden_pickaxe_is_a_persistent_user_goal(self):
