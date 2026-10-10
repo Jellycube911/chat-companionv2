@@ -55,7 +55,8 @@ class FakePhysicalWorld:
         self.calls.append(dict(plan))
         action = plan["action"]
         if action == "scan_blocks":
-            block_id = next(iter(plan.get("exact") or plan.get("contains") or []), "")
+            selection = plan.get("exact") or plan.get("contains") or []
+            block_id = selection if isinstance(selection, str) else next(iter(selection), "")
             return {"ok": True, "plan": plan,
                     "result": {"ok": True, "blocks": [
                         {"type": block_id, "pos": [
