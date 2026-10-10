@@ -31,7 +31,7 @@ from memory_store import store
 BASE_DIR = Path(__file__).resolve().parent
 REPORT_DIR = BASE_DIR / "data" / "training_reports"
 CURRICULUM = ("observe", "navigate", "orient", "mine", "collect")
-TRAINING_BUILD = "minecraft-training-lab-v1"
+TRAINING_BUILD = "minecraft-training-lab-v2"
 # Safety filter for selecting a training resource, NOT a gameplay strategy.
 # No chests, machines, crops, player buildings or precious ores are harvested.
 PRACTICE_MATERIALS = ("minecraft:dirt", "minecraft:stone", "minecraft:grass_block",
@@ -718,11 +718,26 @@ def _record_episode(challenge, attempts, passed, elapsed, initial, reason):
         # A malformed model JSON or forbidden action never touched Minecraft.
         # Keep the diagnosis, but do not poison skill memory with fictitious
         # "failed gameplay" experiences.
+        faults = [
+            {"reason": a["reason"],
+             "guidance": _interface_feedback(a["reason"], challenge)}
+            for a in attempts if a.get("status") == "rejected"
+        ][-3:]
         store.record_event(
             "training_interface_failure",
             json.dumps({"task": challenge.name, "rejections": rejections,
-                        "reason": reason, "seconds": round(elapsed, 2)})[:1300],
+                        "reason": reason, "feedback": faults,
+                        "seconds": round(elapsed, 2)})[:1300],
         )
+        # Persistent protocol feedback is distinct from skill trials.
+        # It assists the local model after a restart, never confers success.
+        if faults:
+            store.remember(
+                "training_protocol",
+                "training.protocol." + challenge.name,
+                json.dumps(faults, ensure_ascii=False),
+                importance=5,
+            )
         return
     reward = (1.0 if passed else -1.0) - (0.1 * rejections) - (
         0.02 * elapsed) - (0.05 * max(0, executed - 1))
@@ -788,6 +803,12 @@ def _prompt(challenge, snapshot, attempts, history, observed_extra=()):
         "previous_episodes": [
             {"success": h["success"], "hypothesis": h["hypothesis"],
              "outcome": h["outcome"][:250]} for h in history[-4:]
+        ],
+        "previous_interface_lessons": [
+            row["content"] for row in store.recall(
+                "training.protocol." + challenge.name, limit=3)
+            if row.get("kind") == "training_protocol"
+            and row.get("key") == "training.protocol." + challenge.name
         ],
         "rule": "Use only observed coordinates and actual block IDs. "
                 "If failed, form a different hypothesis. Never claim success.",
