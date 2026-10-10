@@ -15,8 +15,9 @@ def output_for_goal(title):
     )
     if match:
         return "minecraft:" + match.group(1) + "_pickaxe"
-    if text.startswith("craft minecraft:"):
-        return text.removeprefix("craft ").strip()
+    match_id = re.fullmatch(r"craft ([a-z0-9_]+:[a-z0-9_./-]+)", text)
+    if match_id:
+        return match_id.group(1)
     return None
 
 
