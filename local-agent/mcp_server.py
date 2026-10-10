@@ -572,6 +572,20 @@ def world_action(
 
 @mcp.tool()
 @_tool_guard
+def recipe_knowledge(output: str, limit: int = 12):
+    """Look up authoritative, loaded vanilla/modded/data-pack crafting recipes.
+
+    This is observation only; it does not spend items. Ingredient alternatives
+    and grid dimensions come directly from the world's recipe registry.
+    """
+    return _post("/recipe-knowledge", {
+        "output": str(output).strip().lower()[:120],
+        "limit": max(1, min(24, int(limit))),
+    })
+
+
+@mcp.tool()
+@_tool_guard
 def craft(
     width: int,
     height: int,
