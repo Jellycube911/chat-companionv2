@@ -30,6 +30,20 @@ class GoalControlRegressions(unittest.TestCase):
         self.assertIsNotNone(agent._planner_shape_error(
             {"action": "scan_blocks", "filters": ["???"]}))
 
+    def test_symbolic_goal_id_with_relevant_logs_is_normalized_not_rejected(self):
+        goal = {"id": 31, "source": "user", "title": "Gather 8 logs"}
+        raw = '{"action":"scan_blocks","filters":["minecraft:oak_log"],' \
+              '"goal_id":"mine:minecraft:oak_log","intent":"scan for logs"}'
+        parsed = practice.parse_plan(raw)
+        bound = agent._bind_planner_goal(parsed, goal)
+        self.assertEqual(bound["goal_id"], 31)
+        self.assertTrue(agent._plan_matches_user_goal(bound, goal))
+        self.assertIsNone(agent._planner_shape_error(bound))
+        unrelated = practice.parse_plan(raw.replace("minecraft:oak_log",
+                                                       "minecraft:grass_block"))
+        denied = agent._bind_planner_goal(unrelated, goal)
+        self.assertFalse(agent._plan_matches_user_goal(denied, goal))
+
     def test_direct_user_order_pauses_old_self_and_old_user_goals(self):
         with tempfile.TemporaryDirectory() as folder:
             db = MemoryStore(Path(folder) / "memory.sqlite3")
