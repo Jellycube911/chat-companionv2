@@ -4159,18 +4159,7 @@ async def poll_minecraft_chat(input_queue, runtime, chat_agent):
                         )
                         continue
 
-                    simple = _simple_chat_reply(text, runtime)
-                    if simple is not None:
-                        await _send_ingame(
-                            simple,
-                            reason="instant_chat",
-                        )
-                        print(f"\n[MINECRAFT] Alik: {text}")
-                        print(f"\nAI [instant chat]: {simple}")
-                        store.record_episode(text, simple)
-                        log_event("chat", "instant_reply", message=text, reply=simple)
-                        continue
-
+                    # Qwen handles normal greetings and casual conversation.
                     reflex = await fast_chat_reflex(text, runtime)
                     if reflex and reflex.get("handled"):
                         reply = reflex.get("reply") or "yep"
@@ -4592,51 +4581,8 @@ async def autonomy_sensor(input_queue, runtime):
 
         owner_distance = float(owner.get("distance", 0) or 0)
 
-        if (
-            owner_distance > 18.0
-            and not job_active
-            and now - last_owner_approach > 12.0
-        ):
-            try:
-                await asyncio.to_thread(
-                    _post,
-                    "/move-to",
-                    {
-                        "x": owner.get("x"),
-                        "y": owner.get("y"),
-                        "z": owner.get("z"),
-                    },
-                )
-                store.record_event(
-                    "reflex",
-                    f"Moved toward Alik at {owner_distance:.1f} blocks distance.",
-                )
-            except Exception:
-                pass
-            last_owner_approach = now
-            continue
-
-        if (
-            nearby_items
-            and float(nearby_items[0].get("distance", 999)) <= 3.5
-            and not job_active
-            and now - last_item_reflex > 8.0
-        ):
-            try:
-                await asyncio.to_thread(_post, "/collect-items")
-                store.record_event(
-                    "reflex",
-                    f"Moved to collect {nearby_items[0].get('droppedItem')}.",
-                )
-            except Exception:
-                pass
-            last_item_reflex = now
-            continue
-
-        # Do not manufacture a vague 'Improve practical capability' goal.
-        # With no assigned work, Qwen can decide to explore or remain idle,
-        # based on observations and persisted experience.
-
+        # Sensor data informs Qwen. Do not silently decide to follow
+        # the owner or collect dropped items without a model proposal.
         meaningful_goals = [
             goal
             for goal in store.list_goals("active", 4)
