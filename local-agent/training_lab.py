@@ -1244,7 +1244,16 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
         e["task"] == "gather_wood" and e["status"] == "passed"
         for e in report["episodes"])
     report["ended_at"] = datetime.now(timezone.utc).isoformat()
-    report["status"] = "completed"
+    stopped = (
+        halted_on_pending or finished_due_to_time or finished_due_to_environment
+        or unproductive_rounds >= 3)
+    report["status"] = "stopped_early" if stopped else "completed"
+    if stopped:
+        report["stop_reason"] = (
+            "pending_physical_job" if halted_on_pending else
+            "time_limit" if finished_due_to_time else
+            "environment_stagnation" if finished_due_to_environment else
+            "no_executed_actions")
     report.pop("active_exercise", None)
     checkpoint()
     store.record_event("training_session",
