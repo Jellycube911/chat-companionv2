@@ -388,10 +388,11 @@ jobs:
           PY
       - name: Practice loop regression tests
         run: |
-          python -m py_compile local-agent/training_lab.py local-agent/training_progress.py
+          python -m py_compile local-agent/training_lab.py local-agent/training_progress.py local-agent/stage1_exam.py
           python -m py_compile local-agent/test_context_builder.py
           python -m unittest discover -s local-agent -p 'test_context_builder.py' -v
           python -m unittest discover -s local-agent -p 'test_practice_regressions.py' -v
+          python -m unittest discover -s local-agent -p 'test_stage1_exam.py' -v
       - name: Core tests, loader builds and real server GameTests
         env:
           JAVA_TOOL_OPTIONS: -Xverify:all
@@ -415,6 +416,7 @@ jobs:
             local-agent/practice_engine.py
             local-agent/training_lab.py
             local-agent/training_progress.py
+            local-agent/stage1_exam.py
             local-agent/train.bat
             local-agent/run.bat
             local-agent/knowledge_engine.py
