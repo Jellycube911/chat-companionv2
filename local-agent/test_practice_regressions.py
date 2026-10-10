@@ -30,7 +30,11 @@ class PracticeRegressions(unittest.TestCase):
                     "set a new goal, instead of improving make a wooden axe"))
             self.assertEqual(new["title"], "Craft minecraft:wooden_axe")
             active = db.list_goals("active", 20)
-            self.assertEqual([x["id"] for x in active], [new["id"]])
+            # The baseline system safety/awareness goal remains active;
+            # switching goals only pauses competing USER and SELF goals.
+            personal = [g["id"] for g in active
+                        if g.get("source") in {"self", "user"}]
+            self.assertEqual(personal, [new["id"]])
             paused = db.list_goals("paused", 20)
             self.assertEqual({x["id"] for x in paused}, {old["id"], old_user["id"]})
             self.assertTrue(any(e["kind"] == "goal_switched"
