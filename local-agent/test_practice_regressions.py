@@ -17,6 +17,57 @@ from test_training_progress import TrainingProgressRegressions
 
 
 class PracticeRegressions(unittest.TestCase):
+    def test_explicit_goal_switch_pauses_old_goal_and_retains_memory(self):
+        from memory_store import MemoryStore
+        with tempfile.TemporaryDirectory() as folder:
+            db = MemoryStore(Path(folder) / "learning.sqlite3")
+            old = db.create_goal("Improve practical capability", "experiment", 4, "self")
+            old_user = db.create_goal("Gather 8 logs", "old request", 8, "user")
+            with patch.object(agent, "store", db), patch.object(
+                agent, "_remember_behavior_feedback"
+            ):
+                new = asyncio.run(agent.fast_task_intent(
+                    "set a new goal, instead of improving make a wooden axe"))
+            self.assertEqual(new["title"], "Craft minecraft:wooden_axe")
+            active = db.list_goals("active", 20)
+            self.assertEqual([x["id"] for x in active], [new["id"]])
+            paused = db.list_goals("paused", 20)
+            self.assertEqual({x["id"] for x in paused}, {old["id"], old_user["id"]})
+            self.assertTrue(any(e["kind"] == "goal_switched"
+                                for e in db.recent_events(5)))
+
+    def test_autonomy_does_not_force_mine_all_scanned_resources(self):
+        now = agent.time.monotonic()
+        runtime = {
+            "last_resource_scan": {
+                "at": now, "origin": {"x": 5.5, "y": 70, "z": 10.5},
+                "blocks": [
+                    {"type": "minecraft:oak_log", "pos": [9, 70, 11]},
+                    {"type": "minecraft:oak_log", "pos": [10, 70, 11]},
+                ],
+            },
+            "awareness": {"state": {"x": 5.5, "y": 70, "z": 10.5}},
+        }
+        goal = {"source": "self", "title": "Improve practical capability"}
+        self.assertIsNone(agent._material_action_from_scan(runtime, goal, []))
+        self.assertIsNone(agent._material_action_from_scan(runtime, None, []))
+
+    def test_console_goal_triggers_immediate_planning_command(self):
+        from unittest.mock import AsyncMock
+        async def scenario():
+            runtime = {"reasoning_task": None}
+            with patch("builtins.input", side_effect=[
+                "set a new goal, instead of improving make a wooden axe", "quit"
+            ]), patch.object(
+                agent, "fast_task_intent", new_callable=AsyncMock,
+                side_effect=[{"id": 77, "title": "Craft minecraft:wooden_axe"}, None]
+            ), patch.object(agent, "enqueue", new_callable=AsyncMock) as queued:
+                await agent.console_input(asyncio.PriorityQueue(), runtime)
+                self.assertEqual(runtime["user_goal_revision"], 1)
+                self.assertEqual([c.args[3] for c in queued.await_args_list],
+                                 ["console", "command", "console"])
+        asyncio.run(scenario())
+
     def test_another_wooden_pickaxe_is_a_persistent_user_goal(self):
         with patch.object(agent, "_remember_behavior_feedback"), patch.object(
             agent, "_ensure_user_goal",
