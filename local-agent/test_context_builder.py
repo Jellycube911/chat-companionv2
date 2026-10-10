@@ -97,6 +97,68 @@ class SharedContextTests(unittest.TestCase):
         self.assertIn("minecraft:stone", prompt)
         self.assertIn("[3, 64, 0]", prompt)
 
+    def test_empty_collection_receipt_is_not_gameplay_success(self):
+        from practice_engine import _objective_success
+        before = {"inventory": [{"item": "minecraft:dirt", "count": 1}]}
+        unchanged = {"inventory": [{"item": "minecraft:dirt", "count": 1}]}
+        acquired = {"inventory": [{"item": "minecraft:dirt", "count": 2}]}
+        receipt = {"state": "COMPLETED", "reason": "collection_complete:0"}
+        self.assertFalse(_objective_success({"action": "collect"}, before, unchanged, receipt))
+        self.assertTrue(_objective_success({"action": "collect"}, before, acquired, receipt))
+
+    def test_unverified_claims_do_not_upgrade_skills(self):
+        import json
+        skill = self.store.save_learned_skill("Pickup", "pickup", "Collect real items")
+        action = '{"action":"collect"}'
+        for state in ("RUNNING", "COMPLETED"):
+            outcome = json.dumps({
+                "result": {"state": state, "reason": "collection_complete:0"},
+                "before": {"inventory": [{"item": "minecraft:dirt", "count": 2}]},
+                "after": {"inventory": [{"item": "minecraft:dirt", "count": 2}]},
+            })
+            claim = self.store.record_skill_trial(
+                "pickup", "try", action, outcome, True, skill_id=skill["id"])
+            self.assertFalse(claim["ok"])
+        self.assertEqual(self.store.learned_skill(skill["id"])["successes"], 0)
+        proof = json.dumps({
+            "result": {"state": "COMPLETED", "reason": "collection_complete:1"},
+            "before": {"inventory": [{"item": "minecraft:dirt", "count": 2}]},
+            "after": {"inventory": [{"item": "minecraft:dirt", "count": 3}]},
+        })
+        result = self.store.record_skill_trial(
+            "pickup", "tested", action, proof, True, skill_id=skill["id"])
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.store.learned_skill(skill["id"])["successes"], 1)
+
+    def test_repeated_failure_digest_preserves_raw_trials(self):
+        import json
+        evidence = json.dumps({"result": {
+            "state": "FAILED",
+            "reason": "mining_blocked|block=minecraft:oak_leaves|at=6,7,8"}})
+        for _ in range(18):
+            self.store.record_skill_trial("mine test", "blocked",
+                                          '{"action":"mine"}', evidence, False)
+        self.assertEqual(len(self.store.recent_skill_trials("mine test", 30)), 18)
+        digest = self.store.recent_trials_digest(8)
+        group = next(x for x in digest if x["intent"] == "mine test")
+        self.assertEqual(group["repetitions"], 18)
+        with patch.object(agent, "store", self.store):
+            text = agent.build_practice_plan_input(self.runtime, directive="mine test")
+        self.assertIn("repeats=18", text)
+
+    def test_explicit_user_teaching_survives_restart(self):
+        path = Path(self.folder.name) / "memory.sqlite3"
+        self.assertFalse(self.store.remember_explicit_teaching("Hello there"))
+        for _ in range(2):
+            self.assertTrue(self.store.remember_explicit_teaching(
+                "Remember that the base camp is near the birch forest"))
+        restarted = MemoryStore(path)
+        remembered = restarted.recall("base camp birch forest", 5)
+        self.assertEqual(sum(x["kind"] == "user_taught" for x in remembered), 1)
+        with patch.object(agent, "store", restarted):
+            chat = agent.build_turn_input("Where is base camp?", "minecraft", self.runtime)
+        self.assertIn("birch forest", chat)
+
     def test_context_budget_does_not_dump_unrelated_memories(self):
         self.store.remember("fact", "irrelevant.secret", "Unrelated text.", 5)
         self.store.record_episode("hello", "hey")
