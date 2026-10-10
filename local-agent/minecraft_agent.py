@@ -23,6 +23,7 @@ from memory_store import store
 from skill_executor import run_task
 from action_log import DEFAULT_LOG, log_event, log_exception, start_session
 from practice_engine import execute_plan, parse_plan
+from knowledge_engine import decide_recipe, output_for_goal
 
 
 MINECRAFT_URL = "http://127.0.0.1:8765"
@@ -676,6 +677,17 @@ def build_practice_plan_input(runtime, directive=None):
         for key, (_, reason) in blocked[-8:]:
             parts.append(f"- {_trim(key, 280)}: {_trim(reason, 180)}")
 
+    knowledge = runtime.get("knowledge_last") or {}
+    if knowledge and knowledge.get("target"):
+        parts.append(
+            "WORLD RECIPE KNOWLEDGE (from Minecraft, NOT a guess): "
+            + json.dumps(knowledge, ensure_ascii=False)[:950]
+        )
+        parts.append(
+            "If a recipe dependency is missing, acquire it or request a "
+            "cloud lesson after repeated failure. Do not rescan unrelated logs."
+        )
+
     if events:
         parts.append("RECENT EVENTS/OBSERVATIONS:")
         for event in events:
@@ -755,6 +767,16 @@ def _reconcile_user_goals(execution):
 
         result = (execution or {}).get("result") or {}
         acted = (execution or {}).get("plan") or {}
+        if normalized.startswith("craft minecraft:"):
+            if (
+                execution.get("ok")
+                and acted.get("action") == "craft"
+                and str(result.get("item") or "") == normalized.removeprefix("craft ")
+            ):
+                store.update_goal(goal["id"], status="completed")
+                messages.append("crafted " + normalized.removeprefix("craft ").split(":")[-1])
+            continue
+
         if normalized == "chop a log":
             if (
                 execution.get("ok")
@@ -1317,6 +1339,66 @@ def _wooden_pickaxe_goal_action(runtime, goal, inventory):
     return plan
 
 
+def _lookup_world_recipe(runtime, output):
+    """Bounded, cached read of the world, not LLM inference."""
+    cache = runtime.setdefault("world_recipe_cache", {})
+    entry = cache.get(output)
+    if entry and time.monotonic() - entry[0] < 120:
+        return entry[1]
+    try:
+        data = _post("/recipe-knowledge", {"output": output, "limit": 16})
+    except (requests.RequestException, ValueError) as error:
+        log_event("knowledge", "recipe_lookup_error", output=output, error=str(error))
+        return {"ok": False, "error": str(error)}
+    if isinstance(data, dict) and data.get("ok") is not False:
+        cache[output] = (time.monotonic(), data)
+        log_event("knowledge", "recipe_lookup", output=output,
+                  count=len(data.get("recipes") or []), source=data.get("source"))
+        if data.get("recipes"):
+            store.remember(
+                "recipe", "world." + output,
+                json.dumps({"source": data.get("source"),
+                            "recipes": (data.get("recipes") or [])[:3]},
+                           separators=(",", ":"), ensure_ascii=False)[:3900],
+                7,
+            )
+    return data
+
+
+def _general_recipe_goal_action(runtime, goal, inventory):
+    """Ask the actual server for a recipe and pursue one affordable step.
+
+    Item names are not enumerated in Python. The same code supports any
+    shaped/shapeless output the modpack exposes through RecipeManager.
+    """
+    target = output_for_goal((goal or {}).get("title"))
+    if not target:
+        return None
+    action, reason, chain = decide_recipe(
+        goal, inventory, lambda item: _lookup_world_recipe(runtime, item), depth=3
+    )
+    runtime["knowledge_last"] = {
+        "target": target, "reason": reason, "chain": chain[:5],
+    }
+    if action:
+        key = _plan_target_key(action)
+        invalid = runtime.setdefault("invalid_targets", {})
+        if key in invalid:
+            at, why = invalid[key]
+            if (time.monotonic() - at < _invalid_target_ttl(key)
+                    and "crafting table within reach" not in str(why).lower()):
+                runtime["planner_backoff_until"] = time.monotonic() + 25
+                log_event("knowledge", "known_recipe_rejected",
+                          output=target, key=key, observed_reason=why)
+                return None
+        log_event("knowledge", "recipe_step", target=target, action=action,
+                  dependency_chain=chain)
+        return action
+    log_event("knowledge", "recipe_missing_step", target=target,
+              reason=reason, dependency_chain=chain)
+    return None
+
+
 def _resume_blocked_crafting(runtime, goal, inventory):
     """One evidence-based follow-up primitive; no recipe hardcoding."""
     recipe = _recover_blocked_craft(goal, inventory, runtime)
@@ -1686,9 +1768,18 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         if continuation is None and not (
             time.monotonic() < float(runtime.get("planner_backoff_until", 0.0) or 0.0)
         ):
-            continuation = _wooden_pickaxe_goal_action(
-                runtime, active_user_goal, awareness_inventory
+            continuation = await asyncio.to_thread(
+                _general_recipe_goal_action, runtime, active_user_goal, awareness_inventory
             )
+            if continuation is None and output_for_goal(active_user_goal.get("title")):
+                # A missing recipe/service should trigger learning or honest
+                # resource planning, not unbounded Qwen crafting guesses.
+                knowledge = runtime.get("knowledge_last") or {}
+                if knowledge.get("reason") == "recipe_service_unavailable":
+                    runtime["planner_backoff_until"] = time.monotonic() + 25
+                    log_event("knowledge", "recipe_api_unavailable",
+                              message="Install matching NeoForge mod JAR to expose /recipe-knowledge")
+
         if continuation:
             log_event(
                 "practice_host", "goal_continuation",
@@ -2484,6 +2575,24 @@ async def fast_task_intent(text):
             text,
             9,
         )
+
+    # Generic crafting goals are resolved through the world recipe registry,
+    # rather than growing a separate hand-written if/else for each new item.
+    matched = re.match(
+        r"^(?:make|craft)\\s+(?:(?:me|us)\\s+)?(?:(?:an?|some|more|another)\\s+)?"
+        r"([a-z0-9_:][a-z0-9_:\\s-]{1,76})$",
+        normalized,
+    )
+    if matched:
+        item = matched.group(1).strip().replace("-", "_").replace(" ", "_")
+        if item.endswith("ies"):
+            item = item[:-3] + "y"
+        elif item.endswith("s") and not item.endswith(("ss", "glass")):
+            item = item[:-1]
+        if item not in {"it", "this", "that", "stuff", "something", "house", "home"}:
+            if ":" not in item:
+                item = "minecraft:" + item
+            return _ensure_user_goal("Craft " + item, text, 9)
 
     return None
 
