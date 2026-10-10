@@ -86,6 +86,40 @@ The host continuously maintains a compact current world model from:
 This awareness is injected into brain turns without storing every sensor tick in the prompt.
 
 
+## Self-service Minecraft recipe knowledge (v14)
+
+The NeoForge localhost bridge exposes `POST /recipe-knowledge` to query the
+**loaded server RecipeManager**, including datapack and mod-added shaped /
+shapeless recipes. The MCP tool `recipe_knowledge(output="minecraft:torch")`
+returns actual recipe IDs, dimensions, ingredient alternatives and outputs.
+It is an observation API, not an item grant or recipe bypass.
+
+`knowledge_engine.py` uses these recipes to plan intermediate materials from
+the companion's actual inventory. It re-queries the world after each physical
+step. Successful craft results are recorded by the existing practice engine.
+This does not automatically implement furnaces, machines, trading, combat,
+building or general game navigation: those need their own supported primitives
+and planning/verification loop. Dynamic/special recipes without static grids
+are intentionally not reported as simple crafting recipes.
+
+**Installation (v14):** Replace the old NeoForge companion JAR with the
+matching new JAR and restart Minecraft **once** because a new HTTP route was
+added. Stop `run.bat`, update `minecraft_agent.py`, `mcp_server.py` and
+`knowledge_engine.py` in `C:\\MinecraftAgent\\brain\\`, then restart
+`run.bat`. Leave `data/` and the SQLite database untouched.
+
+For cloud teaching, `COMPANION_CLOUD_TEACHER=on` does **not** itself authorize
+API access. Set a valid `OPENAI_API_KEY` securely in your environment and
+select a model available to your API project with `COMPANION_TEACHER_MODEL`.
+The terminal reports missing keys, and cloud responses/errors appear with
+`[TEACHER]`. Repeated unproductive goals can queue one short teacher lesson;
+per-topic cooldown prevents constant requests.
+
+To check the key without printing it on Windows CMD:
+```bat
+if defined OPENAI_API_KEY (echo Teacher API key found) else (echo Teacher API key MISSING)
+```
+
 ## Hybrid local brain + OpenAI teacher
 
 Normal conversation, planning, awareness, goals and Minecraft behavior use the
