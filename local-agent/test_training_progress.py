@@ -132,8 +132,10 @@ class TrainingProgressRegressions(unittest.TestCase):
                                                  + "|tool=minecraft:air|break_ticks=8"}}
                 if plan["action"] == "collect":
                     self.calls.append(dict(plan))
+                    total = sum(item["count"] for item in self.items
+                                if item["item"] == "minecraft:oak_log")
                     self.items = [{"slot": 2, "item": "minecraft:oak_log",
-                                   "count": 1}]
+                                   "count": total + 1}]
                     self.entities = []
                     return {"ok": True, "plan": plan,
                             "result": {"state": "COMPLETED",
