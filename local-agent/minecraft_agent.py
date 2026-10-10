@@ -732,6 +732,14 @@ def build_practice_plan_input(runtime, directive=None):
                 f"- [{event['kind']}] {_trim(event['summary'], 360)}"
             )
 
+    known_scan = runtime.get("last_resource_scan") or {}
+    if known_scan.get("blocks") and time.monotonic() - known_scan.get("at", 0) < 90:
+        parts.append("FRESH OBSERVED BLOCK TARGETS (coordinates are evidence, not a command):")
+        parts.append(json.dumps(known_scan["blocks"][:12], ensure_ascii=False)[:1550])
+        parts.append("These blocks were already observed. Prefer ONE safe physical "
+                     "experiment using an observed target. Do not rescan these "
+                     "same targets without a changed position or new question.")
+
     empty_scans = _recent_empty_scans(runtime)
     if empty_scans:
         parts.append("RECENT NEGATIVE SEARCH EVIDENCE (not acquired resources):")
@@ -1899,7 +1907,8 @@ def _remember_scan_evidence(runtime, plan, execution):
     blocks = (execution.get("result") or {}).get("blocks") or []
     runtime["last_resource_scan"] = {
         "at": time.monotonic(), "origin": dict(zip(("x", "y", "z"), pos)),
-        "blocks": blocks,
+        "dimension": observation.get("dimension", state.get("dimension")),
+        "query": query, "blocks": blocks,
     }
     records = _recent_empty_scans(runtime)
     if blocks:
@@ -1913,6 +1922,45 @@ def _remember_scan_evidence(runtime, plan, execution):
         })
         runtime["empty_resource_scans"] = records[-12:]
 
+
+
+def _covered_positive_scan(runtime, plan):
+    """Reject re-observation of a known target set at the same vantage point.
+
+    Positive observations are useful evidence, not repeated task progress.
+    Only reject a scan if its current filter is covered by the last positive
+    scan, the position has not materially changed, and the result is recent.
+    """
+    if plan.get("action") != "scan_blocks":
+        return None
+    scan = runtime.get("last_resource_scan") or {}
+    if not scan.get("blocks") or time.monotonic() - scan.get("at", 0) > 90:
+        return None
+    state = ((runtime.get("awareness") or {}).get("state") or {})
+    origin = scan.get("origin") or {}
+    try:
+        if state.get("dimension") != scan.get("dimension"):
+            return None
+        if any(abs(float(state[k]) - float(origin[k])) > 2.0
+               for k in ("x", "y", "z")):
+            return None
+        previous = scan["query"]
+        current = scan_query(plan)
+        if current["exposed_only"] != previous["exposed_only"]:
+            return None
+        if current["radius"] > previous["radius"]:
+            return None
+        # The scan API supports both exact matches and substring filters.
+        # Be conservative when deciding whether evidence covers a new query.
+        if not set(current["contains"]).issubset(set(previous["contains"])):
+            return None
+        if not set(current["exact"]).issubset(set(previous["exact"])):
+            return None
+        if not current["contains"] and not current["exact"]:
+            return None
+    except (KeyError, ValueError, TypeError):
+        return None
+    return scan
 
 
 def _missing_goal_materials(runtime, goal):
@@ -2552,6 +2600,35 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         log_event("practice_host", "invalid_target_replanned", old=plan, new=revised)
         plan = revised
         target_key = revised_key
+
+    positive = _covered_positive_scan(runtime, plan)
+    if positive and source == "practice":
+        log_event("practice_host", "repeat_positive_scan_rejected",
+                  plan=plan, known_blocks=len(positive["blocks"]))
+        alternate = await _local_fast_completion(
+            runtime, PRACTICE_PLANNER_INSTRUCTIONS,
+            prompt + "\nREJECTED REDUNDANT POSITIVE SCAN: the current area already "
+            "contains world-observed targets, shown above. Repeating a scan "
+            "is NOT progress. Propose a safe physical experiment (look_at, "
+            "move_to, mine, collect, etc.) using observed evidence, or idle "
+            "if nothing safe is possible. Do not invent coordinates. JSON only.",
+            json_mode=True, max_tokens=220,
+        )
+        revision = _normalize_planner_scan(
+            _bind_planner_goal(parse_plan(alternate), user_goal))
+        if (revision is None or _planner_shape_error(revision) is not None
+                or _covered_positive_scan(runtime, revision)
+                or _covered_empty_scan(runtime, revision)
+                or not _plan_matches_user_goal(
+                    revision, user_goal, directive or _current_user_subgoal(runtime))
+                or not _scan_serves_user_goal(runtime, revision, user_goal)):
+            runtime["planner_backoff_until"] = time.monotonic() + 25.0
+            store.record_event("practice_stalled",
+                               "Redundant positive scan rejected; awaiting a new hypothesis.")
+            return {"ok": False, "status": "positive_scan_stalled", "plan": plan}
+        log_event("practice_host", "positive_scan_replanned", old=plan, new=revision)
+        plan = revision
+        target_key = _plan_target_key(plan)
 
     covered = _covered_empty_scan(runtime, plan)
     if covered:
