@@ -132,7 +132,7 @@ class TrainingLabRegressions(unittest.TestCase):
                 self.assertEqual(len(world.calls), 5)
                 self.assertEqual(
                     [p["action"] for p in world.calls],
-                    ["scan_blocks", "look_at", "move_to", "mine", "collect"])
+                    ["scan_blocks", "move_to", "look_at", "mine", "collect"])
                 self.assertEqual(len(db.recent_skill_trials("training.mine", 6)), 1)
                 self.assertEqual(len(db.recent_skill_trials("training.collect", 6)), 1)
                 disk = json.loads(Path(report["report_path"]).read_text())
@@ -179,6 +179,95 @@ class TrainingLabRegressions(unittest.TestCase):
                             "orient" if plan["action"] == "look_at" else "navigate",
                             "test", {"pos": known},
                             (plan["action"],), "minecraft:overworld")), (True, "ok"))
+
+    def test_mining_filter_is_bound_only_to_exact_observed_target(self):
+        challenge = lab.Challenge(
+            "mine", "Mine observed tree",
+            {"type": "minecraft:birch_log", "pos": [12, 64, 13]},
+            ("mine", "scan_blocks"), "minecraft:overworld")
+        fuzzy = {"action": "mine", "x": 12, "y": 64, "z": 13,
+                 "expected_contains": "_log", "hypothesis": "try real block"}
+        fixed = lab._bind_observed_mining_identity(fuzzy, challenge)
+        self.assertEqual(fixed["expected_block"], "minecraft:birch_log")
+        self.assertEqual(lab._plan_allowed(fixed, challenge), (True, "ok"))
+        self.assertNotIn("expected_block", fuzzy)
+        for faulty in (
+            {**fuzzy, "x": 999},
+            {**fuzzy, "expected_contains": "stone"},
+            {**fuzzy, "expected_block": "minecraft:oak_log"},
+        ):
+            with self.subTest(faulty=faulty):
+                refused = lab._bind_observed_mining_identity(faulty, challenge)
+                self.assertFalse(lab._plan_allowed(refused, challenge)[0])
+
+    def test_model_fuzzy_identity_executes_once_not_four_rejections(self):
+        class FuzzyPlanner(FakeLocalPlanner):
+            def propose(self, payload):
+                plan = super().propose(payload)
+                if plan["action"] == "mine":
+                    plan.pop("expected_block")
+                    plan["expected_contains"] = "_log"
+                return plan
+        world = FakePhysicalWorld()
+        with tempfile.TemporaryDirectory() as tmp:
+            db = MemoryStore(Path(tmp) / "memory.sqlite3")
+            with patch.object(lab, "store", db), patch.object(lab, "log_event"):
+                report = lab.run_training(
+                    world, FuzzyPlanner(), rounds=1, max_steps=4,
+                    report_dir=Path(tmp))
+            self.assertEqual(report["episodes"][3]["status"], "passed")
+            self.assertEqual(report["summary"]["rejected_proposals"], 0)
+            self.assertEqual(len([p for p in world.calls if p["action"] == "mine"]), 1)
+
+    def test_repeated_invalid_mining_stops_as_interface_error_not_game_failure(self):
+        class StubbornPlanner(FakeLocalPlanner):
+            def propose(self, payload):
+                plan = super().propose(payload)
+                if plan["action"] == "mine":
+                    plan["expected_block"] = "minecraft:stone"
+                return plan
+        world = FakePhysicalWorld()
+        with tempfile.TemporaryDirectory() as tmp:
+            db = MemoryStore(Path(tmp) / "memory.sqlite3")
+            with patch.object(lab, "store", db), patch.object(lab, "log_event"):
+                report = lab.run_training(
+                    world, StubbornPlanner(), rounds=1, max_steps=4,
+                    report_dir=Path(tmp))
+            mining = report["episodes"][3]
+            self.assertEqual(mining["status"], "interface_error")
+            self.assertEqual(mining["attempts"], 2)
+            self.assertEqual(mining["experiments"][-1]["reason"],
+                             "repeat_without_new_evidence")
+            self.assertEqual(report["summary"]["interface_errors"], 1)
+            self.assertEqual(report["summary"]["rejected_proposals"], 2)
+            self.assertEqual(len([p for p in world.calls if p["action"] == "mine"]), 0)
+            self.assertFalse(db.recent_skill_trials("training.mine"))
+
+    def test_orientation_after_navigation_uses_same_world_confirmed_block(self):
+        class StableResourceWorld(FakePhysicalWorld):
+            def find(self, block_id, radius=7):
+                ids = [block_id] if isinstance(block_id, str) else list(block_id)
+                if "minecraft:oak_log" in ids:
+                    return [{"type": "minecraft:oak_log", "x": 16,
+                             "y": 64, "z": 11}]
+                return []
+        world = StableResourceWorld()
+        with tempfile.TemporaryDirectory() as tmp:
+            db = MemoryStore(Path(tmp) / "memory.sqlite3")
+            with patch.object(lab, "store", db), patch.object(lab, "log_event"):
+                report = lab.run_training(
+                    world, FakeLocalPlanner(), rounds=1, max_steps=2,
+                    report_dir=Path(tmp))
+            self.assertEqual([e["task"] for e in report["episodes"][:4]],
+                             ["observe", "navigate", "orient", "mine"])
+            self.assertEqual(report["episodes"][1]["status"], "passed")
+            self.assertEqual(report["episodes"][2]["status"], "passed")
+            nav = next(p for p in world.calls if p["action"] == "move_to")
+            look = next(p for p in world.calls if p["action"] == "look_at")
+            mined = next(p for p in world.calls if p["action"] == "mine")
+            self.assertEqual([look[k] for k in ("x", "y", "z")], [16, 64, 11])
+            self.assertEqual([mined[k] for k in ("x", "y", "z")], [16, 64, 11])
+            self.assertEqual(abs(nav["x"] - 16) + abs(nav["z"] - 11), 1)
 
     def test_old_schema_only_memories_are_ignored_without_deleting_them(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -554,8 +643,8 @@ class TrainingLabRegressions(unittest.TestCase):
             with patch.object(lab, "store", db), patch.object(lab, "log_event"):
                 report = lab.run_training(world, FakeLocalPlanner(),
                     rounds=1, max_steps=1, report_dir=Path(tmp))
-        self.assertEqual(report["episodes"][2]["status"], "failed")
-        self.assertIn("stuck", report["episodes"][2]["reason"])
+        self.assertEqual(report["episodes"][1]["status"], "failed")
+        self.assertIn("stuck", report["episodes"][1]["reason"])
         self.assertEqual(report["summary"]["pending"], 0)
         self.assertTrue(any(p["action"] == "mine" for p in world.calls))
         self.assertTrue(any(p["action"] == "collect" for p in world.calls))
@@ -642,7 +731,7 @@ class TrainingLabRegressions(unittest.TestCase):
                 report = lab.run_training(
                     world, InventingPlanner(), rounds=1, max_steps=1,
                     report_dir=Path(tmp))
-            self.assertEqual(report["episodes"][0]["status"], "failed")
+            self.assertEqual(report["episodes"][0]["status"], "interface_error")
             self.assertEqual(report["episodes"][0]["reason"], "unsupported_action")
             self.assertFalse(any(p.get("x") == 999 for p in world.calls))
 
