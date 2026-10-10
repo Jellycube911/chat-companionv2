@@ -30,7 +30,7 @@ from memory_store import store
 
 BASE_DIR = Path(__file__).resolve().parent
 REPORT_DIR = BASE_DIR / "data" / "training_reports"
-CURRICULUM = ("observe", "orient", "navigate", "mine", "collect")
+CURRICULUM = ("observe", "navigate", "orient", "mine", "collect")
 TRAINING_BUILD = "minecraft-training-lab-v1"
 # Safety filter for selecting a training resource, NOT a gameplay strategy.
 # No chests, machines, crops, player buildings or precious ores are harvested.
@@ -245,6 +245,19 @@ def _select_challenge(name, world, snapshot, rng, preferred_resource=None):
         return Challenge(name, "Locate the observed block type with a scan",
                          {"type": b["type"]}, ("scan_blocks",), dim)
     if name == "orient":
+        # Look at the SAME physical resource reached by the immediately
+        # preceding navigation exercise, if a fresh scan still sees it.
+        if preferred_resource:
+            kind = preferred_resource.get("type")
+            xyz = preferred_resource.get("pos")
+            if kind and isinstance(xyz, list) and len(xyz) == 3:
+                fresh = world.find(kind, radius=9)
+                if any(b.get("type") == kind and
+                       [b.get(k) for k in ("x", "y", "z")] == xyz
+                       for b in fresh):
+                    return Challenge(
+                        name, "Face the observed resource just approached",
+                        {"type": kind, "pos": xyz}, ("look_at",), dim)
         facing = [b for b in candidates if
                   math.hypot(float(b["nearestX"]) - origin[0],
                              float(b["nearestZ"]) - origin[2]) > 0.75]
@@ -350,6 +363,64 @@ def _ground_confirmed_coordinates(plan, challenge):
             fixed["_schema_binding"] = "exact_triple_confirmed_in_world_objective"
             return fixed
     return plan
+
+
+def _bind_observed_mining_identity(plan, challenge, observed_extra=()):
+    """Translate an incomplete mining *schema*, never choose a game action.
+
+    The model must independently request mine at exact world-confirmed XYZ.
+    If it only supplied a fuzzy identity such as expected_contains="_log",
+    bind that declared identity to the exact ID observed there. Explicit
+    contradictory IDs and unobserved positions are never repaired.
+    """
+    if not isinstance(plan, dict) or plan.get("action") != "mine":
+        return plan
+    if plan.get("expected_block"):
+        return plan
+    try:
+        xyz = [float(plan[k]) for k in ("x", "y", "z")]
+        if not all(math.isfinite(v) for v in xyz):
+            return plan
+    except (ValueError, TypeError, KeyError, OverflowError):
+        return plan
+    known = [challenge.target] + list(observed_extra)
+    matched = next((
+        b for b in known if isinstance(b, dict)
+        and isinstance(b.get("pos"), (list, tuple))
+        and len(b["pos"]) == 3 and b.get("type") in PRACTICE_MATERIALS
+        and all(abs(float(b["pos"][i]) - xyz[i]) <= 0.05
+                for i in range(3))
+    ), None)
+    if matched is None:
+        return plan
+    kind = matched["type"]
+    asserted = plan.get("expected_contains")
+    if asserted:
+        if isinstance(asserted, list):
+            matches = any(str(a).lower() in kind.lower() for a in asserted)
+        else:
+            matches = str(asserted).lower() in kind.lower()
+        if not matches:
+            return plan
+    fixed = dict(plan)
+    fixed["expected_block"] = kind
+    fixed["_schema_binding"] = "exact_observed_block_identity"
+    return fixed
+
+
+def _interface_feedback(reason, challenge):
+    """Schema instructions only; does not give the model a mining plan."""
+    feedback = {
+        "unsupported_action": "Choose an action from permitted_actions.",
+        "missing_xyz": "Supply finite numeric x, y, z fields for the selected action.",
+        "unobserved_coordinates": "Coordinates must match a Minecraft-observed target or standable approach.",
+        "block_identity_mismatch": "For mine, expected_block must exactly identify the observed block at those coordinates.",
+        "repeat_without_new_evidence": "The identical action failed or was rejected. Revise the hypothesis, query, or coordinates using new world evidence.",
+    }
+    note = feedback.get(reason, "Review the rejection and choose a different supported experiment.")
+    if reason == "block_identity_mismatch":
+        note += " The observed target's exact type is in target_confirmed_by_minecraft."
+    return note
 
 
 def _plan_allowed(plan, challenge, observed_extra=()):
@@ -710,6 +781,10 @@ def _prompt(challenge, snapshot, attempts, history, observed_extra=()):
         },
         "inventory": snapshot["inventory"][:15],
         "previous_attempts_this_trial": attempts[-3:],
+        "interface_feedback": [
+            {"reason": a["reason"], "guidance": _interface_feedback(a["reason"], challenge)}
+            for a in attempts[-3:] if a.get("status") == "rejected"
+        ],
         "previous_episodes": [
             {"success": h["success"], "hypothesis": h["hypothesis"],
              "outcome": h["outcome"][:250]} for h in history[-4:]
@@ -753,7 +828,7 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
             initial = world.snapshot()
             challenge = _select_challenge(
                 task, world, initial, rng,
-                preferred_resource if task == "mine" else None)
+                preferred_resource if task in {"orient", "mine"} else None)
             if challenge is None:
                 record = {"round": repetition + 1, "task": task,
                           "status": "unavailable", "reason": "no_natural_valid_scenario",
@@ -781,6 +856,7 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
                 plan = planner.propose(_prompt(
                     challenge, observed, attempts, history, observed_extra))
                 plan = _ground_confirmed_coordinates(plan, challenge)
+                plan = _bind_observed_mining_identity(plan, challenge, observed_extra)
                 if isinstance(plan, dict) and plan.get("_schema_binding"):
                     log_event("training", "schema_arguments_grounded",
                               task=task, action=plan.get("action"),
@@ -788,18 +864,33 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
                 valid, why = _plan_allowed(plan, challenge, observed_extra)
                 fingerprint = json.dumps({
                     k: (plan or {}).get(k)
-                    for k in ("action", "x", "y", "z", "expected_block", "contains",
-                              "exact", "radius")
+                    for k in ("action", "x", "y", "z", "expected_block",
+                              "expected_contains", "contains", "exact", "radius")
                 }, sort_keys=True)
-                if fingerprint in used:
+                # A repeated proposal is only a repeat if the observations
+                # have not changed. Real location/blocker changes permit a
+                # new experiment without pretending the action improved.
+                evidence_key = json.dumps({
+                    "position": [round(v, 1) for v in _position(observed["state"])],
+                    "blockers": observed_extra,
+                }, sort_keys=True)
+                attempt_key = (fingerprint, evidence_key)
+                repeated = attempt_key in used
+                if repeated:
                     valid, why = False, "repeat_without_new_evidence"
-                used.add(fingerprint)
+                used.add(attempt_key)
                 if not valid:
                     attempts.append({"step": step + 1, "status": "rejected",
-                                     "reason": why, "plan": plan})
+                                     "reason": why, "plan": plan,
+                                     "feedback": _interface_feedback(why, challenge)})
                     outcome = why
                     log_event("training", "proposal_rejected", task=task,
                               reason=why, plan=plan)
+                    # An identical rejected command has no new information.
+                    # Stop this exercise rather than burn model calls and
+                    # mislabel the tool-interface failure as Minecraft.
+                    if repeated:
+                        break
                     continue
                 # All game actions run through the same physical practice engine.
                 result = world.execute(plan)
@@ -848,10 +939,13 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
                 print("[TRAIN] %-8s still physically running; halting safely" % task,
                       flush=True)
                 break
+            real_actions = any(a.get("status") in {"completed", "failed", "progress"}
+                               for a in attempts)
             _record_episode(challenge, attempts, verified, elapsed, initial, outcome)
             record = {
                 "round": repetition + 1, "task": task,
-                "status": "passed" if verified else "failed",
+                "status": ("passed" if verified else
+                           "failed" if real_actions else "interface_error"),
                 "attempts": len(attempts), "seconds": round(elapsed, 2),
                 "reason": outcome, "experiments": attempts,
             }
@@ -898,6 +992,7 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
         "eligible": len(eligible), "passed": successes,
         "failed": sum(e["status"] == "failed" for e in eligible),
         "unavailable": sum(e["status"] == "unavailable" for e in episodes),
+        "interface_errors": sum(e["status"] == "interface_error" for e in episodes),
         "pending": sum(e["status"] == "pending" for e in episodes),
         "completion_rate": round(successes / len(eligible), 3) if eligible else None,
         "physical_actions": total_physical,
@@ -905,7 +1000,7 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
             a.get("plan", {}).get("action") == "scan_blocks" for a in executed),
         "executed_primitives": len(executed),
         "rejected_proposals": sum(sum(a.get("status") == "rejected"
-                for a in e.get("experiments", [])) for e in eligible),
+                for a in e.get("experiments", [])) for e in episodes),
         "duration_seconds": round(time.monotonic() - started, 2),
         "teacher_calls": 0,
         "stopped_due_to_time": finished_due_to_time,
