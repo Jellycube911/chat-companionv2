@@ -523,7 +523,8 @@ class TrainingLabRegressions(unittest.TestCase):
             def at(self, x, y, z):
                 # Feet on ground Y=64, log base Y=65, solid at Y=63.
                 # Canopies make same-Y tree neighbors occupied.
-                return {"ok": True, "air": y == 64,
+                free = y in (64, 65) and not (x == 13 and y == 65 and z == 11)
+                return {"ok": True, "air": free,
                         "solid_support_up": y == 63}
         world = SlopedWorld()
         found = lab._select_challenge(
