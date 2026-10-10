@@ -22,7 +22,9 @@ class RealisticExamWorld(FakePhysicalWorld):
             self.calls.append(dict(plan))
             return {"ok": True, "plan": plan, "result": {
                 "ok": True, "blocks": [{"type": "minecraft:oak_log",
-                                        "pos": [16, 64, 10], "distance": 6.0}]}}
+                                        "pos": [16, 64, 10], "distance": 6.0},
+                                       {"type": "minecraft:birch_log",
+                                        "pos": [16, 64, 12], "distance": 6.3}]}}
         if plan["action"] == "mine":
             self.calls.append(dict(plan))
             self.entities = [{"droppedItem": "minecraft:oak_log",
