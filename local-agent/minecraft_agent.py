@@ -1046,6 +1046,143 @@ def _clear_resolved_placement_blockers(runtime, plan, execution):
     return cleared
 
 
+def _craft_ingredients_present(plan, inventory):
+    """Check observed inventory against a candidate grid, not a guessed output."""
+    try:
+        width, height = int(plan.get("width")), int(plan.get("height"))
+        grid = plan.get("grid")
+    except (ValueError, TypeError, OverflowError):
+        return False
+    if not (1 <= width <= 3 and 1 <= height <= 3):
+        return False
+    if not isinstance(grid, list) or len(grid) != width * height:
+        return False
+    needed = {}
+    for item in grid:
+        if not isinstance(item, str):
+            return False
+        if item:
+            needed[item] = needed.get(item, 0) + 1
+    if not needed:
+        return False
+    available = {}
+    for entry in inventory or []:
+        key = str(entry.get("item") or "")
+        available[key] = available.get(key, 0) + int(entry.get("count") or 0)
+    return all(available.get(item, 0) >= count for item, count in needed.items())
+
+
+def _is_table_prerequisite_failure(outcome):
+    result = outcome.get("result") or {}
+    error = str(result.get("error") or outcome.get("error") or "").lower()
+    return (
+        "3x3 recipe requires a crafting table within reach" in error
+        or "3x3 recipe requires a crafting table" in error
+    )
+
+
+def _recover_blocked_craft(goal, inventory, runtime):
+    """Reuse an actual prior crafting experiment blocked only by a workstation.
+
+    This recovers across brain restarts using recorded trials; the model's grid
+    is an unverified hypothesis until the Minecraft server confirms it.
+    """
+    if not goal or goal.get("source") != "user":
+        return None
+    old = runtime.get("pending_craft")
+    if old and old.get("goal_id") == goal.get("id"):
+        if _craft_ingredients_present(old.get("plan") or {}, inventory):
+            return dict(old["plan"])
+        runtime.pop("pending_craft", None)
+
+    # A stored trial may be older than the immediately preceding scans, which
+    # are logged as observations and do not count as physical skill trials.
+    for trial in reversed(store.recent_trials(20)):
+        try:
+            candidate = parse_plan(trial.get("actions"))
+            outcome = json.loads(trial.get("outcome") or "{}")
+        except (ValueError, TypeError):
+            continue
+        if not candidate or candidate.get("action") != "craft":
+            continue
+        if not _is_table_prerequisite_failure(outcome):
+            continue
+        # Do not borrow some OTHER goal's crafting steps.
+        if not _plan_matches_user_goal(candidate, goal):
+            continue
+        goal_words = set(re.findall(r"[a-z]{3,}", str(goal.get("title") or "").lower()))
+        goal_words -= {"obtain", "craft", "make", "some", "get", "an", "the"}
+        intent_words = set(re.findall(r"[a-z]{3,}", str(candidate.get("intent") or "").lower()))
+        if goal_words and not (goal_words & intent_words):
+            continue
+        if not _craft_ingredients_present(candidate, inventory):
+            continue
+        runtime["pending_craft"] = {
+            "goal_id": goal.get("id"), "plan": dict(candidate)
+        }
+        log_event("practice_host", "blocked_craft_recovered", plan=candidate)
+        return dict(candidate)
+    return None
+
+
+def _workstation_probe():
+    """Observe placed tables instead of assuming one is present from chat."""
+    found = _post("/scan-blocks", {
+        "exact": ["minecraft:crafting_table"],
+        "radius": 8,
+        "limit": 8,
+    })
+    if not isinstance(found, dict) or found.get("ok") is False:
+        return []
+    return [
+        block for block in found.get("blocks", [])
+        if block.get("type") == "minecraft:crafting_table"
+    ]
+
+
+def _resume_blocked_crafting(runtime, goal, inventory):
+    """One evidence-based follow-up primitive; no recipe hardcoding."""
+    recipe = _recover_blocked_craft(goal, inventory, runtime)
+    if not recipe:
+        return None
+    key = _plan_target_key(recipe)
+    invalid = runtime.setdefault("invalid_targets", {})
+    if key in invalid:
+        when, why = invalid[key]
+        if time.monotonic() - when < _invalid_target_ttl(key) and not (
+            "crafting table within reach" in str(why).lower()
+        ):
+            return None
+
+    tables = _workstation_probe()
+    close = [b for b in tables if float(b.get("distance") or 99) <= 3.2]
+    if close:
+        invalid.pop(key, None)
+        return recipe
+
+    if tables:
+        # The work surface exists already. Never use another table simply
+        # because we are standing too far away.
+        table = tables[0]
+        runtime["known_workstation"] = table
+        log_event("practice_host", "table_out_of_reach", table=table)
+        return None
+
+    if any(
+        entry.get("item") == "minecraft:crafting_table"
+        and int(entry.get("count", 0)) > 0
+        for entry in inventory
+    ):
+        return {
+            "action": "place", "item": "minecraft:crafting_table",
+            "intent": "place workstation for pending craft",
+            "hypothesis": "a placed crafting table will allow the deferred recipe",
+            "goal_id": goal.get("id"),
+            "goal_reason": "the attempted craft failed only because no work surface was nearby",
+        }
+    return None
+
+
 def _handle_craft_learning(runtime, plan, execution, goal, inventory):
     """Ask for sparse guidance only after repeated real crafting failures."""
     if plan.get("action") != "craft":
@@ -1214,23 +1351,43 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         log_event("practice_host", "planner_backoff", until=runtime["planner_backoff_until"])
         return {"ok": True, "status": "planner_backoff"}
 
+    active_user_goal = next(
+        (goal for goal in store.list_goals("active", 20) if goal.get("source") == "user"),
+        None,
+    )
+    continuation = None
+    if source == "practice" and active_user_goal is not None:
+        continuation = await asyncio.to_thread(
+            _resume_blocked_crafting, runtime, active_user_goal, awareness_inventory
+        )
+        if continuation:
+            log_event(
+                "practice_host", "goal_continuation",
+                goal=active_user_goal.get("title"), plan=continuation,
+            )
+
     prompt = build_practice_plan_input(runtime, directive=directive)
     log_event(
         "practice_host",
         "planner_start",
         source=source,
         directive=directive,
+        continuation=continuation is not None,
         active_goals=store.list_goals("active", 4),
     )
 
     try:
-        raw = await _local_fast_completion(
-            runtime,
-            PRACTICE_PLANNER_INSTRUCTIONS,
-            prompt,
-            json_mode=True,
-            max_tokens=180,
-        )
+        raw = None
+        if continuation is not None:
+            raw = json.dumps(continuation, ensure_ascii=False)
+        if raw is None:
+            raw = await _local_fast_completion(
+                runtime,
+                PRACTICE_PLANNER_INSTRUCTIONS,
+                prompt,
+                json_mode=True,
+                max_tokens=180,
+            )
         if not raw:
             result = await asyncio.wait_for(
                 Runner.run(planner_agent, prompt, max_turns=1),
@@ -1379,6 +1536,11 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         result.get("error") or result.get("reason")
         or execution.get("error") or ""
     )
+    if user_goal and plan.get("action") == "craft" and _is_table_prerequisite_failure(execution):
+        runtime["pending_craft"] = {
+            "goal_id": user_goal.get("id"), "plan": dict(plan)
+        }
+        log_event("practice_host", "craft_waiting_for_table", plan=plan)
     if target_key and _target_failure_needs_replan(execution):
         invalid[target_key] = (time.monotonic(), reason)
         if plan.get("action") == "craft":
@@ -1397,6 +1559,8 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
     cleared = _clear_resolved_placement_blockers(runtime, plan, execution)
     if cleared:
         log_event("practice_host", "prerequisite_resolved", cleared=cleared)
+    if execution.get("ok") and plan.get("action") == "craft":
+        runtime.pop("pending_craft", None)
     _handle_craft_learning(runtime, plan, execution, user_goal, awareness_inventory)
     await update_awareness(runtime)
     log_event(
@@ -1909,6 +2073,11 @@ def _inventory_fact_reply(text, runtime):
     if asks_have and ("log" in normalized or "logs" in normalized):
         return f"yea, {log_count} logs" if log_count else "nah, no logs rn"
 
+    if ("recipe" in normalized or "recipes" in normalized) and (
+        "crafting" in normalized or "table" in normalized
+    ):
+        return "i can test crafting recipes; minecraft checks the result"
+
     if asks_have and "crafting table" in normalized:
         return (
             f"yea, i've got {table_count}"
@@ -2379,6 +2548,23 @@ def _ground_chat_reply(answer, runtime):
         answer, re.I,
     ):
         return "haven't checked the recipe yet"
+    inventory = ((runtime or {}).get("awareness") or {}).get("inventory") or []
+    goal = next((
+        g for g in store.list_goals("active", 20)
+        if g.get("source") == "user" and "axe" in str(g.get("title") or "").lower()
+    ), None)
+    if goal and not any(
+        str(item.get("item") or "").endswith("_axe")
+        and not str(item.get("item") or "").endswith("_pickaxe")
+        and int(item.get("count") or 0) > 0
+        for item in inventory
+    ):
+        if re.search(
+            r"(?:almost|nearly|basically)\s+(?:done|finished|there)|"
+            r"shape\s+(?:the\s+)?head|(?:axe|ax)\s+head",
+            answer, re.I,
+        ):
+            return "not yet, still haven't crafted the axe"
     attempted_movement = bool(re.search(
         r"\bi\s+(?:tried\s+(?:to\s+)?mov\w*|moved|walked)\b", answer, re.I,
     ))
