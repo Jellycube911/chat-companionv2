@@ -50,7 +50,7 @@ class FakePhysicalWorld:
         available = ([block_id] if isinstance(block_id, str)
                      else list(block_id))
         found = "minecraft:dirt" if "minecraft:dirt" in available else available[0]
-        return [{"type": found, "x": math.floor(self.pos[0]) + 2,
+        return [{"type": found, "x": math.floor(self.pos[0]) + 5,
                  "y": 64, "z": math.floor(self.pos[2]),
                  "distance": 2.4}]
 
@@ -309,6 +309,82 @@ class TrainingLabRegressions(unittest.TestCase):
             self.assertEqual(report["summary"]["passed"], 5)
             self.assertEqual(report["summary"]["rejected_proposals"], 0)
             self.assertIn("move_to", [p["action"] for p in world.calls])
+
+    def test_navigation_goes_toward_observed_resource_not_random_coordinates(self):
+        class ResourceWorld(FakePhysicalWorld):
+            def find(self, block_id, radius=7):
+                ids = [block_id] if isinstance(block_id, str) else list(block_id)
+                if "minecraft:oak_log" in ids:
+                    return [{"type": "minecraft:oak_log", "x": 16,
+                             "y": 64, "z": 11}]
+                return []
+        world = ResourceWorld()
+        initial = world.snapshot()
+        challenge = lab._select_challenge(
+            "navigate", world, initial, __import__("random").Random(0))
+        self.assertIsNotNone(challenge)
+        self.assertEqual(challenge.target["resource_type"], "minecraft:oak_log")
+        self.assertEqual(challenge.target["resource_pos"], [16, 64, 11])
+        waypoint = challenge.target["pos"]
+        self.assertEqual(abs(waypoint[0] - 16) + abs(waypoint[2] - 11), 1)
+        self.assertTrue(lab._walkable(world, waypoint))
+        execution = world.execute({
+            "action": "move_to", "x": waypoint[0],
+            "y": waypoint[1], "z": waypoint[2]})
+        good, reason = lab._verify(challenge, initial, world.snapshot(), execution)
+        self.assertTrue(good, reason)
+        self.assertIn("resource_before=", reason)
+        self.assertGreater(
+            lab._distance([initial["state"][k] for k in ("x", "y", "z")],
+                          [16.5, 64.5, 11.5]),
+            lab._distance(world.pos, [16.5, 64.5, 11.5]))
+
+    def test_navigation_waypoint_does_not_pass_if_resource_gets_farther_away(self):
+        task = lab.Challenge("navigate", "Approach real block", {
+            "pos": [14, 64, 10], "resource_pos": [9, 64, 10],
+            "resource_type": "minecraft:oak_log"
+        }, ("move_to",), "minecraft:overworld")
+        before = {"state": {"x": 10.0, "y": 64.0, "z": 10.0,
+                             "dimension": "minecraft:overworld"}}
+        after = {"state": {"x": 14.5, "y": 64.0, "z": 10.5,
+                            "dimension": "minecraft:overworld"}}
+        execution = {"ok": True, "plan": {"action": "move_to"},
+                     "result": {"state": "COMPLETED", "reason": "arrived"}}
+        passed, evidence = lab._verify(task, before, after, execution)
+        self.assertFalse(passed)
+        self.assertIn("resource_before=", evidence)
+
+    def test_mine_prefers_same_observed_resource_after_navigation(self):
+        class TwoLogs(FakePhysicalWorld):
+            def find(self, block_id, radius=7):
+                ids = [block_id] if isinstance(block_id, str) else list(block_id)
+                if "minecraft:oak_log" in ids:
+                    return [
+                        {"type": "minecraft:oak_log", "x": 16, "y": 64, "z": 10},
+                        {"type": "minecraft:oak_log", "x": 12, "y": 64, "z": 13},
+                    ]
+                return []
+        world = TwoLogs()
+        scenario = lab._select_challenge(
+            "mine", world, world.snapshot(), __import__("random").Random(0),
+            preferred_resource={"type": "minecraft:oak_log", "pos": [16, 64, 10]})
+        self.assertIsNotNone(scenario)
+        self.assertEqual(scenario.target["pos"], [16, 64, 10])
+
+    def test_navigation_unavailable_when_only_resource_is_already_reachable(self):
+        class NearbyOnly(FakePhysicalWorld):
+            def find(self, block_id, radius=7):
+                ids = [block_id] if isinstance(block_id, str) else list(block_id)
+                if "minecraft:oak_log" in ids:
+                    return [{"type": "minecraft:oak_log", "x": 11,
+                             "y": 64, "z": 10}]
+                return []
+        world = NearbyOnly()
+        self.assertIsNone(lab._select_challenge(
+            "navigate", world, world.snapshot(), __import__("random").Random(0)))
+        # Not a failed movement or mining test: there is no reason to move.
+        self.assertIsNotNone(lab._select_challenge(
+            "mine", world, world.snapshot(), __import__("random").Random(0)))
 
     def test_mining_eligibility_uses_observed_exposed_block_beyond_five_blocks(self):
         class TreeSixBlocksAway(FakePhysicalWorld):
