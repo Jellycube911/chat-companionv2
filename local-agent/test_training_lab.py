@@ -121,7 +121,9 @@ class TrainingLabRegressions(unittest.TestCase):
                     world, FakeLocalPlanner(), rounds=1, max_steps=2,
                     report_dir=Path(tmp) / "reports")
                 self.assertEqual(report["summary"]["passed"], 5)
-                self.assertEqual(report["summary"]["physical_actions"], 5)
+                self.assertEqual(report["summary"]["physical_actions"], 4)
+                self.assertEqual(report["summary"]["observation_actions"], 1)
+                self.assertEqual(report["summary"]["executed_primitives"], 5)
                 self.assertEqual(report["summary"]["teacher_calls"], 0)
                 self.assertEqual(len(world.calls), 5)
                 self.assertEqual(
