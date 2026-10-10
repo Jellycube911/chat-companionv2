@@ -464,9 +464,14 @@ public final class CompanionService implements AutoCloseable {
         companion.getNavigation().stop();
         Vec3 hitPoint = Vec3.atCenterOf(support)
                 .add(Vec3.atLowerCornerOf(placement.face().getNormal()).scale(0.5));
+        // A trace ending exactly on a face may MISS due to floating-point
+        // boundary handling. Trace slightly THROUGH the clicked surface, while
+        // keeping the actual useOn click at the true face position.
+        Vec3 traceEnd = hitPoint.subtract(
+                Vec3.atLowerCornerOf(placement.face().getNormal()).scale(0.08));
         lookAtPoint(companion, hitPoint);
         HitResult sight = world.clip(new ClipContext(
-                companion.getEyePosition(), hitPoint, ClipContext.Block.OUTLINE,
+                companion.getEyePosition(), traceEnd, ClipContext.Block.OUTLINE,
                 ClipContext.Fluid.NONE, companion));
         if (sight instanceof BlockHitResult obstruction && !obstruction.getBlockPos().equals(support)) {
             BlockPos blocked = obstruction.getBlockPos();
@@ -475,7 +480,7 @@ public final class CompanionService implements AutoCloseable {
                     + "|at=" + blocked.getX() + "," + blocked.getY() + "," + blocked.getZ());
             work.remove(owner); placements.remove(owner); return;
         }
-        if (!canInteractWithPoint(companion, support, hitPoint, world)) {
+        if (!canInteractWithPoint(companion, support, traceEnd, world)) {
             if (world.getGameTime() - job.started() > 80) {
                 companion.failJob("placement_alignment_timeout");
                 work.remove(owner); placements.remove(owner);
