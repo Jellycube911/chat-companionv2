@@ -1649,6 +1649,9 @@ def _obstruction_decision_supported(runtime, plan, pending):
     if not isinstance(plan, dict):
         return False
     action = plan.get("action")
+    fingerprint = {k: plan.get(k) for k in ("action", "x", "y", "z", "expected_block")}
+    if any(step.get("plan") == fingerprint for step in pending.get("attempted", [])):
+        return False  # Failed identical experiments are not a new hypothesis.
     if action in {"idle", "scan_blocks", "look_at", "move_to", "move_forward"}:
         return True
     if action != "mine":
@@ -1698,13 +1701,23 @@ def _obstruction_learning_update(runtime, plan, execution, reason, goal):
     log_event("practice_host", "obstruction_experiment_result", **record)
     pending.pop("current_action_key", None)
 
-    if execution.get("ok") is True and plan.get("action") == "mine":
-        # The block actually changed. Re-examine the original goal target,
+    mined_blocker = (
+        plan.get("action") == "mine"
+        and [plan.get(axis) for axis in ("x", "y", "z")]
+        == [pending.get("blocker", {}).get(axis) for axis in ("x", "y", "z")]
+    )
+    if execution.get("ok") is True and mined_blocker:
+        # The observed blocker actually changed. Re-examine original target,
         # without claiming it is already reachable or complete.
         runtime.pop("pending_mining_obstruction", None)
         runtime.setdefault("invalid_targets", {}).pop(_plan_target_key(original), None)
         log_event("practice_host", "obstruction_removed_retest_original",
                   original=original, result=execution.get("result"))
+        return
+    if execution.get("ok") is True and plan.get("action") == "mine":
+        # An alternative observed block was mined, not the blocker.
+        # Retain the causal evidence until the blocker itself changes.
+        pending["at"] = time.monotonic()
         return
     if execution.get("ok") is True and plan.get("action") == "move_to":
         # A verified position change can alter line of sight; test it.
@@ -2265,6 +2278,7 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         source == "practice"
         and user_goal is not None
         and plan.get("action") in {"move_to", "move_forward", "look_at"}
+        and obstacle is None
         and _goal_navigation_count(runtime, user_goal, awareness_inventory) >= 2
     )
     if obstacle is not None and continuation is None:
@@ -2494,12 +2508,9 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
             )
     elif target_key and execution.get("ok"):
         invalid.pop(target_key, None)
-        if plan.get("action") == "mine":
-            # Mining changes the physical scene. Previously occluded targets
-            # may now be reachable, so let the brain revisit them.
-            for key, (_, why) in list(invalid.items()):
-                if why.startswith("mining_blocked|"):
-                    invalid.pop(key, None)
+        # Do not unquarantine unrelated occluded blocks merely because
+        # another block was mined. Only verified causal recovery above clears
+        # the original target's quarantine.
     cleared = _clear_resolved_placement_blockers(runtime, plan, execution)
     if cleared:
         log_event("practice_host", "prerequisite_resolved", cleared=cleared)
