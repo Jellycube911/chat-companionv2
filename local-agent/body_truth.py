@@ -159,7 +159,7 @@ def grounded_chat(answer, message, runtime, goals):
                 # craft from another task. Generic "got it" is permitted
                 # only for the current active goal's own verified result.
                 generic_it = re.search(
-                    r"\\b(?:got|made|crafted|finished)\\s+(?:it|that)\\b",
+                    r"\b(?:got|made|crafted|finished)\s+(?:it|that)\b",
                     text, re.I,
                 )
                 if not generic_it or (target and target != product):
