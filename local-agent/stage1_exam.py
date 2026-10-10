@@ -35,8 +35,19 @@ def _key(block):
 
 def _exam_proof(steps, target, start_inventory, final_inventory):
     """Evidence audit: discovery -> real approach -> facing -> mine -> pickup."""
-    matched = lambda s: (s.get("target") == target and s.get("verified"))
-    evidence = [s for s in steps if matched(s)]
+    # A scan may discover multiple resources. Give credit when the resource
+    # later chosen by Qwen was genuinely present in that scan, not only when
+    # it happened to be the last block in the returned list.
+    def matched(step):
+        if not step.get("verified"):
+            return False
+        if step.get("action") == "scan_blocks":
+            return any(
+                block.get("type") == target["type"]
+                and _xyz(block) == target["pos"]
+                for block in ((step.get("result") or {}).get("blocks") or []))
+        return step.get("target") == target
+    evidence = [step for step in steps if matched(step)]
     required = ("scan_blocks", "move_to", "look_at", "mine", "collect")
     actions = [s.get("action") for s in evidence]
     sequential = False
