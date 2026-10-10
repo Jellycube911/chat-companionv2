@@ -1148,6 +1148,55 @@ def _workstation_probe():
     ]
 
 
+def _approach_existing_workstation(table, runtime, goal):
+    """Find a verified standable square next to a real observed workstation."""
+    try:
+        tx, ty, tz = (
+            int(table["x"]), int(table["y"]), int(table["z"])
+        )
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+
+    current = ((runtime.get("awareness") or {}).get("state") or {})
+    x0, z0 = float(current.get("x") or tx), float(current.get("z") or tz)
+    candidates = []
+    for dx, dz in (
+        (1, 0), (-1, 0), (0, 1), (0, -1),
+        (1, 1), (-1, 1), (1, -1), (-1, -1),
+    ):
+        pos = {"x": tx + dx, "y": ty, "z": tz + dz}
+        try:
+            feet = _post("/block-at", pos)
+            head = _post("/block-at", {**pos, "y": ty + 1})
+            floor = _post("/block-at", {**pos, "y": ty - 1})
+        except (requests.RequestException, ValueError) as error:
+            log_event(
+                "practice_host", "workstation_approach_probe_failed",
+                pos=pos, error=str(error),
+            )
+            return None
+        if (
+            isinstance(feet, dict) and feet.get("air")
+            and isinstance(head, dict) and head.get("air")
+            and isinstance(floor, dict) and floor.get("solid_support_up")
+        ):
+            distance = math.hypot(pos["x"] + 0.5 - x0, pos["z"] + 0.5 - z0)
+            candidates.append((distance, pos))
+    if not candidates:
+        log_event("practice_host", "workstation_no_standable_destination", table=table)
+        return None
+
+    _, target = min(candidates, key=lambda value: value[0])
+    return {
+        "action": "move_to",
+        **target,
+        "intent": "approach existing crafting table",
+        "hypothesis": "standing beside the placed table will enable the pending craft",
+        "goal_id": goal.get("id"),
+        "goal_reason": "the axe recipe requires the already placed workbench within reach",
+    }
+
+
 def _resume_blocked_crafting(runtime, goal, inventory):
     """One evidence-based follow-up primitive; no recipe hardcoding."""
     recipe = _recover_blocked_craft(goal, inventory, runtime)
@@ -1168,18 +1217,21 @@ def _resume_blocked_crafting(runtime, goal, inventory):
         # placing more furniture in response to a transport/API failure.
         runtime["planner_backoff_until"] = time.monotonic() + 12.0
         return None
-    close = [b for b in tables if float(b.get("distance") or 99) <= 4.0]
+    close = [b for b in tables if float(b.get("distance") or 99) <= 3.2]
     if close:
         invalid.pop(key, None)
         return recipe
 
     if tables:
-        # The work surface exists already. Never use another table simply
-        # because we are standing too far away.
+        # Already placed a table. Approach that physical work surface instead
+        # of creating duplicates or abandoning the crafting objective.
         table = tables[0]
         runtime["known_workstation"] = table
         log_event("practice_host", "table_out_of_reach", table=table)
-        return None
+        movement = _approach_existing_workstation(table, runtime, goal)
+        if movement is None:
+            runtime["planner_backoff_until"] = time.monotonic() + 12.0
+        return movement
 
     if any(
         entry.get("item") == "minecraft:crafting_table"
