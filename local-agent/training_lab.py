@@ -14,6 +14,7 @@ import json
 import math
 import os
 import random
+import uuid
 import re
 import sys
 import time
@@ -31,7 +32,7 @@ from memory_store import store
 BASE_DIR = Path(__file__).resolve().parent
 REPORT_DIR = BASE_DIR / "data" / "training_reports"
 CURRICULUM = ("observe", "navigate", "orient", "mine", "collect")
-TRAINING_BUILD = "minecraft-training-lab-v3"
+TRAINING_BUILD = "minecraft-training-lab-v4"
 # Safety filter for selecting a training resource, NOT a gameplay strategy.
 # No chests, machines, crops, player buildings or precious ores are harvested.
 PRACTICE_MATERIALS = ("minecraft:dirt", "minecraft:stone", "minecraft:grass_block",
@@ -900,6 +901,20 @@ def _prompt(challenge, snapshot, attempts, history, observed_extra=()):
     }, ensure_ascii=False)
 
 
+def _atomic_checkpoint(report, filepath):
+    """Preserve valid training JSON even if the process is interrupted."""
+    filepath = Path(filepath)
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    temporary = filepath.with_name(filepath.name + ".tmp")
+    payload = dict(report)
+    payload["checkpoint_at"] = datetime.now(timezone.utc).isoformat()
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, filepath)
+
+
 def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
                  report_dir=REPORT_DIR, duration_minutes=20):
     rng = random.Random(seed)
@@ -907,12 +922,26 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
     max_steps = max(1, min(8, int(max_steps)))
     duration_seconds = max(1.0, min(120.0, float(duration_minutes))) * 60.0
     started = time.monotonic()
+    report_path = Path(report_dir) / (
+        "training-" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") +
+        "-" + uuid.uuid4().hex[:8] + ".json")
     report = {"version": TRAINING_BUILD,
+              "status": "running", "report_path": str(report_path),
               "started_at": datetime.now(timezone.utc).isoformat(),
               "rounds": rounds, "max_steps": max_steps,
               "duration_limit_minutes": float(duration_minutes),
               "mode": "live_minecraft_no_world_reset",
               "episodes": [], "summary": {}}
+    def checkpoint():
+        report["checkpoint"] = {
+            "completed_exercises": len(report["episodes"]),
+            "passed_exercises": sum(e["status"] == "passed"
+                                   for e in report["episodes"]),
+            "last_completed_round": max(
+                (e["round"] for e in report["episodes"]), default=0),
+        }
+        _atomic_checkpoint(report, report_path)
+    checkpoint()
     halted_on_pending = False
     finished_due_to_time = False
     unproductive_rounds = 0
@@ -955,6 +984,7 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
                           "status": "unavailable", "reason": "no_natural_valid_scenario",
                           "attempts": 0, "seconds": 0}
                 report["episodes"].append(record)
+                checkpoint()
                 print("[TRAIN] %-8s unavailable (no suitable world observation)" % task,
                       flush=True)
                 continue
@@ -965,6 +995,11 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
             outcome = "no_verified_completion"
             verified = False
             episode_start = time.monotonic()
+            report["active_exercise"] = {
+                "round": repetition + 1, "task": task,
+                "status": "incomplete_not_scored", "attempts": attempts,
+            }
+            checkpoint()
             for step in range(max(8, max_steps) if task == "gather_wood" else max_steps):
                 observed = world.snapshot()
                 if observed["state"].get("dimension") != challenge.dimension:
@@ -1010,9 +1045,14 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
                     # An identical rejected command has no new information.
                     # Stop this exercise rather than burn model calls and
                     # mislabel the tool-interface failure as Minecraft.
+                    checkpoint()
                     if repeated:
                         break
                     continue
+                report["active_exercise"]["in_flight_action"] = {
+                    "step": step + 1, "plan": plan, "status": "issued_unverified",
+                }
+                checkpoint()
                 # All game actions run through the same physical practice engine.
                 result = world.execute(plan)
                 if result.get("status") == "pending":
@@ -1032,6 +1072,8 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
                     "result": result.get("result"),
                 })
                 outcome = evidence
+                report["active_exercise"].pop("in_flight_action", None)
+                checkpoint()
                 blocker = _observed_obstruction(result)
                 if blocker and blocker not in observed_extra:
                     observed_extra.append(blocker)
@@ -1057,6 +1099,8 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
                     "reason": outcome, "attempts": len(attempts),
                     "seconds": round(elapsed, 2), "experiments": attempts,
                 })
+                report.pop("active_exercise", None)
+                checkpoint()
                 print("[TRAIN] %-8s still physically running; halting safely" % task,
                       flush=True)
                 break
@@ -1071,6 +1115,8 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
                 "reason": outcome, "experiments": attempts,
             }
             report["episodes"].append(record)
+            report.pop("active_exercise", None)
+            checkpoint()
             if task == "navigate" and verified:
                 preferred_resource = {
                     "type": challenge.target["resource_type"],
@@ -1156,20 +1202,16 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
         e["task"] == "gather_wood" and e["status"] == "passed"
         for e in report["episodes"])
     report["ended_at"] = datetime.now(timezone.utc).isoformat()
-    report_dir = Path(report_dir)
-    report_dir.mkdir(parents=True, exist_ok=True)
-    output = report_dir / ("training-" + datetime.now(timezone.utc).strftime(
-        "%Y%m%d-%H%M%S") + ".json")
-    output.write_text(json.dumps(report, ensure_ascii=False, indent=2),
-                      encoding="utf-8")
-    report["report_path"] = str(output)
+    report["status"] = "completed"
+    report.pop("active_exercise", None)
+    checkpoint()
     store.record_event("training_session",
                        json.dumps(report["summary"])[:1500])
     store.record_event("training_graduation",
                        json.dumps({k: v for k, v in progress.items()
                                    if k != "skills"})[:1300])
     log_event("training", "session_complete", **report["summary"],
-              report_path=str(output))
+              report_path=str(report_path))
     return report
 
 
