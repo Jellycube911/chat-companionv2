@@ -12,10 +12,16 @@ executor actually performs it. The host separately evaluates outcome evidence.
 
 **Windows, single command:** With Ollama and your Minecraft world open, stop
 the normal Chat brain (close run.bat) and double-click train.bat in the brain
-folder. The normal brain and trainer both use an OS lock to prevent concurrent
-body control. Minecraft itself does NOT need to be restarted.
+folder. It now asks **How many training cycles? (1-100, Enter for 30)**.
+Choose once; the training launcher runs up to that many full curriculum
+rounds, with a maximum 120-minute session rather than stopping at two cycles.
+It may still stop early if three consecutive rounds have no executed actions,
+a physical job remains pending, or the session time runs out. The normal brain
+and trainer both use an OS lock to prevent concurrent body control. Minecraft
+itself does NOT need to be restarted.
 
-The default is now up to **12 curriculum rounds**, limited to **20 minutes**
+When starting directly with Python rather than train.bat, the default is
+**12 curriculum rounds**, limited to **20 minutes**
 and four proposals per exercise. The runner stops early if three consecutive
 rounds cannot execute even one action, preventing endless parser loops.
 You start it once, not after every curriculum round.
