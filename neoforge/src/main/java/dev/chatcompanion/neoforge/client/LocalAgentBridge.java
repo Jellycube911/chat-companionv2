@@ -842,7 +842,9 @@ public final class LocalAgentBridge {
                         "y", pos.getY(),
                         "z", pos.getZ(),
                         "type", BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString(),
-                        "air", state.isAir());
+                        "air", state.isAir(),
+                        "replaceable", state.canBeReplaced(),
+                        "solid_support_up", state.isFaceSturdy(context.world(), pos, Direction.UP));
             });
             sendJson(exchange, 200, GSON.toJson(result));
         } catch (Exception failure) {
