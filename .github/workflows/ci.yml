@@ -1,6 +1,8 @@
 name: Build and recovery checks
 on:
   push:
+    branches:
+      - master
   pull_request:
 permissions:
   contents: read
@@ -14,6 +16,374 @@ jobs:
           distribution: temurin
           java-version: '21'
       - uses: gradle/actions/setup-gradle@v4
+      - name: Make Gradle wrapper executable
+        run: chmod +x gradlew
+      - name: Install local MCP agent dependencies
+        run: python -m pip install -r local-agent/requirements.txt
+      - name: Check local Python agent
+        run: |
+          python -m py_compile local-agent/minecraft_agent.py local-agent/mcp_server.py local-agent/memory_store.py local-agent/skill_executor.py local-agent/action_log.py local-agent/practice_engine.py local-agent/knowledge_engine.py local-agent/body_truth.py
+          cd local-agent
+          python - <<'PY'
+          import agents, mcp, requests, memory_store, mcp_server, skill_executor, action_log, practice_engine, knowledge_engine, body_truth
+          store = memory_store.store
+          assert store.list_goals('active', 5)
+          r = store.request_learning('ci:test', 'verify local learning queue', 60)
+          assert r.get('ok') or r.get('deferred')
+          a = store.save_learned_skill(
+              'CI approach target',
+              'ci approach target',
+              'observe target; move closer; verify distance changed',
+          )
+          b = store.save_learned_skill(
+              'CI verify target',
+              'ci verify target',
+              'observe state and compare result',
+          )
+          trial = store.record_skill_trial(
+              'ci approach target',
+              'moving closer should reduce distance',
+              'observe(state) -> navigate(move_to) -> observe(state)',
+              'distance reduced in synthetic CI evidence',
+              True,
+              skill_id=a['id'],
+          )
+          assert trial['skill']['successes'] >= 1
+          link = store.link_learned_skills(a['id'], b['id'], 'subskill')
+          assert link['ok']
+          graph = store.skill_graph(a['id'])
+          assert graph and graph['children']
+          assert store.stats()['learned_skills'] >= 2
+          fast = store.record_efficiency(
+              'mine:minecraft:oak_log',
+              'minecraft:wooden_axe',
+              0.6,
+              True,
+              2.6,
+              metadata='ci fast tool',
+          )
+          slow = store.record_efficiency(
+              'mine:minecraft:oak_log',
+              'minecraft:wooden_pickaxe',
+              2.0,
+              True,
+              1.5,
+              metadata='ci slow tool',
+          )
+          assert fast['attempts'] >= 1
+          assert slow['attempts'] >= 1
+          best = store.best_efficiency('mine:minecraft:oak_log')
+          assert best['option'] == 'minecraft:wooden_axe'
+          assert store.stats()['action_efficiency'] >= 2
+          PY
+          python - <<'PY'
+          import json
+          import os
+          import tempfile
+          from pathlib import Path
+          import action_log
+
+          with tempfile.TemporaryDirectory() as tmp:
+              path = Path(tmp) / "recent.jsonl"
+              os.environ["COMPANION_ACTION_LOG"] = str(path)
+              action_log.start_session(build="ci", model="local:test")
+              action_log.log_event(
+                  "ci",
+                  "redaction_test",
+                  api_key="should-not-leak",
+                  payload={"token": "also-secret", "value": 3},
+              )
+              rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+              assert rows[-1]["api_key"] == "<redacted>"
+              assert rows[-1]["payload"]["token"] == "<redacted>"
+              assert rows[-1]["payload"]["value"] == 3
+          PY
+          COMPANION_MODEL_PROVIDER=openai COMPANION_OPENAI_MODEL=gpt-5.6-luna python -c "import minecraft_agent; _, label = minecraft_agent.choose_model(); assert label == 'openai:gpt-5.6-luna', label; assert 'sol' not in label.lower(), label; print('brain model fallback:', label)"
+          python - <<'PY'
+          import minecraft_agent
+          import mcp_server
+          import practice_engine
+          import memory_store
+
+          assert hasattr(minecraft_agent, "INSTRUCTIONS")
+          assert hasattr(minecraft_agent, "PLAYER_CHAT_INSTRUCTIONS")
+          assert hasattr(minecraft_agent, "PRACTICE_PLANNER_INSTRUCTIONS")
+          assert minecraft_agent.PLAYER_CHAT_INSTRUCTIONS
+          assert minecraft_agent.PRACTICE_PLANNER_INSTRUCTIONS
+
+          assert minecraft_agent._looks_like_direct_request(
+              "yeah so can u make a crafting table now"
+          )
+          assert minecraft_agent._looks_like_action_request(
+              "yeah so can u make a crafting table now"
+          )
+          runtime = {
+              "awareness": {
+                  "inventory": [
+                      {"slot": 5, "item": "minecraft:jungle_planks", "count": 6},
+                      {"slot": 7, "item": "minecraft:crafting_table", "count": 2},
+                      {"slot": 9, "item": "minecraft:jungle_log", "count": 12},
+                      {"slot": 10, "item": "minecraft:oak_log", "count": 2},
+                  ]
+              }
+          }
+          inventory_reply = minecraft_agent._inventory_fact_reply(
+              "you do have wood tho",
+              runtime,
+          )
+          assert "14 logs" in inventory_reply
+          assert "6 planks" in inventory_reply
+
+          parsed_log_plan = practice_engine.parse_plan(
+              '{"intent":"mine reachable log","hypothesis":"test","action":"mine","x":1,"y":2,"z":3}'
+          )
+          assert parsed_log_plan["expected_contains"] == "_log"
+
+          self_goal = memory_store.store.create_goal(
+              "CI self priority clamp",
+              "test",
+              10,
+              "self",
+          )
+          created = next(
+              goal for goal in memory_store.store.list_goals("active", 20)
+              if goal["id"] == self_goal["id"]
+          )
+          assert created["priority"] == 4
+          memory_store.store.update_goal(self_goal["id"], status="cancelled")
+
+          assert minecraft_agent._simple_chat_reply("hey") == "hey"
+          assert minecraft_agent._simple_chat_reply("whats up") is not None
+          assert minecraft_agent._simple_chat_reply("Hello, how are you doing") == "good lol, you?"
+          assert minecraft_agent._is_learning_status_question("did u finish learning?")
+          feedback = minecraft_agent._feedback_reply("Yes, you are standing near a lot of them")
+          assert feedback and feedback[1] is True
+          feedback = minecraft_agent._feedback_reply(
+              "you are just directly moving between trees, not actually mining them"
+          )
+          assert feedback and feedback[1] is True
+          feedback = minecraft_agent._feedback_reply(
+              "also the right tool to cut trees is an axe"
+          )
+          assert feedback and feedback[1] is True
+          assert minecraft_agent._looks_like_action_request(
+              "can u put the crafting table"
+          )
+          assert not minecraft_agent._looks_like_action_request(
+              "can you explain how to craft a table"
+          )
+          assert not minecraft_agent._looks_like_direct_request(
+              "you didnt get any logs"
+          )
+          assert minecraft_agent._looks_like_direct_request(
+              "can you gather logs"
+          )
+
+          original_observe = mcp_server._observe
+          original_get = mcp_server._get
+          original_post = mcp_server._post
+          original_wait = mcp_server._wait_for_job
+          try:
+              mcp_server._observe = lambda view: (
+                  [{"slot": 7, "item": "minecraft:crafting_table", "count": 2}]
+                  if view == "inventory"
+                  else {}
+              )
+              assert mcp_server._inventory_slot_for_item(
+                  "minecraft:crafting_table"
+              ) == 7
+
+              mcp_server._get = lambda path: {
+                  "x": 10.2,
+                  "y": 64.0,
+                  "z": -3.8,
+                  "serverState": "running",
+              }
+              mcp_server._post = lambda path, payload=None: {"ok": True}
+              mcp_server._wait_for_job = lambda timeout=10: {
+                  "state": "COMPLETED",
+                  "reason": "ok",
+              }
+              placed = mcp_server._place_slot_nearby(7)
+              assert placed["state"] == "COMPLETED"
+              assert placed["slot"] == 7
+          finally:
+              mcp_server._observe = original_observe
+              mcp_server._get = original_get
+              mcp_server._post = original_post
+              mcp_server._wait_for_job = original_wait
+
+          source = open("minecraft_agent.py", encoding="utf-8").read()
+          assert 'source in {"autonomy", "event", "task", "learning", "practice", "command"}' in source
+          assert 'async def _send_ingame' in source
+          assert 'async def _delayed_chat_ack' in source
+          assert 'QUICK CHAT CONTEXT' in source
+          assert 'run_planned_action' in source
+          assert 'practice_planner = Agent(' in source
+          assert 'instructions=PRACTICE_PLANNER_INSTRUCTIONS' in source
+          assert 'instructions=PLAYER_CHAT_INSTRUCTIONS' in source
+          assert 'PRACTICE_PLANNER_PLAYER_CHAT_INSTRUCTIONS' not in source
+          assert 'PLAYER_CHAT_INSTRUCTIONS' in source
+          assert '_native_local_completion' in source
+          assert 'physical_action_active' in source
+          assert 'mine already' in source
+          assert 'poll_minecraft_chat(input_queue, runtime, chat_agent)' in source
+          assert '_spawn_player_chat' in source
+          assert 'blocking local-model HTTP request cannot actually be cancelled' in source
+          assert '_instant_failure_explanation' in source
+          assert 'PERSISTENT EFFICIENCY REWARD MEMORY' in source
+          assert '_report_planned_outcome' in source
+          assert '_reconcile_user_goals' in source
+          assert 'goal_satisfied_before_planning' in source
+          assert 'physical_job_in_progress' in source
+          assert 'post_goal_pause_until' in source
+          assert '_inventory_fact_reply' in source
+
+          service_source = open(
+              "../neoforge/src/main/java/dev/chatcompanion/neoforge/CompanionService.java",
+              encoding="utf-8",
+          ).read()
+          entity_source = open(
+              "../neoforge/src/main/java/dev/chatcompanion/neoforge/CompanionEntity.java",
+              encoding="utf-8",
+          ).read()
+          bridge_source = open(
+              "../neoforge/src/main/java/dev/chatcompanion/neoforge/client/LocalAgentBridge.java",
+              encoding="utf-8",
+          ).read()
+          assert "destroyBlockProgress" in service_source
+          assert "break_ticks=" in service_source
+          assert "companion.swing(InteractionHand.MAIN_HAND)" in service_source
+          assert "companion.setYHeadRot(yaw)" in service_source
+          assert "jobProgress()" in entity_source
+          assert 'result.put("jobProgress", companion.jobProgress())' in bridge_source
+          assert 'created.createContext("/block-at", LocalAgentBridge::handleBlockAt)' in bridge_source
+          assert "private static void handleBlockAt" in bridge_source
+
+          plan = practice_engine.parse_plan(
+              '{"intent":"approach log","hypothesis":"moving closer reduces distance","action":"move_to","x":10,"y":64,"z":10}'
+          )
+          assert plan["action"] == "move_to"
+          before = {
+              "state": {"pos": [0, 64, 0]},
+              "inventory": [],
+          }
+          closer = {
+              "state": {"pos": [8, 64, 8]},
+              "inventory": [],
+          }
+          farther = {
+              "state": {"pos": [-3, 64, -3]},
+              "inventory": [],
+          }
+          assert practice_engine._objective_success(
+              plan, before, closer, {"state": "COMPLETED"}
+          )
+          assert not practice_engine._objective_success(
+              plan, before, farther, {"state": "COMPLETED"}
+          )
+          generalized = practice_engine._generalized_procedure(plan)
+          assert '"x":' not in generalized
+          assert '"y":' not in generalized
+          assert '"z":' not in generalized
+
+          metrics = practice_engine._parse_mining_metrics({
+              "state": "COMPLETED",
+              "reason": "block_mined|block=minecraft:oak_log|tool=minecraft:wooden_axe|break_ticks=8",
+          })
+          assert metrics["block"] == "minecraft:oak_log"
+          assert metrics["tool"] == "minecraft:wooden_axe"
+          assert metrics["break_ticks"] == 8
+          assert metrics["seconds"] == 0.4
+          assert metrics["reward"] > 1.0
+
+          original_post = practice_engine._post
+          try:
+              def reject_occupied(path, payload=None):
+                  assert path == "/block-at", path
+                  return {"ok": True, "air": False, "type": "minecraft:oak_log"}
+              practice_engine._post = reject_occupied
+              nearby_before = {
+                  "state": {"pos": [10.0, 64.0, 10.0]},
+                  "inventory": [],
+              }
+              rejected = practice_engine._execute_action(
+                  {"action": "move_to", "x": 12.0, "y": 64.0, "z": 10.0},
+                  nearby_before,
+              )
+              assert rejected["ok"] is False
+              assert rejected["error"] == "destination_occupied"
+          finally:
+              practice_engine._post = original_post
+
+          original_post = practice_engine._post
+          try:
+              calls = []
+              def block_guard_post(path, payload=None):
+                  calls.append((path, payload))
+                  if path == "/block-at":
+                      return {
+                          "ok": True,
+                          "type": "minecraft:jungle_leaves",
+                          "air": False,
+                      }
+                  raise AssertionError(
+                      "mismatched block must be rejected before mine request"
+                  )
+              practice_engine._post = block_guard_post
+              mismatch = practice_engine._execute_action(
+                  {
+                      "action": "mine",
+                      "intent": "mine reachable log",
+                      "expected_contains": "_log",
+                      "x": 1,
+                      "y": 64,
+                      "z": 1,
+                  },
+                  {"state": {"pos": [1, 64, 3]}, "inventory": []},
+              )
+              assert mismatch["ok"] is False
+              assert mismatch["error"] == "target_block_mismatch"
+              assert mismatch["observed_block"] == "minecraft:jungle_leaves"
+              assert calls[0][0] == "/block-at"
+          finally:
+              practice_engine._post = original_post
+
+          assert 'chat_agent = Agent(' in source
+          assert 'prefer experiment(...)' in source
+          PY
+          python - <<'PY'
+          import asyncio
+          import sys
+          from pathlib import Path
+          from agents.mcp import MCPServerStdio
+
+          async def main():
+              here = Path.cwd()
+              async with MCPServerStdio(
+                  name="CI Minecraft MCP",
+                  params={
+                      "command": sys.executable,
+                      "args": [str(here / "mcp_server.py")],
+                      "cwd": str(here),
+                  },
+                  cache_tools_list=True,
+                  require_approval="never",
+              ) as server:
+                  names = {tool.name for tool in await server.list_tools()}
+                  expected = {
+                      "observe", "scan_blocks", "navigate", "world_action", "craft", "experiment",
+                      "say", "remember", "recall_memory", "goals", "skills", "skill_memory", "learn", "memory_status", "recipe_knowledge",
+                  }
+                  missing = expected - names
+                  assert not missing, f"Missing MCP tools: {sorted(missing)}"
+
+          asyncio.run(main())
+          PY
+      - name: Practice loop regression tests
+        run: |
+          python -m py_compile local-agent/training_lab.py local-agent/training_progress.py
+          python -m unittest discover -s local-agent -p 'test_practice_regressions.py' -v
       - name: Core tests, loader builds and real server GameTests
         env:
           JAVA_TOOL_OPTIONS: -Xverify:all
@@ -28,3 +398,16 @@ jobs:
             core/build/reports/tests/
             minecraft-common/build/reports/tests/
             fabric/test-runs/gametest/reports/
+            local-agent/minecraft_agent.py
+            local-agent/mcp_server.py
+            local-agent/memory_store.py
+            local-agent/skill_executor.py
+            local-agent/action_log.py
+            local-agent/practice_engine.py
+            local-agent/training_lab.py
+            local-agent/training_progress.py
+            local-agent/train.bat
+            local-agent/knowledge_engine.py
+            local-agent/body_truth.py
+            local-agent/requirements.txt
+            local-agent/README.md

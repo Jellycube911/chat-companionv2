@@ -23,6 +23,9 @@ public final class ChatCompanion {
                     .clientTrackingRange(10).build(ResourceLocation.fromNamespaceAndPath(MOD_ID, "companion").toString()));
     static volatile CompanionService service;
 
+    /** Local integrations may inspect the active logical-server companion service. */
+    public static CompanionService service() { return service; }
+
     public ChatCompanion(IEventBus modBus) {
         ENTITIES.register(modBus);
         modBus.addListener(this::attributes);

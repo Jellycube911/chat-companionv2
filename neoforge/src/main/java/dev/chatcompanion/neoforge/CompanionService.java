@@ -23,12 +23,14 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.core.registries.Registries;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.monster.Enemy;
@@ -38,6 +40,8 @@ import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.storage.LevelResource;
 import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.common.util.FakePlayer;
 import net.neoforged.neoforge.common.util.FakePlayerFactory;
@@ -50,6 +54,10 @@ public final class CompanionService implements AutoCloseable {
     private final Map<UUID, Session> sessions = new HashMap<>();
     private final ConcurrentHashMap<UUID, Long> commandSequences = new ConcurrentHashMap<>();
     private final Map<UUID, PhysicalJob> work = new HashMap<>();
+    private final Map<UUID, PlacementJob> placements = new HashMap<>();
+    // World-observed distance progress for each physical mining approach.
+    // Reset whenever the job ID changes; never infer success from navigation.
+    private final Map<UUID, MiningApproach> miningApproaches = new HashMap<>();
     private final ExecutorService io = new ThreadPoolExecutor(4, 4, 0, TimeUnit.MILLISECONDS,
             new ArrayBlockingQueue<>(256), r -> { Thread t = new Thread(r, "chat-companion-io"); t.setDaemon(true); return t; }, new ThreadPoolExecutor.AbortPolicy());
     private final CompletableFuture<String> contextId;
@@ -79,6 +87,8 @@ public final class CompanionService implements AutoCloseable {
                                long started, float progress, int changed) {
         PhysicalJob progress(float next, int count) { return new PhysicalJob(companion, jobId, generation, type, block, initial, target, radius, limit, started, next, count); }
     }
+    private record PlacementJob(BlockPos block, int slot, Direction face) {}
+    private record MiningApproach(UUID jobId, double bestDistance, long lastImprovementTick) {}
 
     CompanionService(MinecraftServer server, UUID epoch) {
         this.server = server; this.runtimeEpoch = epoch;
@@ -162,14 +172,39 @@ public final class CompanionService implements AutoCloseable {
         }).whenComplete((entry, failure) -> server.execute(() -> {
             if (closed) return;
             if (failure != null) message(owner, "Action rejected: " + safeFailure(failure));
-            else if (entry.outcome() != null) message(owner, entry.outcome().status() + ": " + entry.outcome().reasonCode() + " " + entry.outcome().evidence());
+            else if (entry.outcome() != null && !entry.outcome().success())
+                message(owner, "Action rejected: " + entry.outcome().reasonCode());
         }));
+    }
+
+    /**
+     * Direct local action path for the localhost MCP bridge.
+     * This intentionally bypasses the legacy CompanionActor/remote workflow.
+     */
+    public ActionOutcome localAction(ServerPlayer owner, String name, JsonObject arguments) {
+        assertServer();
+        if (closed) return ActionOutcome.rejected("server_stopping");
+        CompanionEntity companion = find(owner.getUUID());
+        if (companion == null) return ActionOutcome.rejected("companion_unavailable");
+
+        ActionRequest request = new ActionRequest(
+                new ToolCallKey("local:mcp", UUID.randomUUID().toString(), UUID.randomUUID().toString()),
+                name,
+                arguments,
+                runtimeEpoch,
+                -1L);
+        try {
+            return new Bridge(owner.getUUID(), companion.getUUID()).dispatch(companion, owner, request);
+        } catch (RuntimeException failure) {
+            return ActionOutcome.rejected("invalid_arguments");
+        }
     }
     public void stop(ServerPlayer owner) {
         commandSequences.merge(owner.getUUID(), 1L, Long::sum);
         CompanionEntity companion = find(owner.getUUID());
         if (companion != null) companion.stop("owner_stop");
         work.remove(owner.getUUID());
+        placements.remove(owner.getUUID());
         Session current = sessions.get(owner.getUUID());
         if (current != null) {
             current.actor.stop().whenComplete((receipt, failure) -> server.execute(() -> { if (!closed && (failure != null || !receipt.durable())) message(owner, "Stopped locally; recording failed. Restored jobs require explicit resume."); }));
@@ -207,23 +242,24 @@ public final class CompanionService implements AutoCloseable {
     }
     public void status(ServerPlayer owner) {
         CompanionEntity companion = find(owner.getUUID());
-        if (companion == null) { message(owner, "Companion unavailable. Use /chat spawn or return to its loaded chunk."); return; }
+        if (companion == null) {
+            message(owner, "Companion unavailable. Use /chat spawn or return to its loaded chunk.");
+            return;
+        }
+
+        String job;
+        if (companion.jobState() == CompanionEntity.JobState.RUNNING
+                || companion.jobState() == CompanionEntity.JobState.SUSPENDED) {
+            job = companion.jobType() + " " + companion.jobState() + " (" + companion.reason() + ")";
+        } else {
+            job = "IDLE";
+        }
+
         message(owner, "NeoForge 1.21.1 | health " + companion.getHealth() + "/" + companion.getMaxHealth()
-                + " | " + companion.jobType() + " " + companion.jobState() + " (" + companion.reason() + ")"
+                + " | " + job
                 + " | distance " + String.format(Locale.ROOT, "%.1f", companion.distanceTo(owner))
-                + " | navigation " + (!companion.getNavigation().isDone() ? "ACTIVE" : "IDLE")
-                + " | actions " + companion.actionsAllowed() + " | remote consent " + companion.remoteConsent() + " | speech " + companion.speechConsent());
-        message(owner, serverCredentialVisibility());
-        Session current = sessions.get(owner.getUUID());
-        if (current == null) { message(owner, "AI workflow not started; local movement works. Use /chat remote on to start remote conversation."); return; }
-        message(owner, "Speech pipeline " + current.speechState + " | generated voice is artificial");
-        current.actor.snapshot().thenAccept(snapshot -> server.execute(() -> {
-            if (closed) return;
-            JsonObject protocolStatus = current.remote == null ? null : snapshot.protocolRecords().get("agents/status");
-            message(owner, "AI " + (protocolStatus == null ? current.remoteState : protocolStatus) + " | session " + snapshot.remoteSessionId() + " | queue " + snapshot.messages().stream().filter(m -> m.state() == MessageState.QUEUED).count()
-                    + " | generation " + snapshot.controlGeneration() + " | storage " + (snapshot.storageHealthy() ? "HEALTHY" : snapshot.storageProblem()));
-            snapshot.tools().stream().skip(Math.max(0, snapshot.tools().size() - 3)).forEach(tool -> message(owner, tool.name() + " | execution " + tool.executionState() + " | result " + tool.resultDeliveryState()));
-        }));
+                + " | navigation " + (!companion.getNavigation().isDone() ? "ACTIVE" : "IDLE"));
+        message(owner, "Conversation, memory, and AI tools are handled by the local MCP Python agent.");
     }
     public void consent(ServerPlayer owner, String kind, boolean enabled) {
         CompanionEntity companion = find(owner.getUUID());
@@ -293,35 +329,284 @@ public final class CompanionService implements AutoCloseable {
         for (var entry : new ArrayList<>(work.entrySet())) {
             UUID owner = entry.getKey(); PhysicalJob job = entry.getValue(); CompanionEntity companion = find(owner);
             Session session = sessions.get(owner); ServerPlayer player = server.getPlayerList().getPlayer(owner);
-            if (companion == null || session == null || player == null || !companion.actionsAllowed() || session.actor.controlGeneration() != job.generation()
-                    || companion.jobState() != CompanionEntity.JobState.RUNNING || !job.jobId().equals(companion.jobId())) { work.remove(owner); if (companion != null) companion.stop("job_invalidated"); continue; }
+            boolean generationValid = job.generation() < 0
+                    || (session != null && session.actor.controlGeneration() == job.generation());
+            if (companion == null || player == null || !generationValid
+                    || companion.jobState() != CompanionEntity.JobState.RUNNING || !job.jobId().equals(companion.jobId())) {
+                if (companion != null && job.type() == CompanionEntity.JobType.MINE) {
+                    clearBreakProgress(companion, job, (ServerLevel) companion.level());
+                }
+                miningApproaches.remove(owner);
+                work.remove(owner); placements.remove(owner);
+                if (companion != null) companion.stop("job_invalidated");
+                continue;
+            }
             ServerLevel world = (ServerLevel) companion.level();
-            if (world.getGameTime() - job.started() > 600) { companion.failJob("task_deadline"); work.remove(owner); continue; }
+            if (world.getGameTime() - job.started() > 600) {
+                if (job.type() == CompanionEntity.JobType.MINE) {
+                    clearBreakProgress(companion, job, world);
+                    miningApproaches.remove(owner);
+                }
+                companion.failJob("task_deadline"); work.remove(owner); continue;
+            }
             if (job.type() == CompanionEntity.JobType.MINE) tickMine(owner, companion, job, world);
+            else if (job.type() == CompanionEntity.JobType.PLACE) tickPlace(owner, companion, job, world);
             else if (job.type() == CompanionEntity.JobType.COLLECT) tickCollect(owner, companion, job, world);
             else if (job.type() == CompanionEntity.JobType.DEFEND) tickDefend(owner, companion, job, world);
         }
     }
     private void tickMine(UUID owner, CompanionEntity companion, PhysicalJob job, ServerLevel world) {
-        if (!world.hasChunkAt(job.block()) || companion.distanceToSqr(Vec3.atCenterOf(job.block())) > 16 || !world.getBlockState(job.block()).equals(job.initial())) { companion.failJob("block_precondition_changed"); work.remove(owner); return; }
+        if (!world.hasChunkAt(job.block()) || !world.getBlockState(job.block()).equals(job.initial())) {
+            clearBreakProgress(companion, job, world);
+            companion.failJob("block_precondition_changed"); work.remove(owner); return;
+        }
+
+        if (!withinBlockReach(companion, job.block())) {
+            // A target found by scanning may be buried far below Chat or be
+            // behind unwalkable terrain. Mine only after physical reach.
+            // The normal 600-tick deadline previously let the agent repeat
+            // a motionless 30-second approach indefinitely.
+            long tick = world.getGameTime();
+            double distance = Math.sqrt(companion.getEyePosition().distanceToSqr(
+                    Vec3.atCenterOf(job.block())));
+            MiningApproach approach = miningApproaches.get(owner);
+            if (approach == null || !approach.jobId().equals(job.jobId())
+                    || distance <= approach.bestDistance() - 0.35) {
+                approach = new MiningApproach(job.jobId(), distance, tick);
+                miningApproaches.put(owner, approach);
+            } else if (tick - approach.lastImprovementTick() >= 120) {
+                clearBreakProgress(companion, job, world);
+                companion.failJob("mining_approach_stalled");
+                work.remove(owner);
+                miningApproaches.remove(owner);
+                return;
+            }
+            companion.jobProgress(0.0F, "approaching_block");
+            if (!moveNearBlock(companion, job.block(), world)) {
+                clearBreakProgress(companion, job, world);
+                companion.failJob("mining_no_standable_approach");
+                work.remove(owner);
+                miningApproaches.remove(owner);
+            }
+            return;
+        }
+
+        miningApproaches.remove(owner);
+        companion.getNavigation().stop();
+        lookAtBlock(companion, job.block());
+        // Surface the actual block occluding the ray. Choosing to remove it
+        // or approach from another angle remains the local AI's decision.
+        Vec3 eye = companion.getEyePosition();
+        HitResult sight = world.clip(new ClipContext(
+                eye, Vec3.atCenterOf(job.block()), ClipContext.Block.OUTLINE,
+                ClipContext.Fluid.NONE, companion));
+        if (sight instanceof BlockHitResult hit && !hit.getBlockPos().equals(job.block())) {
+            BlockPos obstruction = hit.getBlockPos();
+            String blockId = BuiltInRegistries.BLOCK.getKey(
+                    world.getBlockState(obstruction).getBlock()).toString();
+            clearBreakProgress(companion, job, world);
+            companion.failJob("mining_blocked|block=" + blockId
+                    + "|at=" + obstruction.getX() + "," + obstruction.getY() + "," + obstruction.getZ());
+            work.remove(owner);
+            return;
+        }
+        if (!canInteractWithBlock(companion, job.block(), world)) {
+            if (world.getGameTime() - job.started() > 100) {
+                clearBreakProgress(companion, job, world);
+                companion.failJob("mining_alignment_timeout");
+                work.remove(owner);
+                return;
+            }
+            companion.jobProgress(job.progress(), "aligning_to_block");
+            return;
+        }
+
+        ItemStack visibleTool = companion.companionInventory().getItem(0).copy();
+        companion.setItemSlot(EquipmentSlot.MAINHAND, visibleTool);
         FakePlayer fake = fake(companion, world, 0);
         float delta = job.initial().getDestroyProgress(fake, world, job.block());
-        if (delta <= 0 || !Float.isFinite(delta)) { companion.failJob("unbreakable_or_missing_tool"); work.remove(owner); return; }
-        float progress = job.progress() + delta;
-        if (progress >= 1) {
+        if (delta <= 0 || !Float.isFinite(delta)) {
+            clearBreakProgress(companion, job, world);
+            companion.failJob("unbreakable_or_missing_tool"); work.remove(owner); return;
+        }
+
+        int breakingTicks = job.changed() + 1;
+        float progress = Math.min(1.0F, job.progress() + delta);
+        companion.jobProgress(progress, "breaking");
+
+        int crackStage = Math.min(9, Math.max(0, (int)Math.floor(progress * 10.0F)));
+        world.destroyBlockProgress(companion.getId(), job.block(), crackStage);
+        if ((breakingTicks - 1) % 4 == 0) companion.swing(InteractionHand.MAIN_HAND);
+
+        if (progress >= 1.0F) {
+            fake.setYRot(companion.getYRot());
+            fake.setXRot(companion.getXRot());
+            ItemStack usedTool = fake.getMainHandItem().copy();
+            String toolId = usedTool.isEmpty()
+                    ? "minecraft:air"
+                    : BuiltInRegistries.ITEM.getKey(usedTool.getItem()).toString();
+            String blockId = BuiltInRegistries.BLOCK.getKey(job.initial().getBlock()).toString();
+
             boolean success = fake.gameMode.destroyBlock(job.block());
             companion.companionInventory().setItem(0, fake.getMainHandItem().copy());
-            if (success && !world.getBlockState(job.block()).equals(job.initial())) companion.complete("block_mined");
-            else companion.failJob("protected_or_break_rejected");
+            companion.setItemSlot(EquipmentSlot.MAINHAND, fake.getMainHandItem().copy());
+            clearBreakProgress(companion, job, world);
+
+            if (success && !world.getBlockState(job.block()).equals(job.initial())) {
+                companion.complete(
+                        "block_mined|block=" + blockId
+                                + "|tool=" + toolId
+                                + "|break_ticks=" + breakingTicks);
+            } else {
+                companion.failJob("protected_or_break_rejected");
+            }
             work.remove(owner);
-        } else work.put(owner, job.progress(progress, 0));
+        } else {
+            work.put(owner, job.progress(progress, breakingTicks));
+        }
     }
+
+    private void clearBreakProgress(CompanionEntity companion, PhysicalJob job, ServerLevel world) {
+        if (job.block() != null) world.destroyBlockProgress(companion.getId(), job.block(), -1);
+    }
+
+    private void tickPlace(UUID owner, CompanionEntity companion, PhysicalJob job, ServerLevel world) {
+        PlacementJob placement = placements.get(owner);
+        if (placement == null || !placement.block().equals(job.block())) {
+            companion.failJob("placement_metadata_missing"); work.remove(owner); placements.remove(owner); return;
+        }
+        if (!world.hasChunkAt(placement.block()) || !world.getBlockState(placement.block()).canBeReplaced()) {
+            companion.failJob("placement_target_changed"); work.remove(owner); placements.remove(owner); return;
+        }
+        if (companion.companionInventory().getItem(placement.slot()).isEmpty()) {
+            companion.failJob("empty_inventory_slot"); work.remove(owner); placements.remove(owner); return;
+        }
+
+        BlockPos support = placement.block().relative(placement.face().getOpposite());
+        if (!world.getBlockState(support).isFaceSturdy(world, support, placement.face())) {
+            companion.failJob("placement_support_invalid"); work.remove(owner); placements.remove(owner); return;
+        }
+        if (!withinBlockReach(companion, placement.block())) {
+            if (world.getGameTime() - job.started() > 120) {
+                companion.failJob("placement_approach_timeout"); work.remove(owner); placements.remove(owner); return;
+            }
+            moveNearBlock(companion, placement.block(), world);
+            return;
+        }
+
+        companion.getNavigation().stop();
+        Vec3 hitPoint = Vec3.atCenterOf(support)
+                .add(Vec3.atLowerCornerOf(placement.face().getNormal()).scale(0.5));
+        // A trace ending exactly on a face may MISS due to floating-point
+        // boundary handling. Trace slightly THROUGH the clicked surface, while
+        // keeping the actual useOn click at the true face position.
+        Vec3 traceEnd = hitPoint.subtract(
+                Vec3.atLowerCornerOf(placement.face().getNormal()).scale(0.08));
+        lookAtPoint(companion, hitPoint);
+        HitResult sight = world.clip(new ClipContext(
+                companion.getEyePosition(), traceEnd, ClipContext.Block.OUTLINE,
+                ClipContext.Fluid.NONE, companion));
+        if (sight instanceof BlockHitResult obstruction && !obstruction.getBlockPos().equals(support)) {
+            BlockPos blocked = obstruction.getBlockPos();
+            String blockId = BuiltInRegistries.BLOCK.getKey(world.getBlockState(blocked).getBlock()).toString();
+            companion.failJob("placement_blocked|block=" + blockId
+                    + "|at=" + blocked.getX() + "," + blocked.getY() + "," + blocked.getZ());
+            work.remove(owner); placements.remove(owner); return;
+        }
+        if (!canInteractWithPoint(companion, support, traceEnd, world)) {
+            if (world.getGameTime() - job.started() > 80) {
+                companion.failJob("placement_alignment_timeout");
+                work.remove(owner); placements.remove(owner);
+            }
+            return;
+        }
+
+        FakePlayer fake = fake(companion, world, placement.slot());
+        fake.setYRot(companion.getYRot());
+        fake.setXRot(companion.getXRot());
+        BlockState before = world.getBlockState(placement.block());
+        InteractionResult used = fake.getMainHandItem().useOn(new UseOnContext(
+                fake,
+                InteractionHand.MAIN_HAND,
+                new BlockHitResult(hitPoint, placement.face(), support, false)));
+        companion.companionInventory().setItem(placement.slot(), fake.getMainHandItem().copy());
+
+        if (used.consumesAction() && !before.equals(world.getBlockState(placement.block()))) companion.complete("block_placed");
+        else companion.failJob("protected_or_placement_rejected");
+        work.remove(owner);
+        placements.remove(owner);
+    }
+
+    private boolean withinBlockReach(CompanionEntity companion, BlockPos block) {
+        return companion.getEyePosition().distanceToSqr(Vec3.atCenterOf(block)) <= 4.5 * 4.5;
+    }
+
+    private boolean moveNearBlock(CompanionEntity companion, BlockPos block, ServerLevel world) {
+        if (world.getGameTime() % 4 != 0) return true;
+        BlockPos best = null;
+        double bestDistance = Double.POSITIVE_INFINITY;
+        for (Direction direction : Direction.Plane.HORIZONTAL) {
+            BlockPos candidate = block.relative(direction);
+            if (!world.getBlockState(candidate).getCollisionShape(world, candidate).isEmpty()) continue;
+            BlockPos head = candidate.above();
+            if (!world.getBlockState(head).getCollisionShape(world, head).isEmpty()) continue;
+            BlockPos floor = candidate.below();
+            if (world.getBlockState(floor).getCollisionShape(world, floor).isEmpty()) continue;
+            double distance = companion.distanceToSqr(Vec3.atBottomCenterOf(candidate));
+            if (distance < bestDistance) { bestDistance = distance; best = candidate; }
+        }
+        if (best == null) {
+            // Do not navigate directly into a solid underground block.
+            // Let the agent select another observed target or experiment.
+            return false;
+        }
+        companion.getNavigation().moveTo(best.getX() + 0.5, best.getY(), best.getZ() + 0.5, 1.28);
+        return true;
+    }
+
+    private void lookAtBlock(CompanionEntity companion, BlockPos block) {
+        lookAtPoint(companion, Vec3.atCenterOf(block));
+    }
+
+    private void lookAtPoint(CompanionEntity companion, Vec3 target) {
+        Vec3 eye = companion.getEyePosition();
+        Vec3 delta = target.subtract(eye);
+        double horizontal = Math.sqrt(delta.x * delta.x + delta.z * delta.z);
+        float yaw = (float)Math.toDegrees(Math.atan2(-delta.x, delta.z));
+        float pitch = (float)-Math.toDegrees(Math.atan2(delta.y, horizontal));
+
+        // Rotate immediately like a player moving their view before holding
+        // attack. LookControl remains set as well so normal mob head tracking
+        // agrees with the authoritative raycast on subsequent ticks.
+        companion.setYRot(yaw);
+        companion.setYBodyRot(yaw);
+        companion.setYHeadRot(yaw);
+        companion.setXRot(pitch);
+        companion.getLookControl().setLookAt(target.x, target.y, target.z, 90.0F, 90.0F);
+    }
+
+    private boolean canInteractWithBlock(CompanionEntity companion, BlockPos block, ServerLevel world) {
+        return canInteractWithPoint(companion, block, Vec3.atCenterOf(block), world);
+    }
+
+    private boolean canInteractWithPoint(CompanionEntity companion, BlockPos expectedHit, Vec3 target, ServerLevel world) {
+        Vec3 eye = companion.getEyePosition();
+        if (eye.distanceToSqr(target) > 4.5 * 4.5) return false;
+        Vec3 direction = target.subtract(eye).normalize();
+        if (companion.getViewVector(1.0F).normalize().dot(direction) < 0.97) return false;
+        HitResult hit = world.clip(new ClipContext(eye, target, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, companion));
+        return hit instanceof BlockHitResult blockHit && blockHit.getBlockPos().equals(expectedHit);
+    }
+
     private void tickCollect(UUID owner, CompanionEntity companion, PhysicalJob job, ServerLevel world) {
         List<ItemEntity> items = world.getEntitiesOfClass(ItemEntity.class, companion.getBoundingBox().inflate(job.radius()), item -> item.isAlive() && !item.hasPickUpDelay());
         items.sort(Comparator.comparingDouble(companion::distanceToSqr));
         if (items.isEmpty() || job.changed() >= job.limit()) { companion.complete("collection_complete:" + job.changed()); work.remove(owner); return; }
         ItemEntity target = items.getFirst();
-        if (companion.distanceToSqr(target) > 4) { if (world.getGameTime() % 15 == 0) companion.getNavigation().moveTo(target, 1.1); return; }
+        if (!companion.getBoundingBox().inflate(1.0, 0.5, 1.0).intersects(target.getBoundingBox())) {
+            if (world.getGameTime() % 4 == 0) companion.getNavigation().moveTo(target, 1.28);
+            return;
+        }
         ItemStack original = target.getItem(); int before = original.getCount(); ItemStack remainder = companion.companionInventory().addItem(original.copy());
         if (remainder.getCount() == before) { companion.failJob("inventory_full"); work.remove(owner); return; }
         if (remainder.isEmpty()) target.discard(); else target.setItem(remainder);
@@ -331,12 +616,17 @@ public final class CompanionService implements AutoCloseable {
         Entity target = world.getEntity(job.target());
         if (!(target instanceof LivingEntity living) || !living.isAlive()) { companion.complete("target_unavailable"); work.remove(owner); return; }
         if (!(living instanceof Enemy) || companion.isAlliedTo(living) || companion.distanceToSqr(living) > 64 * 64) { companion.failJob("combat_policy_denied"); work.remove(owner); return; }
-        if (companion.distanceToSqr(living) > 6) { if (world.getGameTime() % 15 == 0) companion.getNavigation().moveTo(living, 1.1); }
+        if (companion.distanceToSqr(living) > 6) { if (world.getGameTime() % 6 == 0) companion.getNavigation().moveTo(living, 1.28); }
         else if (world.getGameTime() % 20 == 0 && companion.hasLineOfSight(living)) companion.doHurtTarget(living);
     }
     private FakePlayer fake(CompanionEntity companion, ServerLevel world, int slot) {
         FakePlayer fake = FakePlayerFactory.get(world, new GameProfile(companion.getUUID(), "[ChatCompanion]"));
-        fake.setPos(companion.getX(), companion.getY(), companion.getZ()); fake.gameMode.changeGameModeForPlayer(GameType.SURVIVAL);
+        fake.setPos(companion.getX(), companion.getY(), companion.getZ());
+        // Breaking speed depends on the miner's physical state. A freshly
+        // created FakePlayer is otherwise treated as airborne and learns
+        // misleadingly slow break times for tools.
+        fake.setOnGround(companion.onGround());
+        fake.gameMode.changeGameModeForPlayer(GameType.SURVIVAL);
         fake.getInventory().selected = 0; fake.getInventory().setItem(0, companion.companionInventory().getItem(slot).copy());
         return fake;
     }
@@ -379,26 +669,23 @@ public final class CompanionService implements AutoCloseable {
                 companion.level().getEntities(companion, companion.getBoundingBox().inflate(radius), Entity::isAlive).stream().limit(max).forEach(e -> { JsonObject item = new JsonObject(); item.addProperty("uuid", e.getUUID().toString()); item.addProperty("type", e.getType().toShortString()); item.addProperty("distance", companion.distanceTo(e)); entities.add(item); });
                 evidence.add("nearby_entities", entities); return observed(evidence, "world_observed");
             }
-            if (!companion.actionsAllowed()) return ActionOutcome.rejected("world_actions_disabled");
             ServerLevel world = (ServerLevel) companion.level();
             if (name.equals("mine_block")) {
-                BlockPos pos = position(args, companion); if (companion.distanceToSqr(Vec3.atCenterOf(pos)) > 16) return ActionOutcome.rejected("out_of_reach");
+                BlockPos pos = position(args, companion);
                 BlockState state = world.getBlockState(pos); if (state.isAir() || state.getDestroySpeed(world, pos) < 0) return ActionOutcome.rejected("invalid_mining_target");
                 UUID id = companion.externalJob(CompanionEntity.JobType.MINE);
+                placements.remove(owner.getUUID());
                 work.put(owner.getUUID(), new PhysicalJob(companion.getUUID(), id, request.controlGeneration(), CompanionEntity.JobType.MINE, pos, state, null, 0, 1, world.getGameTime(), 0, 0));
                 return ActionOutcome.accepted(id.toString());
             }
             if (name.equals("place_block")) {
-                BlockPos pos = position(args, companion); if (companion.distanceToSqr(Vec3.atCenterOf(pos)) > 16 || !world.getBlockState(pos).canBeReplaced()) return ActionOutcome.rejected("invalid_placement_target");
+                BlockPos pos = position(args, companion); if (!world.getBlockState(pos).canBeReplaced()) return ActionOutcome.rejected("invalid_placement_target");
                 int slot = integer(args, "inventory_slot", 0, 35); Direction face = Direction.valueOf(args.get("face").getAsString().toUpperCase(Locale.ROOT));
                 if (companion.companionInventory().getItem(slot).isEmpty()) return ActionOutcome.rejected("empty_inventory_slot");
-                FakePlayer fake = fake(companion, world, slot); BlockState before = world.getBlockState(pos);
-                BlockPos support = pos.relative(face.getOpposite());
-                InteractionResult used = fake.getMainHandItem().useOn(new UseOnContext(fake, InteractionHand.MAIN_HAND,
-                        new BlockHitResult(Vec3.atCenterOf(support).add(Vec3.atLowerCornerOf(face.getNormal()).scale(0.5)), face, support, false)));
-                companion.companionInventory().setItem(slot, fake.getMainHandItem().copy());
-                JsonObject evidence = new JsonObject(); evidence.addProperty("position", pos.toShortString()); evidence.addProperty("before", before.toString()); evidence.addProperty("after", world.getBlockState(pos).toString());
-                return used.consumesAction() && !before.equals(world.getBlockState(pos)) ? observed(evidence, "block_placed") : ActionOutcome.rejected("protected_or_placement_rejected");
+                UUID id = companion.externalJob(CompanionEntity.JobType.PLACE);
+                placements.put(owner.getUUID(), new PlacementJob(pos, slot, face));
+                work.put(owner.getUUID(), new PhysicalJob(companion.getUUID(), id, request.controlGeneration(), CompanionEntity.JobType.PLACE, pos, world.getBlockState(pos), null, 0, 1, world.getGameTime(), 0, 0));
+                return ActionOutcome.accepted(id.toString());
             }
             if (name.equals("collect_items")) {
                 int radius = integer(args, "radius", 1, 8), limit = integer(args, "max_items", 1, 32); UUID id = companion.externalJob(CompanionEntity.JobType.COLLECT);
@@ -480,6 +767,6 @@ public final class CompanionService implements AutoCloseable {
     @Override public void close() {
         closed = true;
         sessions.values().forEach(s -> { CompanionEntity companion = find(s.owner); if (companion != null) companion.suspend("server_stopping"); if (s.remote != null) s.remote.close(); s.actor.closeAsync(); });
-        work.clear(); io.shutdown();
+        work.clear(); placements.clear(); io.shutdown();
     }
 }

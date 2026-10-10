@@ -1,6 +1,7 @@
 package dev.chatcompanion.neoforge;
 
 import com.google.gson.JsonObject;
+import dev.chatcompanion.core.ActionOutcome;
 import java.util.UUID;
 import net.minecraft.core.BlockPos;
 import net.minecraft.gametest.framework.GameTest;
@@ -48,22 +49,201 @@ public final class CompanionGameTests {
             helper.runAfterDelay(100, () -> { helper.assertTrue(companion.distanceTo(owner) < 2.5, "Follow should resume when the owner moves"); companion.stop("test_end"); owner.connection.disconnect(net.minecraft.network.chat.Component.literal("test complete")); helper.succeed(); });
         });
     }
-    @GameTest(template = "empty", timeoutTicks = 200)
-    public static void worldActionPermissionAndMining(GameTestHelper helper) {
+    @GameTest(template = "empty", timeoutTicks = 260)
+    public static void miningApproachesAndBreaksWithoutApprovalGate(GameTestHelper helper) {
         floor(helper);
-        ServerPlayer owner = helper.makeMockServerPlayerInLevel(); Vec3 pos = Vec3.atBottomCenterOf(helper.absolutePos(new BlockPos(2, 2, 2))); owner.setPos(pos.x, pos.y, pos.z);
-        CompanionEntity companion = ChatCompanion.service.spawn(owner); companion.companionInventory().setItem(0, new ItemStack(Items.DIAMOND_PICKAXE));
-        BlockPos target = companion.blockPosition().offset(1, 0, 0); helper.getLevel().setBlockAndUpdate(target, Blocks.STONE.defaultBlockState());
-        JsonObject args = new JsonObject(); args.addProperty("dimension", owner.level().dimension().location().toString()); args.addProperty("x", target.getX()); args.addProperty("y", target.getY()); args.addProperty("z", target.getZ());
+        ServerPlayer owner = helper.makeMockServerPlayerInLevel();
+        Vec3 pos = Vec3.atBottomCenterOf(helper.absolutePos(new BlockPos(2, 2, 2)));
+        owner.setPos(pos.x, pos.y, pos.z);
+
+        CompanionEntity companion = ChatCompanion.service.spawn(owner);
+        companion.companionInventory().setItem(0, new ItemStack(Items.DIAMOND_PICKAXE));
+        Vec3 start = companion.position();
+
+        BlockPos target = companion.blockPosition().offset(6, 0, 0);
+        helper.getLevel().setBlockAndUpdate(target, Blocks.STONE.defaultBlockState());
+
+        JsonObject args = new JsonObject();
+        args.addProperty("dimension", owner.level().dimension().location().toString());
+        args.addProperty("x", target.getX());
+        args.addProperty("y", target.getY());
+        args.addProperty("z", target.getZ());
+
         ChatCompanion.service.action(owner, "mine_block", args);
-        helper.runAfterDelay(30, () -> {
-            helper.assertTrue(helper.getLevel().getBlockState(target).is(Blocks.STONE), "Disabled world actions must not mutate the block");
-            companion.actionsAllowed(true); ChatCompanion.service.action(owner, "mine_block", args);
-            helper.runAfterDelay(60, () -> {
-                helper.assertTrue(!helper.getLevel().getBlockState(target).is(Blocks.STONE), "Authorized mining must change the actual block");
-                helper.assertTrue(companion.jobState() == CompanionEntity.JobState.COMPLETED, "Mining should complete only after world evidence");
-                owner.connection.disconnect(net.minecraft.network.chat.Component.literal("test complete")); helper.succeed();
+        helper.runAfterDelay(160, () -> {
+            helper.assertTrue(companion.position().distanceTo(start) > 1.0,
+                    "Mining a distant block must physically approach it");
+            helper.assertTrue(!helper.getLevel().getBlockState(target).is(Blocks.STONE),
+                    "Mining must break the actual target block without an approval toggle");
+            helper.assertTrue(companion.jobState() == CompanionEntity.JobState.COMPLETED,
+                    "Mining should complete only after the block is actually changed");
+            owner.connection.disconnect(net.minecraft.network.chat.Component.literal("test complete"));
+            helper.succeed();
+        });
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 260)
+    public static void localMcpMiningNeedsNoLegacySession(GameTestHelper helper) {
+        floor(helper);
+        ServerPlayer owner = helper.makeMockServerPlayerInLevel();
+        Vec3 pos = Vec3.atBottomCenterOf(helper.absolutePos(new BlockPos(2, 2, 2)));
+        owner.setPos(pos.x, pos.y, pos.z);
+
+        CompanionEntity companion = ChatCompanion.service.spawn(owner);
+        companion.companionInventory().setItem(0, new ItemStack(Items.DIAMOND_PICKAXE));
+
+        BlockPos target = companion.blockPosition().offset(5, 0, 0);
+        helper.getLevel().setBlockAndUpdate(target, Blocks.STONE.defaultBlockState());
+
+        JsonObject args = new JsonObject();
+        args.addProperty("dimension", owner.level().dimension().location().toString());
+        args.addProperty("x", target.getX());
+        args.addProperty("y", target.getY());
+        args.addProperty("z", target.getZ());
+
+        ActionOutcome outcome = ChatCompanion.service.localAction(owner, "mine_block", args);
+        helper.assertTrue(outcome.success(), "Local MCP action should be admitted without starting a legacy remote session");
+
+        helper.runAfterDelay(160, () -> {
+            helper.assertTrue(!helper.getLevel().getBlockState(target).is(Blocks.STONE),
+                    "Direct local MCP mining must complete without /chat remote on");
+            helper.assertTrue(companion.jobState() == CompanionEntity.JobState.COMPLETED,
+                    "Direct local MCP job should reach a terminal completed state");
+            owner.connection.disconnect(net.minecraft.network.chat.Component.literal("test complete"));
+            helper.succeed();
+        });
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 350)
+    public static void miningHasObservableProgressBeforeCompletion(GameTestHelper helper) {
+        floor(helper);
+        ServerPlayer owner = helper.makeMockServerPlayerInLevel();
+        Vec3 pos = Vec3.atBottomCenterOf(helper.absolutePos(new BlockPos(2, 2, 2)));
+        owner.setPos(pos.x, pos.y, pos.z);
+        CompanionEntity companion = ChatCompanion.service.spawn(owner);
+        companion.companionInventory().setItem(0, new ItemStack(Items.WOODEN_PICKAXE));
+        BlockPos target = companion.blockPosition().offset(2, 0, 0);
+        helper.getLevel().setBlockAndUpdate(target, Blocks.STONE.defaultBlockState());
+        JsonObject args = new JsonObject();
+        args.addProperty("dimension", owner.level().dimension().location().toString());
+        args.addProperty("x", target.getX());
+        args.addProperty("y", target.getY());
+        args.addProperty("z", target.getZ());
+        helper.assertTrue(ChatCompanion.service.localAction(owner, "mine_block", args).success(),
+                "Progressive mining must be admitted");
+        helper.runAfterDelay(8, () -> {
+            helper.assertTrue(companion.jobProgress() > 0.0F && companion.jobProgress() < 1.0F,
+                    "Mining must expose partial progress before the block breaks");
+            helper.assertTrue(helper.getLevel().getBlockState(target).is(Blocks.STONE),
+                    "Partial progress must not immediately remove the block");
+            helper.runAfterDelay(250, () -> {
+                helper.assertTrue(companion.jobState() == CompanionEntity.JobState.COMPLETED,
+                        "Progressive mining must eventually finish; state="
+                            + companion.jobState() + " reason=" + companion.reason()
+                            + " progress=" + companion.jobProgress());
+                helper.assertTrue(!helper.getLevel().getBlockState(target).is(Blocks.STONE),
+                        "Completed mining must change the physical world");
+                helper.assertTrue(companion.reason().contains("break_ticks="),
+                        "Successful mining must report observed break timing");
+                String reason = companion.reason();
+                int ticks = Integer.parseInt(reason.substring(reason.indexOf("break_ticks=") + 12));
+                helper.assertTrue(ticks > 8 && ticks < 80,
+                        "An on-ground wooden pickaxe must not mine at airborne speed; ticks=" + ticks);
+                owner.connection.disconnect(net.minecraft.network.chat.Component.literal("test complete"));
+                helper.succeed();
             });
+        });
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 150)
+    public static void miningReportsObstructionWithoutStalling(GameTestHelper helper) {
+        floor(helper);
+        ServerPlayer owner = helper.makeMockServerPlayerInLevel();
+        Vec3 pos = Vec3.atBottomCenterOf(helper.absolutePos(new BlockPos(2, 2, 2)));
+        owner.setPos(pos.x, pos.y, pos.z);
+        CompanionEntity companion = ChatCompanion.service.spawn(owner);
+        BlockPos target = companion.blockPosition().offset(3, 0, 0);
+        BlockPos blocker = companion.blockPosition().offset(1, 0, 0);
+        helper.getLevel().setBlockAndUpdate(target, Blocks.STONE.defaultBlockState());
+        helper.getLevel().setBlockAndUpdate(blocker, Blocks.STONE.defaultBlockState());
+        helper.getLevel().setBlockAndUpdate(blocker.above(), Blocks.STONE.defaultBlockState());
+        JsonObject args = new JsonObject();
+        args.addProperty("dimension", owner.level().dimension().location().toString());
+        args.addProperty("x", target.getX());
+        args.addProperty("y", target.getY());
+        args.addProperty("z", target.getZ());
+        ActionOutcome admitted = ChatCompanion.service.localAction(owner, "mine_block", args);
+        helper.assertTrue(admitted.success(), "Blocked mining experiment must be admitted");
+        helper.runAfterDelay(18, () -> {
+            helper.assertTrue(companion.jobState() == CompanionEntity.JobState.FAILED,
+                    "Occluded mining must fail promptly, not wait indefinitely");
+            helper.assertTrue(companion.reason().contains("mining_blocked|block=minecraft:stone|at="),
+                    "The obstruction must be reported for local experimentation");
+            helper.assertTrue(helper.getLevel().getBlockState(target).is(Blocks.STONE),
+                    "Failed mining must not mutate the target");
+            owner.connection.disconnect(net.minecraft.network.chat.Component.literal("test complete"));
+            helper.succeed();
+        });
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 130)
+    public static void localPlacementCreatesRealCraftingTable(GameTestHelper helper) {
+        floor(helper);
+        ServerPlayer owner = helper.makeMockServerPlayerInLevel();
+        Vec3 pos = Vec3.atBottomCenterOf(helper.absolutePos(new BlockPos(2, 2, 2)));
+        owner.setPos(pos.x, pos.y, pos.z);
+        CompanionEntity companion = ChatCompanion.service.spawn(owner);
+        companion.companionInventory().setItem(0, new ItemStack(Items.CRAFTING_TABLE, 2));
+        BlockPos target = companion.blockPosition().offset(1, 0, 0);
+        helper.assertTrue(helper.getLevel().getBlockState(target).isAir(),
+                "Placement test needs an initially empty block.");
+        JsonObject args = new JsonObject();
+        args.addProperty("dimension", owner.level().dimension().location().toString());
+        args.addProperty("x", target.getX());
+        args.addProperty("y", target.getY());
+        args.addProperty("z", target.getZ());
+        args.addProperty("inventory_slot", 0);
+        args.addProperty("face", "up");
+        ActionOutcome admitted = ChatCompanion.service.localAction(owner, "place_block", args);
+        helper.assertTrue(admitted.success(), "Crafting table placement should be admitted.");
+        helper.runAfterDelay(65, () -> {
+            helper.assertTrue(helper.getLevel().getBlockState(target).is(Blocks.CRAFTING_TABLE),
+                    "Companion must physically place the crafting table; state="
+                        + companion.jobState() + " reason=" + companion.reason());
+            helper.assertTrue(companion.jobState() == CompanionEntity.JobState.COMPLETED,
+                    "Placement job must report actual success.");
+            helper.assertTrue(companion.companionInventory().getItem(0).getCount() == 1,
+                    "Placement must consume one crafting table.");
+            owner.connection.disconnect(net.minecraft.network.chat.Component.literal("test complete"));
+            helper.succeed();
+        });
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 100)
+    public static void placingWithoutSolidSupportFailsPromptly(GameTestHelper helper) {
+        floor(helper);
+        ServerPlayer owner = helper.makeMockServerPlayerInLevel();
+        Vec3 pos = Vec3.atBottomCenterOf(helper.absolutePos(new BlockPos(2, 2, 2)));
+        owner.setPos(pos.x, pos.y, pos.z);
+        CompanionEntity companion = ChatCompanion.service.spawn(owner);
+        companion.companionInventory().setItem(0, new ItemStack(Items.CRAFTING_TABLE));
+        BlockPos target = companion.blockPosition().offset(1, 1, 0);
+        JsonObject args = new JsonObject();
+        args.addProperty("dimension", owner.level().dimension().location().toString());
+        args.addProperty("x", target.getX());
+        args.addProperty("y", target.getY());
+        args.addProperty("z", target.getZ());
+        args.addProperty("inventory_slot", 0);
+        args.addProperty("face", "up");
+        helper.assertTrue(ChatCompanion.service.localAction(owner, "place_block", args).success(),
+                "Unsupported placement is admitted, then checked against the world.");
+        helper.runAfterDelay(20, () -> {
+            helper.assertTrue(companion.jobState() == CompanionEntity.JobState.FAILED,
+                    "Unsupported placement should terminate quickly.");
+            helper.assertTrue(companion.reason().equals("placement_support_invalid"),
+                    "The actual missing support must be diagnosed; reason=" + companion.reason());
+            owner.connection.disconnect(net.minecraft.network.chat.Component.literal("test complete"));
+            helper.succeed();
         });
     }
 
