@@ -1398,6 +1398,57 @@ def _material_action_from_scan(runtime, goal, inventory):
     return None
 
 
+def _brain_console_decision(runtime, plan, goal=None):
+    """Live observable intentions, not private or invented reasoning."""
+    key = (_plan_target_key(plan), plan.get("action"), plan.get("intent"))
+    now = time.monotonic()
+    previous = runtime.get("brain_console_last") or {}
+    if previous.get("key") == key and now - previous.get("at", 0) < 35.0:
+        return
+    runtime["brain_console_last"] = {"key": key, "at": now}
+    goal_text = (goal or {}).get("title") or "self-directed practice"
+    action = str(plan.get("action") or "unknown")
+    hypothesis = _trim(str(plan.get("hypothesis") or ""), 95)
+    coords = (
+        f" @ {plan.get('x')},{plan.get('y')},{plan.get('z')}"
+        if all(plan.get(axis) is not None for axis in ("x", "y", "z"))
+        else ""
+    )
+    print(
+        f"\\n[BRAIN] GOAL: {goal_text} | ACTION: {action}{coords}\\n"
+        f"[BRAIN] TEST: {hypothesis}", flush=True
+    )
+    log_event(
+        "brain", "visible_decision",
+        goal=goal_text, action=action, hypothesis=hypothesis,
+        target=[plan.get(k) for k in ("x", "y", "z")],
+    )
+
+
+def _brain_console_result(plan, execution):
+    result = (execution or {}).get("result") or {}
+    action = plan.get("action")
+    if action == "scan_blocks":
+        blocks = result.get("blocks") or []
+        print(
+            f"[BRAIN] OBSERVED: {len(blocks)} blocks. "
+            "Next: test a real target." if blocks else
+            "[BRAIN] OBSERVED: no matching blocks.",
+            flush=True,
+        )
+    else:
+        success = bool(execution.get("ok"))
+        outcome = _trim(str(
+            result.get("reason") or result.get("error") or
+            result.get("item") or execution.get("error") or
+            result.get("state") or "unverified"
+        ), 110)
+        print(
+            f"[BRAIN] {'SUCCESS' if success else 'FAILED'}: "
+            f"{action} -> {outcome}", flush=True
+        )
+
+
 async def run_planned_action(planner_agent, runtime, directive=None, source="practice"):
     started = time.monotonic()
 
@@ -1703,12 +1754,14 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         plan = revised
         target_key = revised_key
 
+    _brain_console_decision(runtime, plan, user_goal)
     runtime["physical_action_active"] = True
     try:
         execution = await asyncio.to_thread(execute_plan, plan)
     finally:
         runtime["physical_action_active"] = False
     result = execution.get("result") or {}
+    _brain_console_result(plan, execution)
     if plan.get("action") == "scan_blocks" and execution.get("ok"):
         blocks = result.get("blocks") or []
         if isinstance(blocks, list) and blocks:
