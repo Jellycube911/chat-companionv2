@@ -155,6 +155,49 @@ public final class CompanionGameTests {
         });
     }
 
+    @GameTest(template = "empty", timeoutTicks = 190)
+    public static void bareHandLogMiningDoesNotInstantlyBreak(GameTestHelper helper) {
+        floor(helper);
+        ServerPlayer owner = helper.makeMockServerPlayerInLevel();
+        Vec3 pos = Vec3.atBottomCenterOf(helper.absolutePos(new BlockPos(2, 2, 2)));
+        owner.setPos(pos.x, pos.y, pos.z);
+        CompanionEntity companion = ChatCompanion.service.spawn(owner);
+        // Empty main hand: a survival player must hold attack to break a log.
+        companion.companionInventory().setItem(0, ItemStack.EMPTY);
+        BlockPos target = companion.blockPosition().offset(2, 0, 0);
+        helper.getLevel().setBlockAndUpdate(target, Blocks.OAK_LOG.defaultBlockState());
+        JsonObject args = new JsonObject();
+        args.addProperty("dimension", owner.level().dimension().location().toString());
+        args.addProperty("x", target.getX());
+        args.addProperty("y", target.getY());
+        args.addProperty("z", target.getZ());
+        helper.assertTrue(ChatCompanion.service.localAction(owner, "mine_block", args).success(),
+                "The local controller must accept genuine survival log mining");
+        helper.runAfterDelay(8, () -> {
+            helper.assertTrue(helper.getLevel().getBlockState(target).is(Blocks.OAK_LOG),
+                    "Log must still exist after only eight ticks of unarmed mining");
+            helper.assertTrue(companion.jobState() == CompanionEntity.JobState.RUNNING,
+                    "Unarmed log mining cannot be an instant world edit");
+            helper.assertTrue(companion.jobProgress() > 0.0F
+                    && companion.jobProgress() < 1.0F,
+                    "Server must expose intermediate log-breaking progress");
+            helper.runAfterDelay(90, () -> {
+                helper.assertTrue(companion.jobState() == CompanionEntity.JobState.COMPLETED,
+                        "Log mining should eventually finish naturally: " + companion.reason());
+                helper.assertTrue(!helper.getLevel().getBlockState(target).is(Blocks.OAK_LOG),
+                        "Log must be physically broken after held mining");
+                String reason = companion.reason();
+                helper.assertTrue(reason.contains("break_ticks="),
+                        "Minecraft must report real held-mining ticks");
+                int ticks = Integer.parseInt(reason.substring(reason.indexOf("break_ticks=") + 12));
+                helper.assertTrue(ticks >= 15,
+                        "Unarmed wood must take more than 15 ticks; observed " + ticks);
+                owner.connection.disconnect(net.minecraft.network.chat.Component.literal("test complete"));
+                helper.succeed();
+            });
+        });
+    }
+
     @GameTest(template = "empty", timeoutTicks = 150)
     public static void miningReportsObstructionWithoutStalling(GameTestHelper helper) {
         floor(helper);
