@@ -88,6 +88,20 @@ class TrainingProgressRegressions(unittest.TestCase):
             self.assertFalse(status["stage_2_unlocked"])
             self.assertEqual(status["skills"]["mine"]["distinct_success_sites"], 1)
 
+    def test_bridging_recent_success_does_not_erase_three_valid_sites(self):
+        from training_progress import _distinct_success_sites
+        observations = [
+            {"success": True, "dimension": "minecraft:overworld",
+             "start": (14.5, 64, 13.5)},
+            {"success": True, "dimension": "minecraft:overworld",
+             "start": (10.0, 64, 11.0)},
+            {"success": True, "dimension": "minecraft:overworld",
+             "start": (34.0, 64, 11.0)},
+            {"success": True, "dimension": "minecraft:overworld",
+             "start": (22.0, 64, 11.0)},
+        ]
+        self.assertEqual(_distinct_success_sites(observations), 3)
+
     def test_pending_session_blocks_graduation_even_with_perfect_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = MemoryStore(Path(tmp) / "memory.sqlite3")
