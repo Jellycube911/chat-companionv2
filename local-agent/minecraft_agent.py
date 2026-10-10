@@ -912,16 +912,23 @@ def _reconcile_user_goals(execution):
             continue
 
         match = re.fullmatch(r"gather\s+(\d+)\s+logs?", normalized)
-        if match:
+        if match and inventory:
             target = int(match.group(1))
             count = _inventory_count(
                 inventory,
                 lambda item: item.startswith("minecraft:") and item.endswith("_log"),
             )
-            if count >= target:
-                store.update_goal(goal["id"], status="completed")
-                messages.append(f"got {count} logs, task done")
+            progress = store.goal_progress(goal["id"])
+            if progress is None:
+                # First real observation establishes the baseline, never
+                # falsely counts 61 already-owned logs as freshly gathered.
+                store.set_goal_progress(goal["id"], "logs", count, target)
                 continue
+            if (progress["metric"] == "logs" and
+                    count - progress["baseline"] >= progress["target_delta"]):
+                store.update_goal(goal["id"], status="completed")
+                messages.append(f"gathered {count - progress['baseline']} new logs, task done")
+            continue
 
         if normalized in {"obtain a stone pickaxe", "get a stone pickaxe"}:
             has_pickaxe = _inventory_count(
@@ -1170,9 +1177,17 @@ def _normalize_planner_scan(plan):
         return plan
     if plan.get("contains") or plan.get("exact"):
         return plan
-    block = plan.get("target_block")
-    if isinstance(block, str) and re.fullmatch(r"[a-z0-9_]+:[a-z0-9_./-]+", block):
-        return dict(plan, contains=[block], radius=12, limit=12)
+    # Qwen often calls this field 'filters'. Convert syntax, NEVER invent a
+    # target or silently change a Minecraft decision.
+    aliases = [plan.get("filters"), plan.get("filter"),
+               plan.get("target_block")]
+    for entry in aliases:
+        values = [entry] if isinstance(entry, str) else entry
+        if (isinstance(values, list) and values
+                and all(isinstance(v, str) and re.fullmatch(
+                    r"[a-z0-9_]+:[a-z0-9_./-]+", v) for v in values)):
+            return dict(plan, contains=values, radius=plan.get("radius", 12),
+                        limit=plan.get("limit", 12))
     return plan
 
 
@@ -3248,7 +3263,7 @@ def _remember_behavior_feedback(text):
         store.record_event("user_feedback", "Alik wants stronger self-learning")
 
 
-async def fast_task_intent(text):
+async def fast_task_intent(text, runtime=None):
     store.remember_explicit_teaching(text)
     _remember_behavior_feedback(text)
     normalized = _normalize_request_text(text)
@@ -3270,15 +3285,23 @@ async def fast_task_intent(text):
 
     def register(title, description, priority):
         goal = _ensure_user_goal(title, description, priority)
-        if replacing and goal:
+        if goal:
+            # Any new direct order supersedes earlier personal goals, not
+            # just sentences explicitly saying "change goal".
             for previous in store.list_goals("active", 20):
                 if (previous.get("source") in {"user", "self"}
                         and previous.get("id") != goal.get("id")):
                     store.update_goal(previous["id"], status="paused")
             store.record_event(
-                "goal_switched",
-                "Alik assigned %s; other active personal goals paused." % title,
-            )
+                "goal_switched", "Active user instruction: " + title)
+            if re.fullmatch(r"Gather (\d+) logs", title):
+                target = int(re.fullmatch(r"Gather (\d+) logs", title).group(1))
+                carried = ((runtime or {}).get("awareness") or {}).get("inventory")
+                if isinstance(carried, list) and store.goal_progress(goal["id"]) is None:
+                    count = _inventory_count(
+                        carried, lambda item: item.startswith("minecraft:")
+                        and item.endswith("_log"))
+                    store.set_goal_progress(goal["id"], "logs", count, target)
         return goal
     if normalized in {"make it", "craft it", "get it"}:
         user_goals = [
@@ -3614,7 +3637,7 @@ async def fast_chat_reflex(text, runtime=None):
     ):
         normalized = "come to me"
 
-    goal = await fast_task_intent(text)
+    goal = await fast_task_intent(text, runtime)
     if goal is not None:
         if runtime is not None:
             runtime["accepted_player_goal"] = {
@@ -4051,7 +4074,7 @@ async def poll_minecraft_chat(input_queue, runtime, chat_agent):
 
                     # Register user commands before replies or shortcut chat
                     # handlers, not only when a later planner turn happens.
-                    accepted_goal = await fast_task_intent(text)
+                    accepted_goal = await fast_task_intent(text, runtime)
                     if accepted_goal is not None:
                         runtime["user_goal_revision"] = int(runtime.get("user_goal_revision", 0)) + 1
                         runtime["accepted_player_goal"] = {
@@ -4190,7 +4213,7 @@ async def console_input(input_queue, runtime):
         if text:
             runtime["last_user_activity"] = time.monotonic()
             _preempt_background_reasoning(runtime)
-            accepted_goal = await fast_task_intent(text)
+            accepted_goal = await fast_task_intent(text, runtime)
             if accepted_goal is not None:
                 runtime["user_goal_revision"] = int(runtime.get("user_goal_revision", 0)) + 1
                 runtime.pop("planner_backoff_until", None)
@@ -4606,32 +4629,9 @@ async def autonomy_sensor(input_queue, runtime):
             last_item_reflex = now
             continue
 
-        if (
-            now - runtime["last_user_activity"] > 60.0
-            and not runtime["self_improvement_attempted"]
-            and owner_distance <= 20.0
-        ):
-            existing = next(
-                (
-                    goal
-                    for goal in store.list_goals("active", 20)
-                    if goal["title"].strip().lower() == "improve practical capability"
-                    and goal.get("source") == "self"
-                ),
-                None,
-            )
-            if existing is None:
-                goal = store.create_goal(
-                    "Improve practical capability",
-                    "Discover and test one useful way to become more capable in the current environment.",
-                    4,
-                    "self",
-                )
-                store.record_event(
-                    "drive",
-                    f"Self-improvement drive created exploratory goal #{goal['id']}.",
-                )
-            runtime["self_improvement_attempted"] = True
+        # Do not manufacture a vague 'Improve practical capability' goal.
+        # With no assigned work, Qwen can decide to explore or remain idle,
+        # based on observations and persisted experience.
 
         meaningful_goals = [
             goal
@@ -4762,6 +4762,14 @@ async def main():
         "failure_streaks": {},
         "post_goal_pause_until": 0.0,
     }
+
+    # Retain historical self-goal records, but never let the stale generic
+    # drive outrank something the player actually requested.
+    for previous in store.list_goals("active", 20):
+        if (previous.get("source") == "self" and
+                previous.get("title", "").strip().lower()
+                == "improve practical capability"):
+            store.update_goal(previous["id"], status="paused")
 
     model, model_label = choose_model()
     runtime["model_label"] = model_label
