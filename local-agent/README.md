@@ -48,6 +48,28 @@ A trial is marked unavailable when there is no real suitable block, standable
 location or dropped item. Those are not counted as successes. The collection
 stage cannot run until a dropped item actually exists.
 
+**Automatic graduation and next stage:** Every report includes a `graduation`
+section calculated directly from `data/companion_memory.sqlite3`. For each of
+observe, orient, navigate, mine and collect, the latest ten genuine resolved
+trials must include at least nine verified successes across at least three
+successful sites separated by eight blocks. Rejected JSON-only proposals,
+unavailable scenarios and unresolved body actions are NOT graduation successes.
+Readiness recalculates each round, including after restarting the brain.
+A later loss of reliability returns the curriculum to Stage 1 automatically.
+
+When all five pass, Chat unlocks an additional **gather_wood** scenario: it
+must choose and physically execute the appropriate sequence to mine a natural
+world-observed tree log and acquire that wood in its inventory. Both a matching
+real mining receipt and increased matching inventory are required. Stage 2
+does not automatically imply mastery; future crafting/building stages are not
+implemented. Stage 1 continues running, so competence can be reassessed.
+
+**Idle behavior:** The NeoForge and Fabric companion no longer performs
+unrequested random head turns or player-gazing; deliberate `look_at` and
+movement actions still work. The idle change is in the mod JAR, so updating
+that part requires installing a verified build and restarting Minecraft.
+Python curriculum changes alone do not require a Minecraft restart.
+
 Reports are saved under data/training_reports/training-*.json, including each
 attempt, the validated hypothesis, real outcome evidence, timing, counts,
 failure reasons, and a basic reward. Observed episodes and skill trials are
@@ -55,7 +77,7 @@ stored in the SAME existing data/companion_memory.sqlite3 for reuse across
 sessions, without erasing or replacing old memory. Skills are eligible for
 promotion only after multiple successful trials at different positions.
 
-Training automatically stops when a physical job remains pending so it cannot
+Training waits for live physical jobs to settle and only stops if a physical job remains pending so it cannot
 start another one on top of it. Tests with fake worlds exist ONLY for unit and
 regression checks; they must not be confused with actual verified Minecraft
 practice. A training run is not a guarantee of 90% task competence, neural-weight
