@@ -540,7 +540,6 @@ class MemoryStore:
                        created_at, updated_at, last_used
                 FROM memories
                 ORDER BY updated_at DESC
-                LIMIT 1000
                 """
             ).fetchall()
 
