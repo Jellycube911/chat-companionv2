@@ -13,6 +13,7 @@ import practice_engine as practice
 # The existing CI suite discovers this file specifically. Include the new
 # offline training laboratory scenarios in that verified test entrypoint.
 from test_training_lab import TrainingLabRegressions
+from test_training_progress import TrainingProgressRegressions
 
 
 class PracticeRegressions(unittest.TestCase):
