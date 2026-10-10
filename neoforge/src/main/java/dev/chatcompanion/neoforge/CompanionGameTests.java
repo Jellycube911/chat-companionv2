@@ -186,6 +186,67 @@ public final class CompanionGameTests {
         });
     }
 
+    @GameTest(template = "empty", timeoutTicks = 130)
+    public static void localPlacementCreatesRealCraftingTable(GameTestHelper helper) {
+        floor(helper);
+        ServerPlayer owner = helper.makeMockServerPlayerInLevel();
+        Vec3 pos = Vec3.atBottomCenterOf(helper.absolutePos(new BlockPos(2, 2, 2)));
+        owner.setPos(pos.x, pos.y, pos.z);
+        CompanionEntity companion = ChatCompanion.service.spawn(owner);
+        companion.companionInventory().setItem(0, new ItemStack(Items.CRAFTING_TABLE, 2));
+        BlockPos target = companion.blockPosition().offset(1, 0, 0);
+        helper.assertTrue(helper.getLevel().getBlockState(target).isAir(),
+                "Placement test needs an initially empty block.");
+        JsonObject args = new JsonObject();
+        args.addProperty("dimension", owner.level().dimension().location().toString());
+        args.addProperty("x", target.getX());
+        args.addProperty("y", target.getY());
+        args.addProperty("z", target.getZ());
+        args.addProperty("inventory_slot", 0);
+        args.addProperty("face", "up");
+        ActionOutcome admitted = ChatCompanion.service.localAction(owner, "place_block", args);
+        helper.assertTrue(admitted.success(), "Crafting table placement should be admitted.");
+        helper.runAfterDelay(65, () -> {
+            helper.assertTrue(helper.getLevel().getBlockState(target).is(Blocks.CRAFTING_TABLE),
+                    "Companion must physically place the crafting table; state="
+                        + companion.jobState() + " reason=" + companion.reason());
+            helper.assertTrue(companion.jobState() == CompanionEntity.JobState.COMPLETED,
+                    "Placement job must report actual success.");
+            helper.assertTrue(companion.companionInventory().getItem(0).getCount() == 1,
+                    "Placement must consume one crafting table.");
+            owner.connection.disconnect(net.minecraft.network.chat.Component.literal("test complete"));
+            helper.succeed();
+        });
+    }
+
+    @GameTest(template = "empty", timeoutTicks = 100)
+    public static void placingWithoutSolidSupportFailsPromptly(GameTestHelper helper) {
+        floor(helper);
+        ServerPlayer owner = helper.makeMockServerPlayerInLevel();
+        Vec3 pos = Vec3.atBottomCenterOf(helper.absolutePos(new BlockPos(2, 2, 2)));
+        owner.setPos(pos.x, pos.y, pos.z);
+        CompanionEntity companion = ChatCompanion.service.spawn(owner);
+        companion.companionInventory().setItem(0, new ItemStack(Items.CRAFTING_TABLE));
+        BlockPos target = companion.blockPosition().offset(1, 1, 0);
+        JsonObject args = new JsonObject();
+        args.addProperty("dimension", owner.level().dimension().location().toString());
+        args.addProperty("x", target.getX());
+        args.addProperty("y", target.getY());
+        args.addProperty("z", target.getZ());
+        args.addProperty("inventory_slot", 0);
+        args.addProperty("face", "up");
+        helper.assertTrue(ChatCompanion.service.localAction(owner, "place_block", args).success(),
+                "Unsupported placement is admitted, then checked against the world.");
+        helper.runAfterDelay(20, () -> {
+            helper.assertTrue(companion.jobState() == CompanionEntity.JobState.FAILED,
+                    "Unsupported placement should terminate quickly.");
+            helper.assertTrue(companion.reason().equals("placement_support_invalid"),
+                    "The actual missing support must be diagnosed; reason=" + companion.reason());
+            owner.connection.disconnect(net.minecraft.network.chat.Component.literal("test complete"));
+            helper.succeed();
+        });
+    }
+
     @GameTest(template = "empty", timeoutTicks = 150)
     public static void immediateStopFencesSessionInitialization(GameTestHelper helper) {
         floor(helper);
