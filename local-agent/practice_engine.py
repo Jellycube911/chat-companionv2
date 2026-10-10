@@ -306,9 +306,18 @@ def parse_plan(text):
         for wrapper in ("query", "scan_blocks"):
             nested = plan.get(wrapper)
             if isinstance(nested, dict):
-                for field in ("contains", "exact", "radius", "limit", "exposed_only"):
+                for field in ("contains", "exact", "radius", "limit", "exposed_only", "filters"):
                     if field not in plan and field in nested:
                         plan[field] = nested[field]
+        if not plan.get("contains") and not plan.get("exact"):
+            alias = plan.get("filters", plan.get("filter"))
+            if isinstance(alias, str):
+                alias = [alias]
+            if (isinstance(alias, list) and bool(alias)
+                    and all(isinstance(v, str) and
+                            re.fullmatch(r"[a-z0-9_]+:[a-z0-9_./-]+", v)
+                            for v in alias)):
+                plan["contains"] = alias
     if action in {"mine", "move_to", "look_at"}:
         nested = plan.get(action)
         if isinstance(nested, dict):
@@ -694,7 +703,9 @@ def _objective_success(plan, before, after, result):
             return False
         before_d = _distance(before["state"]["pos"], target)
         after_d = _distance(after["state"]["pos"], target)
-        return after_d <= 2.5 or after_d < before_d - 0.35
+        displacement = _distance(before["state"]["pos"], after["state"]["pos"])
+        return displacement >= 0.25 and (
+            after_d <= 2.5 or after_d < before_d - 0.35)
 
     if action == "move_forward":
         target = plan.get("target")
@@ -702,7 +713,8 @@ def _objective_success(plan, before, after, result):
             before_d = _distance(before["state"]["pos"], target)
             after_d = _distance(after["state"]["pos"], target)
             return after_d < before_d - 0.25
-        return terminal == "COMPLETED"
+        return (terminal == "COMPLETED" and _distance(
+            before["state"]["pos"], after["state"]["pos"]) >= 0.25)
 
     if action == "look_at":
         return bool(result.get("ok", True))
