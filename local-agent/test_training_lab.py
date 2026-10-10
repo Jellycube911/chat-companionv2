@@ -295,8 +295,10 @@ class TrainingLabRegressions(unittest.TestCase):
             db.record_skill_trial(
                 "training.observe", "scan stone", json.dumps({
                     "experiments": [{"status": "completed",
-                                     "verified": True}]}),
-                "real observed result", True)
+                                     "verified": True,
+                                     "result": {"ok": True, "observed_count": 1}}]}),
+                json.dumps({"verified": True,
+                            "outcome": "observed_matching_world_block"}), True)
             with patch.object(lab, "store", db):
                 filtered = lab._verified_history("training.observe")
             self.assertEqual(len(filtered), 1)
