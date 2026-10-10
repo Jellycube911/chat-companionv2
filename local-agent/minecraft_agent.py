@@ -3769,36 +3769,17 @@ async def fast_chat_reflex(text, runtime=None):
         )
         return None
 
+    # Record corrections as observations, but let Qwen interpret and reply.
     feedback = _feedback_reply(text)
     if feedback is not None:
-        reply, background = feedback
-        store.record_event(
-            "user_feedback",
-            f"Alik said: {text}",
-        )
+        store.record_event("user_feedback", f"Player correction: {text}")
         normalized_feedback = text.lower()
-        if any(
-            phrase in normalized_feedback
-            for phrase in (
-                "right tool",
-                "correct tool",
-                "should use ",
-                "use an axe",
-                "use a ",
-            )
-        ):
+        if any(phrase in normalized_feedback for phrase in (
+                "right tool", "correct tool", "should use ",
+                "use an axe", "use a ")):
             safe_key = re.sub(r"[^a-z0-9]+", ".", normalized_feedback).strip(".")[:90]
-            store.remember(
-                "lesson",
-                f"user_hint.{safe_key or 'correction'}",
-                f"Alik taught/corrected: {text}",
-                8,
-            )
-        return {
-            "handled": True,
-            "reply": reply,
-            "background": background,
-        }
+            store.remember("lesson", f"user_hint.{safe_key or 'correction'}",
+                           f"Player taught/corrected: {text}", 8)
 
     if _looks_like_action_request(text):
         if runtime is not None:
@@ -4600,47 +4581,7 @@ async def autonomy_sensor(input_queue, runtime):
         ):
             continue
 
-        if (
-            not meaningful_goals
-            and now - runtime["last_user_activity"] > 8.0
-            and owner_distance <= 16.0
-            and not job_active
-        ):
-            if now - last_ambient_look >= AMBIENT_LOOK_INTERVAL:
-                angle = random.random() * math.tau
-                distance = random.uniform(5.0, 10.0)
-                try:
-                    await asyncio.to_thread(
-                        _post,
-                        "/look-at",
-                        {
-                            "x": int(round(state.get("x", 0) + distance * math.cos(angle))),
-                            "y": int(round(state.get("y", 0) + random.uniform(-1.0, 2.0))),
-                            "z": int(round(state.get("z", 0) + distance * math.sin(angle))),
-                        },
-                    )
-                except Exception:
-                    pass
-                last_ambient_look = now
-
-            if now - last_ambient_wander >= AMBIENT_WANDER_INTERVAL:
-                angle = random.random() * math.tau
-                distance = random.uniform(2.0, 4.0)
-                try:
-                    await asyncio.to_thread(
-                        _post,
-                        "/move-to",
-                        {
-                            "x": state.get("x", 0) + distance * math.cos(angle),
-                            "y": state.get("y", 0),
-                            "z": state.get("z", 0) + distance * math.sin(angle),
-                        },
-                    )
-                except Exception:
-                    pass
-                last_ambient_wander = now
-                continue
-
+        # No scripted random walking/looking: idle decisions belong to Qwen.
         interval = (
             AUTONOMY_GOAL_INTERVAL
             if meaningful_goals
