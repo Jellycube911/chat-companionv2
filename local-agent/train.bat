@@ -20,7 +20,9 @@ echo Practice physically changes natural terrain.
 echo No item spawning or teleporting. Memory is kept.
 echo.
 
-REM Each cycle runs the full curriculum (observe, orient, navigate, mine, collect).
+REM Each cycle trains observe, navigate, orient, mine, collect.
+REM A separate uncoached practical exam is attempted when skills qualify.
+REM Progress JSON is checkpointed throughout the session, even if stopped early.
 REM The trainer allows up to 100 cycles; use 120 minutes for long sessions.
 REM Existing no-progress and pending-job safety stops still apply.
 echo.
