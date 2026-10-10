@@ -395,9 +395,19 @@ def _record_episode(challenge, attempts, passed, elapsed, initial, reason):
     hypothesis = (attempts[-1].get("hypothesis") if attempts else None) or \
                  "Test world-grounded " + challenge.name
     rejections = sum(a.get("status") == "rejected" for a in attempts)
-    physical = sum(a.get("status") in {"completed", "failed"} for a in attempts)
+    executed = sum(a.get("status") in {"completed", "failed"} for a in attempts)
+    if executed == 0:
+        # A malformed model JSON or forbidden action never touched Minecraft.
+        # Keep the diagnosis, but do not poison skill memory with fictitious
+        # "failed gameplay" experiences.
+        store.record_event(
+            "training_interface_failure",
+            json.dumps({"task": challenge.name, "rejections": rejections,
+                        "reason": reason, "seconds": round(elapsed, 2)})[:1300],
+        )
+        return
     reward = (1.0 if passed else -1.0) - (0.1 * rejections) - (
-        0.02 * elapsed) - (0.05 * max(0, physical - 1))
+        0.02 * elapsed) - (0.05 * max(0, executed - 1))
     store.record_skill_trial(
         intent, hypothesis, actions,
         json.dumps({"verified": bool(passed), "outcome": reason,
