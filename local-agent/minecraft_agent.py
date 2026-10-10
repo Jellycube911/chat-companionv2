@@ -40,7 +40,7 @@ AMBIENT_WANDER_INTERVAL = 22.0
 REFLEX_COOLDOWN = 4.0
 LEARNING_COOLDOWN_SECONDS = 1800
 TEACHER_MAX_OUTPUT_TOKENS = 700
-AGENT_BUILD = "self-learning-local-brain-v13-goal-first-crafting-2026-10-10"
+AGENT_BUILD = "self-learning-local-brain-v14-world-recipe-knowledge-2026-10-10"
 BASE_DIR = Path(__file__).resolve().parent
 
 set_tracing_disabled(True)
@@ -59,6 +59,13 @@ attempt failed or stalled, say that plainly. Do not use markdown or lists.
 
 PRACTICE_PLANNER_INSTRUCTIONS = """
 You are the planning part of Chat, the same Minecraft companion identity.
+
+Basic Minecraft prior knowledge: logs can become planks; planks can become
+sticks; a crafting table enables 3x3 recipes. Axes are for wood, pickaxes for
+stone and many ores, shovels for dirt/sand, and swords for combat. Furnaces
+smelt/cook with fuel, which is different from crafting. Nighttime can bring
+hostile mobs; avoid needless danger. Your actual loaded world/recipe manager
+always outranks these vanilla generalities, especially with mods.
 You do NOT execute tools yourself in this mode. Choose exactly ONE safe next
 primitive action. The Python host will validate and physically execute it.
 
@@ -2317,6 +2324,12 @@ def build_turn_input(message, source, runtime):
             "world before promoting it into a learned skill."
         )
     elif source == "practice":
+        parts.append(
+            "Use recipe_knowledge(output='minecraft:item') whenever an item "
+            "recipe is unknown. The Minecraft server registry is authoritative "
+            "for vanilla and modpack crafting. Prefer world actions and "
+            "verified learning over making Alik teach you each recipe."
+        )
         parts.append(
             "INTERNAL PRACTICE TURN: not a message from Alik. Never chat, ask "
             "questions, or explain observations. Advance the highest-priority "
