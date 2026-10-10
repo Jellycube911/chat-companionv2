@@ -68,7 +68,7 @@ class SharedContextTests(unittest.TestCase):
             "at": now, "origin": {"x": 0, "y": 64, "z": 0},
             "dimension": "minecraft:overworld",
             "query": {"contains": ["minecraft:stone", "minecraft:coal_ore"],
-                      "exact": [], "radius": 20, "limit": 15, "exposed_only": True},
+                      "exact": [], "radius": 16, "limit": 15, "exposed_only": True},
             "blocks": [{"type": "minecraft:stone", "pos": [3, 64, 0]}],
         }
         repeat = {"action": "scan_blocks", "contains": ["minecraft:stone"],
@@ -79,7 +79,7 @@ class SharedContextTests(unittest.TestCase):
         self.runtime["awareness"]["state"]["x"] = 0
         fresh = dict(repeat, contains=["minecraft:diamond_ore"])
         self.assertIsNone(agent._covered_positive_scan(self.runtime, fresh))
-        expanded = dict(repeat, radius=25)
+        expanded = dict(repeat, radius=19)
         self.assertIsNone(agent._covered_positive_scan(self.runtime, expanded))
 
     def test_positive_scan_targets_are_included_in_planning_prompt(self):
