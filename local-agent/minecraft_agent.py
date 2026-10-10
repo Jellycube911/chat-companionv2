@@ -1335,6 +1335,61 @@ def _plan_target_key(plan):
     return f"{action}@{xyz}"
 
 
+def _material_action_from_scan(runtime, goal, inventory):
+    """Convert observed blocks into a physical experiment, not another scan."""
+    scan = runtime.get("last_resource_scan") or {}
+    if time.monotonic() - float(scan.get("at") or 0) > 100:
+        return None
+    if goal and goal.get("source") == "user" and goal.get("title") != "Chop a log":
+        return None
+    state = ((runtime.get("awareness") or {}).get("state") or {})
+    origin = scan.get("origin") or {}
+    try:
+        if math.hypot(float(state["x"]) - float(origin["x"]),
+                      float(state["z"]) - float(origin["z"])) > 4.5:
+            return None
+    except (TypeError, KeyError, ValueError):
+        return None
+    candidates = [
+        block for block in scan.get("blocks", [])
+        if isinstance(block, dict)
+        and str(block.get("type") or "").endswith("_log")
+        and isinstance(block.get("pos"), list)
+        and len(block["pos"]) == 3
+    ]
+    invalid = runtime.setdefault("invalid_targets", {})
+    for block in candidates:
+        pos = block["pos"]
+        candidate = {
+            "action": "mine", "intent": "chop observed log",
+            "hypothesis": "mine a world-observed log to test useful woodcutting",
+            "x": pos[0], "y": pos[1], "z": pos[2],
+            "expected_block": block["type"],
+        }
+        if goal and goal.get("source") == "user":
+            candidate.update({
+                "goal_id": goal.get("id"),
+                "goal_reason": "this cuts the log that Alik asked me to chop",
+            })
+        axes = [
+            str(item.get("item")) for item in inventory or []
+            if re.fullmatch(r"minecraft:[a-z_]+_axe", str(item.get("item") or ""))
+            and int(item.get("count") or 0) > 0
+        ]
+        if axes:
+            candidate["tool"] = axes[0]
+        key = _plan_target_key(candidate)
+        if key in invalid and time.monotonic() - invalid[key][0] < _invalid_target_ttl(key):
+            continue
+        return candidate
+    if candidates:
+        # Each target here was already tried or rejected. Another identical
+        # scan is not new evidence. Require a changed vantage point or a pause.
+        runtime["planner_backoff_until"] = time.monotonic() + 25.0
+        log_event("practice_host", "scan_exhausted", candidate_count=len(candidates))
+    return None
+
+
 async def run_planned_action(planner_agent, runtime, directive=None, source="practice"):
     started = time.monotonic()
 
@@ -1465,6 +1520,20 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         if time.monotonic() < float(runtime.get("planner_backoff_until", 0.0) or 0.0):
             log_event("practice_host", "planner_probe_backoff")
             return {"ok": False, "status": "planner_backoff"}
+
+    if continuation is None and source == "practice":
+        scan_followup = _material_action_from_scan(
+            runtime, active_user_goal, awareness_inventory
+        )
+        if scan_followup:
+            continuation = scan_followup
+            log_event(
+                "practice_host", "scan_to_action",
+                goal=(active_user_goal or {}).get("title"),
+                plan=continuation,
+            )
+        if time.monotonic() < float(runtime.get("planner_backoff_until", 0.0) or 0.0):
+            return {"ok": True, "status": "planner_backoff"}
 
     prompt = build_practice_plan_input(runtime, directive=directive)
     log_event(
@@ -1632,6 +1701,16 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
     finally:
         runtime["physical_action_active"] = False
     result = execution.get("result") or {}
+    if plan.get("action") == "scan_blocks" and execution.get("ok"):
+        blocks = result.get("blocks") or []
+        if isinstance(blocks, list) and blocks:
+            runtime["last_resource_scan"] = {
+                "at": time.monotonic(),
+                "origin": {
+                    "x": state.get("x"), "z": state.get("z")
+                },
+                "blocks": blocks,
+            }
     reason = str(
         result.get("error") or result.get("reason")
         or execution.get("error") or ""
