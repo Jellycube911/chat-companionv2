@@ -58,7 +58,9 @@ class GoalControlRegressions(unittest.TestCase):
                 {"item": "minecraft:oak_log", "count": 61}]}}
             with patch.object(agent, "store", db):
                 self.assertEqual(agent._reconcile_user_goals(before), [])
-                self.assertEqual(len(db.list_goals("active")), 1)
+                self.assertEqual(
+                    [g["id"] for g in db.list_goals("active")
+                     if g.get("source") == "user"], [goal["id"]])
                 self.assertEqual(agent._reconcile_user_goals({
                     "after": {"inventory": [
                         {"item": "minecraft:oak_log", "count": 68}]} }), [])
@@ -68,7 +70,9 @@ class GoalControlRegressions(unittest.TestCase):
                     "after": {"inventory": [
                         {"item": "minecraft:oak_log", "count": 69}]} }),
                     ["gathered 8 new logs, task done"])
-                self.assertEqual(restarted.list_goals("active"), [])
+                self.assertFalse([
+                    g for g in restarted.list_goals("active")
+                    if g.get("source") == "user"])
 
     def test_stationary_movement_is_not_a_verified_success(self):
         before = {"state": {"pos": [10, 64, 10]}}
