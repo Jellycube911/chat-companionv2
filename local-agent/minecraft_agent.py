@@ -2012,7 +2012,13 @@ def _scan_serves_user_goal(runtime, plan, goal):
 
 
 def _material_action_from_scan(runtime, goal, inventory):
-    """Convert observed blocks into a physical experiment, not another scan."""
+    """Continue a concrete USER resource goal using Minecraft scan evidence.
+
+    Self-directed learning requires Qwen to decide its own next action.
+    Never force-mine every scanned log for a vague self-improvement goal.
+    """
+    if not goal or goal.get("source") != "user":
+        return None
     scan = runtime.get("last_resource_scan") or {}
     if time.monotonic() - float(scan.get("at") or 0) > 100:
         return None
@@ -2206,6 +2212,7 @@ def _goal_progress_evidence(runtime, goal, execution):
 
 async def run_planned_action(planner_agent, runtime, directive=None, source="practice"):
     started = time.monotonic()
+    goal_revision_at_start = int(runtime.get("user_goal_revision", 0))
 
     try:
         await update_awareness(runtime)
@@ -2672,6 +2679,14 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
 
     if source == "practice":
         _record_goal_navigation(runtime, user_goal, awareness_inventory, plan)
+
+    if (source == "practice"
+            and int(runtime.get("user_goal_revision", 0)) != goal_revision_at_start):
+        # A user changed the goal while Qwen was thinking. Never dispatch
+        # the stale self-practice plan to Chat's physical body.
+        log_event("practice_host", "superseded_by_user_goal",
+                  plan=plan, old_revision=goal_revision_at_start)
+        return {"ok": False, "status": "superseded_by_user_goal"}
 
     visible_goal = user_goal or next(
         (g for g in store.list_goals("active", 4)
@@ -3237,6 +3252,34 @@ async def fast_task_intent(text):
     store.remember_explicit_teaching(text)
     _remember_behavior_feedback(text)
     normalized = _normalize_request_text(text)
+    switch = re.match(
+        r"^(?:set (?:a |your |the )?new goal|"
+        r"(?:change|switch) (?:your |the )?goal)"
+        r"(?:\s+to|[,:])?\s*",
+        normalized,
+    )
+    replacing = switch is not None
+    if switch:
+        normalized = normalized[switch.end():].strip(" ,")
+        # Recognize the actionable imperative after a comparison with the
+        # former goal, without pretending that comparing goals is an action.
+        normalized = re.sub(
+            r"^instead of\s+.*?(?=\b(?:make|craft|get|obtain|build|gather|collect|chop|cut)\b)",
+            "", normalized,
+        ).strip(" ,")
+
+    def register(title, description, priority):
+        goal = _ensure_user_goal(title, description, priority)
+        if replacing and goal:
+            for previous in store.list_goals("active", 20):
+                if (previous.get("source") in {"user", "self"}
+                        and previous.get("id") != goal.get("id")):
+                    store.update_goal(previous["id"], status="paused")
+            store.record_event(
+                "goal_switched",
+                "Alik assigned %s; other active personal goals paused." % title,
+            )
+        return goal
     if normalized in {"make it", "craft it", "get it"}:
         user_goals = [
             goal for goal in store.list_goals("active", 20)
@@ -3250,15 +3293,15 @@ async def fast_task_intent(text):
         normalized,
     ):
         # Another means produce a NEW item, not merely own an axe.
-        return _ensure_user_goal("Craft minecraft:wooden_axe", text, 9)
+        return register("Craft minecraft:wooden_axe", text, 9)
 
     if (
         re.search(r"\b(?:use|with)\b.{0,45}\baxe\b", normalized)
         and re.search(r"\b(?:chop|cut|mine|break)\b.{0,45}\b(?:logs?|trees?|wood)\b", normalized)
     ):
-        return _ensure_user_goal("Chop a log", text, 9)
+        return register("Chop a log", text, 9)
 
-    if not _looks_like_direct_request(text):
+    if not _looks_like_direct_request(normalized):
         return None
 
     if re.search(
@@ -3269,19 +3312,25 @@ async def fast_task_intent(text):
             r"\b(wooden|stone|iron|golden|diamond|netherite)\s+pickaxe\b",
             normalized,
         ).group(1)
-        return _ensure_user_goal(f"Craft a {material} pickaxe", text, 9)
+        return register(f"Craft a {material} pickaxe", text, 9)
+
+    if (
+        re.search(r"\b(?:make|craft)\s+(?:an?\s+)?wooden\s+axe\b", normalized)
+        and "pickaxe" not in normalized
+    ):
+        return register("Craft minecraft:wooden_axe", text, 9)
 
     if (
         re.search(r"\b(?:make|craft|get|obtain)\s+(?:an?\s+)?(?:wooden|stone|iron|golden|diamond|netherite)?\s*axe\b", normalized)
         and "pickaxe" not in normalized
     ):
-        return _ensure_user_goal("Obtain an axe", text, 9)
+        return register("Obtain an axe", text, 9)
 
     if (
         "build" in normalized
         and any(word in normalized for word in ("house", "shelter", "hut"))
     ):
-        return _ensure_user_goal(
+        return register(
             "Build a house",
             text,
             9,
@@ -3291,7 +3340,7 @@ async def fast_task_intent(text):
         ("stone pickaxe" in normalized or "stone pick" in normalized)
         and any(word in normalized for word in ("make", "craft", "get", "build"))
     ):
-        return _ensure_user_goal(
+        return register(
             "Obtain a stone pickaxe",
             text,
             8,
@@ -3302,7 +3351,7 @@ async def fast_task_intent(text):
         and any(word in normalized for word in ("gather", "collect", "get", "chop", "cut"))
     ):
         count = _extract_count(normalized, 8)
-        return _ensure_user_goal(
+        return register(
             f"Gather {count} logs",
             text,
             8,
@@ -3312,7 +3361,7 @@ async def fast_task_intent(text):
         "crafting table" in normalized
         and any(word in normalized for word in ("make", "craft", "get", "build"))
     ):
-        return _ensure_user_goal(
+        return register(
             "Obtain a crafting table",
             text,
             9,
@@ -3334,7 +3383,7 @@ async def fast_task_intent(text):
         if item not in {"it", "this", "that", "stuff", "something", "house", "home"}:
             if ":" not in item:
                 item = "minecraft:" + item
-            return _ensure_user_goal("Craft " + item, text, 9)
+            return register("Craft " + item, text, 9)
 
     return None
 
@@ -4004,6 +4053,7 @@ async def poll_minecraft_chat(input_queue, runtime, chat_agent):
                     # handlers, not only when a later planner turn happens.
                     accepted_goal = await fast_task_intent(text)
                     if accepted_goal is not None:
+                        runtime["user_goal_revision"] = int(runtime.get("user_goal_revision", 0)) + 1
                         runtime["accepted_player_goal"] = {
                             "id": accepted_goal.get("id"),
                             "title": accepted_goal.get("title"),
@@ -4140,8 +4190,24 @@ async def console_input(input_queue, runtime):
         if text:
             runtime["last_user_activity"] = time.monotonic()
             _preempt_background_reasoning(runtime)
-            await fast_task_intent(text)
+            accepted_goal = await fast_task_intent(text)
+            if accepted_goal is not None:
+                runtime["user_goal_revision"] = int(runtime.get("user_goal_revision", 0)) + 1
+                runtime.pop("planner_backoff_until", None)
+                runtime.pop("last_resource_scan", None)
+                runtime.pop("pending_mining_obstruction", None)
+                runtime["accepted_player_goal"] = {
+                    "id": accepted_goal.get("id"),
+                    "title": accepted_goal.get("title"),
+                    "text": text,
+                    "at": time.monotonic(),
+                }
+                print("[BRAIN] NEW USER GOAL: " + str(accepted_goal.get("title")),
+                      flush=True)
             await enqueue(input_queue, runtime, 0, "console", text)
+            if accepted_goal is not None:
+                await enqueue(input_queue, runtime, 0, "command",
+                              "Alik said: " + text)
         if text.lower() in {"quit", "exit"}:
             return
 
