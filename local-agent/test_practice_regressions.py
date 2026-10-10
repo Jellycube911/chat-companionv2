@@ -706,6 +706,17 @@ class PracticeRegressions(unittest.TestCase):
             "i got the hoe",
         )
 
+    def test_implicit_craft_claim_is_rejected_without_world_evidence(self):
+        import body_truth
+        goal = {"id": 31, "source": "user", "title": "Craft minecraft:wooden_hoe"}
+        runtime = {"body_last_action": {
+            "action": "scan_blocks", "ok": True,
+            "result": {"blocks": [{"type": "minecraft:jungle_log"}]},
+        }}
+        for answer in ("already got the hoe", "it's ready", "i got the hoe"):
+            result = body_truth.grounded_chat(answer, "make a wooden hoe", runtime, [goal])
+            self.assertNotEqual(result, answer)
+
     def test_chat_accepts_only_verified_matching_goal_craft(self):
         import body_truth
         goal = {"id": 55, "source": "user", "title": "Craft minecraft:wooden_hoe"}
