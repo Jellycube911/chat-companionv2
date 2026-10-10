@@ -78,7 +78,8 @@ class FakePhysicalWorld:
             }]
             return {"ok": True, "plan": plan,
                     "result": {"state": "COMPLETED",
-                               "reason": "block_mined|block=minecraft:dirt|tool=minecraft:air|break_ticks=8"}}
+                               "reason": "block_mined|block=" + plan["expected_block"] +
+                                         "|tool=minecraft:air|break_ticks=8"}}
         if action == "collect":
             self.items = [{"slot": 2, "item": "minecraft:dirt", "count": 1}]
             self.entities = []
