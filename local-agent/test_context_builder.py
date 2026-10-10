@@ -61,6 +61,42 @@ class SharedContextTests(unittest.TestCase):
         snapshot = load_context(restarted, query="respawn", goals=[])
         self.assertEqual(snapshot["memories"][0]["key"], "taught.respawn")
 
+    def test_redundant_positive_scan_at_same_position_is_rejected(self):
+        now = agent.time.monotonic()
+        self.runtime["awareness"]["state"]["dimension"] = "minecraft:overworld"
+        self.runtime["last_resource_scan"] = {
+            "at": now, "origin": {"x": 0, "y": 64, "z": 0},
+            "dimension": "minecraft:overworld",
+            "query": {"contains": ["minecraft:stone", "minecraft:coal_ore"],
+                      "exact": [], "radius": 20, "limit": 15, "exposed_only": True},
+            "blocks": [{"type": "minecraft:stone", "pos": [3, 64, 0]}],
+        }
+        repeat = {"action": "scan_blocks", "contains": ["minecraft:stone"],
+                  "radius": 15, "limit": 10, "exposed_only": True}
+        self.assertIsNotNone(agent._covered_positive_scan(self.runtime, repeat))
+        self.runtime["awareness"]["state"]["x"] = 8
+        self.assertIsNone(agent._covered_positive_scan(self.runtime, repeat))
+        self.runtime["awareness"]["state"]["x"] = 0
+        fresh = dict(repeat, contains=["minecraft:diamond_ore"])
+        self.assertIsNone(agent._covered_positive_scan(self.runtime, fresh))
+        expanded = dict(repeat, radius=25)
+        self.assertIsNone(agent._covered_positive_scan(self.runtime, expanded))
+
+    def test_positive_scan_targets_are_included_in_planning_prompt(self):
+        self.runtime["last_resource_scan"] = {
+            "at": agent.time.monotonic(),
+            "origin": {"x": 0, "y": 64, "z": 0},
+            "dimension": "minecraft:overworld",
+            "query": {"contains": ["minecraft:stone"], "exact": [],
+                      "radius": 20, "limit": 15, "exposed_only": True},
+            "blocks": [{"type": "minecraft:stone", "pos": [3, 64, 0]}],
+        }
+        with patch.object(agent, "store", self.store):
+            prompt = agent.build_practice_plan_input(self.runtime)
+        self.assertIn("FRESH OBSERVED BLOCK TARGETS", prompt)
+        self.assertIn("minecraft:stone", prompt)
+        self.assertIn("[3, 64, 0]", prompt)
+
     def test_context_budget_does_not_dump_unrelated_memories(self):
         self.store.remember("fact", "irrelevant.secret", "Unrelated text.", 5)
         self.store.record_episode("hello", "hey")
