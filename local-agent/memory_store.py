@@ -12,6 +12,93 @@ DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "companion_memory.sqlite3"
 
 
+
+
+def _decode_dict(value):
+    if isinstance(value, dict):
+        return value
+    try:
+        result = json.loads(value)
+    except (TypeError, ValueError):
+        return {}
+    return result if isinstance(result, dict) else {}
+
+
+def _inventory_quantity(inventory):
+    if not isinstance(inventory, list):
+        return None
+    return sum(max(0, int(item.get("count", 0))) for item in inventory
+               if isinstance(item, dict))
+
+
+def _trial_evidence(intent, actions, outcome, reported_success):
+    """Distinguish verified outcome, observed failure and unsupported claim.
+
+    This is deliberately conservative about historical records. Raw SQLite
+    history is never rewritten; its old boolean is not proof of success.
+    """
+    plan = _decode_dict(actions)
+    evidence = _decode_dict(outcome)
+    result = evidence.get("result") or {}
+    result = result if isinstance(result, dict) else {}
+    state = str(result.get("state") or "").upper()
+    if state in {"RUNNING", "PENDING"} or str(evidence.get("status", "")).lower() == "pending":
+        return "unresolved"
+    if not reported_success:
+        return "failure"
+    if str(intent).startswith("training."):
+        attempts = plan.get("experiments") or []
+        executed = [a for a in attempts if isinstance(a, dict)
+                    and a.get("status") == "completed"
+                    and a.get("verified") is True
+                    and isinstance(a.get("result"), dict)]
+        if evidence.get("verified") is not True or not executed:
+            return "unverified"
+        if str(intent) == "training.collect":
+            match = re.search(r"target_item_before=(\d+)\s+after=(\d+)",
+                              str(evidence.get("outcome", "")))
+            if not match or int(match[2]) <= int(match[1]):
+                return "unverified"
+        return "verified"
+    action = str(plan.get("action") or "")
+    before = evidence.get("before") or {}
+    after = evidence.get("after") or {}
+    if action == "collect":
+        pre = _inventory_quantity(before.get("inventory"))
+        post = _inventory_quantity(after.get("inventory"))
+        return ("verified" if pre is not None and post is not None
+                and post > pre and state == "COMPLETED" else "unverified")
+    if action == "mine":
+        return ("verified" if state == "COMPLETED" and
+                str(result.get("reason", "")).startswith("block_mined|")
+                else "unverified")
+    if action in {"move_to", "move_forward"}:
+        positions = [(before.get("state") or {}).get("pos"),
+                     (after.get("state") or {}).get("pos")]
+        try:
+            traveled = sum((float(a) - float(b)) ** 2
+                           for a, b in zip(*positions)) ** 0.5
+        except (TypeError, ValueError):
+            traveled = 0
+        return "verified" if state == "COMPLETED" and traveled > 0.25 else "unverified"
+    if action == "look_at":
+        return "verified" if result.get("ok") is True or state == "COMPLETED" else "unverified"
+    if action in {"craft", "place", "equip"}:
+        return "verified" if state == "COMPLETED" or result.get("ok") is True else "unverified"
+    return "unverified"
+
+
+def _failure_category(outcome):
+    data = _decode_dict(outcome)
+    result = data.get("result") or {}
+    reason = str(result.get("reason") or result.get("error") or
+                 data.get("outcome") or "unknown") if isinstance(result, dict) else "unknown"
+    # Coordinates and numbers are incidental; cause and action type matter.
+    reason = re.sub(r"\bat=-?\d+,-?\d+,-?\d+", "at=<position>", reason)
+    reason = re.sub(r"\b\d+(?:\.\d+)?\b", "#", reason)
+    return reason.strip().lower()[:120]
+
+
 class MemoryStore:
     def __init__(self, path=DB_PATH):
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -555,6 +642,10 @@ class MemoryStore:
             overlap = len(query_tokens & tokens)
 
             score = row["importance"] * 0.7
+            if row["kind"] == "user_taught":
+                score += 5.0
+            if row["memory_key"].startswith("teacher."):
+                score -= 5.0  # Untested cloud hints cannot crowd out observed learning.
             if query_lower and query_lower in haystack:
                 score += 8
             score += overlap * 3.5
@@ -1237,6 +1328,14 @@ class MemoryStore:
         if not intent or not hypothesis or not actions or not outcome:
             raise ValueError("intent, hypothesis, actions and outcome are required")
         now = time.time()
+        evidence_grade = _trial_evidence(intent, actions, outcome, success)
+        if evidence_grade in {"unresolved", "unverified"}:
+            # Preserve the diagnostic but never reward it as a skill trial.
+            # Pending actions must be reconciled by the real Minecraft body.
+            self.record_event("unverified_skill_claim",
+                              f"{intent}: {evidence_grade}: {outcome[:1100]}")
+            return {"ok": False, "success": False,
+                    "evidence_status": evidence_grade, "skill": None}
 
         with self._connect() as db:
             resolved_skill_id = None
@@ -1312,6 +1411,7 @@ class MemoryStore:
         return {
             "ok": True,
             "success": success,
+            "evidence_status": evidence_grade,
             "skill": skill,
         }
 
@@ -1337,7 +1437,11 @@ class MemoryStore:
                 "hypothesis": row["hypothesis"],
                 "actions": row["actions"],
                 "outcome": row["outcome"],
-                "success": bool(row["success"]),
+                "success": bool(row["success"]) and
+                           _trial_evidence(intent, row["actions"], row["outcome"],
+                                           bool(row["success"])) == "verified",
+                "evidence_status": _trial_evidence(
+                    intent, row["actions"], row["outcome"], bool(row["success"])),
             }
             for row in rows
         ]
@@ -1365,6 +1469,61 @@ class MemoryStore:
             }
             for row in reversed(rows)
         ]
+
+    def recent_trials_digest(self, limit=8, lookback=300):
+        """Condense recurring failures for reasoning, leaving every raw trial intact."""
+        limit = max(1, min(20, int(limit)))
+        lookback = max(limit, min(1200, int(lookback)))
+        with self._connect() as db:
+            rows = db.execute(
+                """SELECT intent, hypothesis, actions, outcome, success, created_at
+                   FROM skill_trials ORDER BY id DESC LIMIT ?""",
+                (lookback,),
+            ).fetchall()
+        groups = {}
+        for row in rows:
+            grade = _trial_evidence(row["intent"], row["actions"],
+                                    row["outcome"], bool(row["success"]))
+            # An unfinished job must not enter the experience/reward context.
+            if grade == "unresolved":
+                continue
+            key = (row["intent"], grade, _failure_category(row["outcome"]))
+            if key not in groups:
+                groups[key] = {
+                    "intent": row["intent"], "hypothesis": row["hypothesis"],
+                    "actions": row["actions"], "outcome": row["outcome"],
+                    "success": grade == "verified",
+                    "evidence_status": grade, "repetitions": 0,
+                }
+            groups[key]["repetitions"] += 1
+        # Physical trials outrank repetitive sensing, and recently encountered
+        # failures remain available to the planner instead of being buried.
+        def relevance(group):
+            intent = group["intent"]
+            sensing = (intent.startswith("training.observe")
+                       or intent.startswith("training.orient")
+                       or intent in {"orient", "re-observe target block"})
+            return (not sensing, group["evidence_status"] == "failure",
+                    min(group["repetitions"], 10))
+        return sorted(groups.values(), key=relevance, reverse=True)[:limit]
+
+    def remember_explicit_teaching(self, message):
+        """Persist only explicit user statements; never infer facts from banter."""
+        import hashlib
+        text = " ".join(str(message or "").strip().split())
+        match = re.match(
+            r"^(?:hey chat[, ]+)?(?:remember that |remember this: |"
+            r"i want you to remember that |learn this: )(.+)$",
+            text, flags=re.IGNORECASE,
+        )
+        if not match:
+            return False
+        lesson = match.group(1).strip().rstrip(".")
+        if len(lesson) < 8 or len(lesson) > 750:
+            return False
+        key = "user_taught." + hashlib.sha256(lesson.casefold().encode("utf-8")).hexdigest()[:24]
+        self.remember("user_taught", key, "Alik explicitly taught: " + lesson, 9)
+        return True
 
     def link_learned_skills(
         self,
