@@ -821,7 +821,10 @@ def _record_learning(plan, result, before, after, success, promotable=True):
         if item.get("hypothesis", "").strip()
     }
     teacher = None
-    if len(failures) >= 3 and len(distinct_failures) >= 2:
+    if (len(failures) >= 3 and len(distinct_failures) >= 2
+            and os.getenv("COMPANION_TRAINING_MODE", "").strip().lower()
+            not in {"on", "1", "true"}):
+        # Training samples stay local, including the persistent teacher queue.
         teacher = store.request_learning(
             f"intent:{intent}",
             "Local experiments remain blocked. Recent failures: "
