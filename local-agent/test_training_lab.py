@@ -329,6 +329,26 @@ class TrainingLabRegressions(unittest.TestCase):
         self.assertTrue(challenge.target["standable_candidates"])
         self.assertEqual(world.calls[0]["radius"], 10)
 
+    def test_dense_ground_blocks_do_not_hide_a_confirmed_standable_tree(self):
+        class DenseGroundWithTree(FakePhysicalWorld):
+            def find(self, block_id, radius=7):
+                ids = list(block_id)
+                if "minecraft:birch_log" in ids:
+                    return [{"type": "minecraft:birch_log",
+                             "x": 16, "y": 64, "z": 10,
+                             "distance": 5.6}]
+                return [{
+                    "type": "minecraft:grass_block",
+                    "x": 11, "y": 63, "z": 11, "distance": 1.5,
+                } for _ in range(64)]
+        world = DenseGroundWithTree()
+        found = lab._select_challenge(
+            "mine", world, world.snapshot(),
+            __import__("random").Random(5))
+        self.assertIsNotNone(found)
+        self.assertEqual(found.target["type"], "minecraft:birch_log")
+        self.assertEqual(found.target["pos"], [16, 64, 10])
+
     def test_inventory_is_required_for_verified_collection(self):
         task = lab.Challenge("collect", "collect", {
             "item": "minecraft:dirt", "pos": [11, 64, 10]
