@@ -118,7 +118,8 @@ class SharedContextTests(unittest.TestCase):
             })
             claim = self.store.record_skill_trial(
                 "pickup", "try", action, outcome, True, skill_id=skill["id"])
-            self.assertFalse(claim["ok"])
+            self.assertFalse(claim["success"])
+            self.assertIn(claim["evidence_status"], {"unresolved", "unverified"})
         self.assertEqual(self.store.learned_skill(skill["id"])["successes"], 0)
         proof = json.dumps({
             "result": {"state": "COMPLETED", "reason": "collection_complete:1"},
