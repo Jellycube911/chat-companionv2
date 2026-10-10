@@ -698,6 +698,8 @@ def build_practice_plan_input(runtime, directive=None):
         for trial in trials:
             parts.append(
                 f"- intent={trial['intent']} success={trial['success']} "
+                f"repeats={trial.get('repetitions', 1)} "
+                f"evidence={trial.get('evidence_status', 'historical')} "
                 f"hypothesis={_trim(trial['hypothesis'], 180)} "
                 f"outcome={_trim(trial['outcome'], 280)}"
             )
@@ -2816,7 +2818,8 @@ def build_turn_input(message, source, runtime):
             for trial in context["trials"][:2]:
                 parts.append(
                     f"- intent={_trim(trial['intent'], 90)} "
-                    f"success={trial['success']} "
+                    f"verified={trial.get('evidence_status') == 'verified'} "
+                    f"repeats={trial.get('repetitions', 1)} "
                     f"outcome={_trim(trial['outcome'], 180)}"
                 )
 
@@ -2849,7 +2852,8 @@ def build_turn_input(message, source, runtime):
         parts.append("RECENT SELF-LEARNING EXPERIMENTS:")
         for trial in recent_trials:
             parts.append(
-                f"- intent={trial['intent']} success={trial['success']} "
+                f"- intent={trial['intent']} verified={trial.get('evidence_status') == 'verified'} "
+                f"repeats={trial.get('repetitions', 1)} "
                 f"hypothesis={_trim(trial['hypothesis'], 260)}"
             )
             parts.append(
@@ -2976,6 +2980,8 @@ def build_turn_input(message, source, runtime):
 
 
 async def run_turn(agent, message, source, reply_in_game, runtime):
+    if source in {"minecraft", "console"}:
+        store.remember_explicit_teaching(message)
     prepared = build_turn_input(message, source, runtime)
     max_turns = (
         6
@@ -3228,6 +3234,7 @@ def _remember_behavior_feedback(text):
 
 
 async def fast_task_intent(text):
+    store.remember_explicit_teaching(text)
     _remember_behavior_feedback(text)
     normalized = _normalize_request_text(text)
     if normalized in {"make it", "craft it", "get it"}:
