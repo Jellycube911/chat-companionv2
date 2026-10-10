@@ -134,6 +134,8 @@ def grounded_chat(answer, message, runtime, goals):
     action = runtime.get("body_last_action") or {}
     recent = runtime.get("body_recent_actions") or []
     if "axe head" in text.lower() or "shape the head" in text.lower():
+        if goal and str(goal.get("title") or "").lower() == "obtain an axe" and not verified_craft_for_goal(runtime, goal):
+            return "not yet, still haven't crafted the axe"
         return "axes are crafted from planks and sticks, no separate head"
     if any(word in message for word in ("loop", "scanning over", "stuck scanning")):
         scans = sum(1 for row in recent if row.get("action") == "scan_blocks")
