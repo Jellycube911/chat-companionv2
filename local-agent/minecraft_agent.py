@@ -1156,7 +1156,12 @@ def _resume_blocked_crafting(runtime, goal, inventory):
             return None
 
     tables = _workstation_probe()
-    close = [b for b in tables if float(b.get("distance") or 99) <= 3.2]
+    if tables is None:
+        # A failed observation is NOT proof that a table is absent. Avoid
+        # placing more furniture in response to a transport/API failure.
+        runtime["planner_backoff_until"] = time.monotonic() + 12.0
+        return None
+    close = [b for b in tables if float(b.get("distance") or 99) <= 4.0]
     if close:
         invalid.pop(key, None)
         return recipe
