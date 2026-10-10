@@ -1801,7 +1801,11 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         plan = revised
         target_key = revised_key
 
-    _brain_console_decision(runtime, plan, user_goal)
+    visible_goal = user_goal or next(
+        (g for g in store.list_goals("active", 4)
+         if g.get("source") != "system"), None
+    )
+    _brain_console_decision(runtime, plan, visible_goal)
     runtime["physical_action_active"] = True
     try:
         execution = await asyncio.to_thread(execute_plan, plan)
