@@ -743,7 +743,7 @@ def _reconcile_user_goals(execution):
             if (
                 execution.get("ok")
                 and acted.get("action") == "mine"
-                and re.search(r"block_mined\\|block=minecraft:[a-z_]+_log(?:\\||$)",
+                and re.search(r"block_mined\|block=minecraft:[a-z_]+_log(?:\||$)",
                               str(result.get("reason") or ""))
             ):
                 store.update_goal(goal["id"], status="completed")
