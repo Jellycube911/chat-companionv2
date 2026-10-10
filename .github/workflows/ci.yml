@@ -22,10 +22,10 @@ jobs:
         run: python -m pip install -r local-agent/requirements.txt
       - name: Check local Python agent
         run: |
-          python -m py_compile local-agent/minecraft_agent.py local-agent/mcp_server.py local-agent/memory_store.py local-agent/skill_executor.py local-agent/action_log.py local-agent/practice_engine.py local-agent/knowledge_engine.py
+          python -m py_compile local-agent/minecraft_agent.py local-agent/mcp_server.py local-agent/memory_store.py local-agent/skill_executor.py local-agent/action_log.py local-agent/practice_engine.py local-agent/knowledge_engine.py local-agent/body_truth.py
           cd local-agent
           python - <<'PY'
-          import agents, mcp, requests, memory_store, mcp_server, skill_executor, action_log, practice_engine, knowledge_engine
+          import agents, mcp, requests, memory_store, mcp_server, skill_executor, action_log, practice_engine, knowledge_engine, body_truth
           store = memory_store.store
           assert store.list_goals('active', 5)
           r = store.request_learning('ci:test', 'verify local learning queue', 60)
@@ -403,5 +403,6 @@ jobs:
             local-agent/action_log.py
             local-agent/practice_engine.py
             local-agent/knowledge_engine.py
+            local-agent/body_truth.py
             local-agent/requirements.txt
             local-agent/README.md
