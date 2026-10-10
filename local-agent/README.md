@@ -48,6 +48,24 @@ A trial is marked unavailable when there is no real suitable block, standable
 location or dropped item. Those are not counted as successes. The collection
 stage cannot run until a dropped item actually exists.
 
+**Stage 1 resource-grounded movement:** The navigation exercise no longer
+chooses an arbitrary nearby waypoint. It checks Minecraft-observed exposed
+natural blocks and verified adjacent standing spots, and accepts navigation
+only if Chat both reaches the standing spot and reduces its distance to the
+same resource. A subsequent mining exercise prefers that same block, but
+rechecks the live world first. If no suitable navigation approach exists, it
+reports **unavailable**, not an invented movement failure. Remaining mining
+failures retain real Minecraft evidence, including occluding blocks, so the
+local learner can improve instead of receiving a free pass.
+
+**Survival mining visuals:** NeoForge processes held mining on successive
+server ticks based on the block and equipped item. The mod now broadcasts
+damage/cracking stages, paced main-hand swings and block fragments as it
+works. This does not shorten or invent break time. A GameTest checks an
+unarmed oak log remains intact while progress is partial and only disappears
+after multiple real ticks. These visual changes require the newer NeoForge
+JAR and a Minecraft restart.
+
 **Automatic graduation and next stage:** Every report includes a `graduation`
 section calculated directly from `data/companion_memory.sqlite3`. For each of
 observe, orient, navigate, mine and collect, the latest ten genuine resolved
