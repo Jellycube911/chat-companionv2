@@ -170,6 +170,85 @@ class StageOneExamRegressions(unittest.TestCase):
             self.assertEqual(result["experiments"][3]["reason"],
                              "mining_blocked|block=minecraft:grass_block|at=16,65,10")
 
+    def test_unproductive_waypoints_are_retired_across_targets(self):
+        class StationaryWorld(RealisticExamWorld):
+            def execute(self, plan):
+                if plan["action"] == "move_to":
+                    self.calls.append(dict(plan))
+                    return {"ok": True, "plan": plan, "result": {
+                        "state": "COMPLETED",
+                        "reason": "already_at_destination"}}
+                return super().execute(plan)
+
+        class AlternativePlanner(ExamPlanner):
+            def propose(self, prompt):
+                p = json.loads(prompt)
+                if p["permitted_actions"] == ["move_to"]:
+                    resources = p["own_observed_resources"]
+                    if resources:
+                        return {"action": "move_to",
+                                "position": resources[0]["standable_candidates"][0]}
+                return super().propose(prompt)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = MemoryStore(Path(tmp) / "memory.sqlite3")
+            world = StationaryWorld()
+            report = run_exam(world, AlternativePlanner(), db, max_steps=7)
+            moves = [
+                tuple(p[k] for k in ("x", "y", "z"))
+                for p in world.calls if p["action"] == "move_to"
+            ]
+            self.assertGreaterEqual(len(moves), 2, report)
+            self.assertEqual(len(moves), len(set(moves)), report)
+            self.assertTrue(any(
+                step["reason"] == "waypoint_no_progress"
+                for step in report["experiments"]))
+            self.assertNotEqual(report["status"], "passed")
+
+    def test_automatic_pickup_is_verified_but_not_attributed_to_collect(self):
+        class AutoPickupWorld(RealisticExamWorld):
+            def execute(self, plan):
+                if plan["action"] == "mine":
+                    result = super().execute(plan)
+                    self.items.append({"item": "minecraft:oak_log", "count": 1})
+                    self.entities.clear()
+                    return result
+                if plan["action"] == "collect":
+                    self.calls.append(dict(plan))
+                    return {"ok": True, "plan": plan, "result": {
+                        "state": "COMPLETED", "reason": "collection_complete:0"}}
+                return super().execute(plan)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = MemoryStore(Path(tmp) / "memory.sqlite3")
+            world = AutoPickupWorld()
+            report = run_exam(world, ExamPlanner(), db, max_steps=8)
+            self.assertEqual(report["status"], "passed", report)
+            self.assertEqual(report["proof"]["pickup_evidence"],
+                             "automatic_during_mining")
+            pickup = report["experiments"][-1]
+            self.assertEqual(pickup["action"], "collect")
+            self.assertEqual(pickup["reason"],
+                             "item_already_picked_up_during_mining")
+            self.assertTrue(pickup["verified"])
+
+    def test_collect_without_world_item_gain_does_not_count_as_success(self):
+        class NoDropWorld(RealisticExamWorld):
+            def execute(self, plan):
+                if plan["action"] == "collect":
+                    self.calls.append(dict(plan))
+                    return {"ok": True, "plan": plan, "result": {
+                        "state": "COMPLETED", "reason": "collection_complete:0"}}
+                return super().execute(plan)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = MemoryStore(Path(tmp) / "memory.sqlite3")
+            report = run_exam(NoDropWorld(), ExamPlanner(), db, max_steps=7)
+            self.assertEqual(report["status"], "failed", report)
+            self.assertFalse(report["proof"]["passed"])
+            self.assertNotIn("collect",
+                             report["proof"].get("verified_steps", []))
+
     def test_irrelevant_procedural_memories_are_not_presented_as_skills(self):
         from stage1_exam import exam_memory_context
         class ConfusedMemory:
