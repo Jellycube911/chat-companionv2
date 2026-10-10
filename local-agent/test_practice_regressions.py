@@ -580,6 +580,48 @@ class PracticeRegressions(unittest.TestCase):
         self.assertIsNone(action)
         self.assertEqual(runtime["known_workstation"]["x"], 200)
 
+    def test_distant_workstation_makes_companion_walk_over_not_build_another(self):
+        goal = {"source": "user", "id": 9, "title": "Obtain an axe"}
+        recipe = {"action": "craft", "intent": "craft wooden axe",
+                  "width": 3, "height": 3,
+                  "grid": ["minecraft:jungle_planks"] * 3 +
+                          ["minecraft:stick"] * 2 + [""] * 4}
+        runtime = {
+            "pending_craft": {"goal_id": 9, "plan": recipe},
+            "awareness": {"state": {"x": 200.5, "y": 70, "z": -102.5}},
+        }
+        inventory = [
+            {"item": "minecraft:jungle_planks", "count": 6},
+            {"item": "minecraft:stick", "count": 5},
+            {"item": "minecraft:crafting_table", "count": 1},
+        ]
+        calls = []
+        def post(path, payload=None):
+            calls.append((path, payload))
+            if path == "/find-blocks":
+                return {"ok": True, "blocks": [{
+                    "x": 204, "y": 70, "z": -102,
+                    "distance": 5.0, "type": "minecraft:crafting_table"
+                }]}
+            if path == "/block-at":
+                if payload["y"] == 69:
+                    return {"ok": True, "air": False,
+                            "solid_support_up": True}
+                return {"ok": True, "air": True}
+            raise AssertionError("unexpected bridge call " + path)
+        with patch.object(agent, "_post", side_effect=post), patch.object(
+            agent, "log_event"
+        ):
+            movement = agent._resume_blocked_crafting(runtime, goal, inventory)
+        self.assertEqual(movement["action"], "move_to")
+        self.assertIn((movement["x"], movement["z"]), {
+            (205, -102), (203, -102), (204, -101), (204, -103),
+            (205, -101), (205, -103), (203, -101), (203, -103),
+        })
+        self.assertEqual(movement["goal_id"], 9)
+        self.assertEqual(len([v for v in calls if v[0] == "/find-blocks"]), 1)
+        self.assertFalse(any(path == "/place-block" for path, _ in calls))
+
     def test_chat_cannot_claim_to_be_shaping_an_unmade_axe(self):
         runtime = {"awareness": {"inventory": [
             {"item": "minecraft:wooden_pickaxe", "count": 1}
