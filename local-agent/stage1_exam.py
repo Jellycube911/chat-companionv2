@@ -72,7 +72,33 @@ def _exam_proof(steps, target, start_inventory, final_inventory):
     }
 
 
-def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None):
+def exam_memory_context(memory):
+    """Only server-verified experiences, frozen for a fair comparison."""
+    skills = []
+    for name in ("observe", "navigate", "orient", "mine", "collect"):
+        records = memory.recent_skill_trials("training." + name, 4)
+        for row in records:
+            if row.get("success") and row.get("evidence_status") == "verified":
+                try:
+                    outcome = json.loads(row.get("outcome") or "{}")
+                except (ValueError, TypeError):
+                    outcome = {}
+                skills.append({
+                    "skill": name,
+                    "hypothesis": str(row.get("hypothesis") or "")[:160],
+                    "outcome": str(outcome.get("outcome") or "")[:180],
+                })
+                break
+    learned = []
+    for name in ("observe", "navigate", "orient", "mine", "collect"):
+        for row in memory.find_learned_skills("training." + name, 1):
+            learned.append({"skill": name, "procedure": row["procedure"][:450]})
+    return {"previous_learned_experiences": skills,
+            "learned_procedures": learned}
+
+
+def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
+             memory_context=None, record_trial=True):
     """Attempt a complete uncoached resource acquisition in the real world.
 
     The model sees its own observations and candidate standing ground, but no
@@ -94,20 +120,13 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None):
     last_reason = "exam_incomplete"
     pending = False
     started = time.monotonic()
-    skills = []
-    for name in ("observe", "navigate", "orient", "mine", "collect"):
-        records = memory.recent_skill_trials("training." + name, 4)
-        for row in records:
-            if row.get("success") and row.get("evidence_status") == "verified":
-                skills.append({"skill": name,
-                               "hypothesis": str(row.get("hypothesis") or "")[:160],
-                               "outcome": str(json.loads(row.get("outcome") or "{}").get(
-                                   "outcome") or "")[:180]})
-                break
-    learned = []
-    for name in ("observe", "navigate", "orient", "mine", "collect"):
-        for row in memory.find_learned_skills("training." + name, 1):
-            learned.append({"skill": name, "procedure": row["procedure"][:450]})
+    # None means normal exam with verified SQLite experience. An explicit
+    # empty context is a genuine memory-withheld baseline: the same model,
+    # tool rules, world observations and within-trial feedback still apply.
+    context = (exam_memory_context(memory) if memory_context is None
+               else memory_context)
+    skills = context.get("previous_learned_experiences", [])
+    learned = context.get("learned_procedures", [])
 
     def record(action, plan, result, verified, reason, target=None):
         nonlocal last_reason
@@ -339,7 +358,7 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None):
     evidence = {"verified": passed, "proof": proof, "steps": attempts,
                 "target": target, "dimension": initial["state"]["dimension"],
                 "start": origin}
-    if status in {"passed", "failed"}:
+    if record_trial and status in {"passed", "failed"}:
         memory.record_skill_trial(
             "training.stage1_exam", "uncoached independent resource acquisition",
             json.dumps(evidence, ensure_ascii=False),
@@ -350,4 +369,8 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None):
         "task": "stage1_exam", "status": status, "reason": last_reason,
         "attempts": len(attempts), "seconds": round(time.monotonic() - started, 2),
         "experiments": attempts, "proof": proof,
+        "memory_exposure": {
+            "verified_experiences": len(skills),
+            "learned_procedures": len(learned),
+        },
     }
