@@ -15,9 +15,21 @@ the normal Chat brain (close run.bat) and double-click train.bat in the brain
 folder. The normal brain and trainer both use an OS lock to prevent concurrent
 body control. Minecraft itself does NOT need to be restarted.
 
-You can also run:
+The default is now up to **12 curriculum rounds**, limited to **20 minutes**
+and four proposals per exercise. The runner stops early if three consecutive
+rounds cannot execute even one action, preventing endless parser loops.
+You start it once, not after every curriculum round.
 
-    python training_lab.py --rounds 2 --steps 3 --seed 7
+You can adjust the session:
+
+    python training_lab.py --rounds 12 --steps 4 --minutes 20 --seed 7
+
+If a report says `physical_actions: 0` and `rejected_proposals` is high,
+no Minecraft training took place. Keep the report for debugging rather than
+assuming Chat learned a skill. The v2 action parser accepts Qwen's common
+nested `scan_blocks`, `look_at`, and `move_to` shapes as well as
+`target`/`target_pos` coordinate lists. Rejected format-only attempts are
+recorded as diagnostics, not failed gameplay memories.
 
 Requirements: Python dependencies from requirements.txt; local Ollama reachable
 at 127.0.0.1:11434 and the loaded NeoForge Chat bridge at 127.0.0.1:8765.
