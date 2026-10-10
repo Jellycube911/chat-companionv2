@@ -153,10 +153,17 @@ def grounded_chat(answer, message, runtime, goals):
                     time.monotonic() - float(done.get("at") or 0) > 90):
                 return grounded_status(runtime, goals)
             product = str((done.get("result") or {}).get("item") or "")
-            if product and product.split(":")[-1].replace("_", " ") not in text.lower() and (
-                target and target != product
-            ):
-                return grounded_status(runtime, goals)
+            stated_item = product.split(":")[-1].replace("_", " ")
+            if product and stated_item not in text.lower():
+                # "I got the hoe" cannot piggyback on a verified pickaxe
+                # craft from another task. Generic "got it" is permitted
+                # only for the current active goal's own verified result.
+                generic_it = re.search(
+                    r"\\b(?:got|made|crafted|finished)\\s+(?:it|that)\\b",
+                    text, re.I,
+                )
+                if not generic_it or (target and target != product):
+                    return grounded_status(runtime, goals)
         elif action.get("ok") is not True:
             return grounded_status(runtime, goals)
     return text
