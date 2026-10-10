@@ -94,8 +94,10 @@ def _summarize(trials):
             "pending": sum(t.get("status") == "pending" for t in cases),
             "resolved_pass_rate": round(passed / len(resolved), 3)
             if resolved else None,
-            "verified_physical_steps": sum(a.get("verified") is True
-                                           for a in actions),
+            "verified_physical_steps": sum(
+                a.get("verified") is True
+                and a.get("action") in {"move_to", "look_at", "mine", "collect"}
+                for a in actions),
             "mean_seconds": round(
                 sum(t["seconds"] for t in cases) / len(cases), 2)
             if cases else None,
@@ -192,7 +194,7 @@ def run_comparison(world, planner, memory, *, trials=6, max_steps=18,
             def progress(steps):
                 report["active_trial"]["experiments"] = steps
                 checkpoint()
-                if steps:
+                if steps and steps[-1].get("status") != "in_flight":
                     latest = steps[-1]
                     print("[MEMORY TEST] Trial %d/%d step %d: %s, %s (%s)" %
                           (index, trials, len(steps),
