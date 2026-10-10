@@ -1318,7 +1318,9 @@ class MemoryStore:
 
     def recent_skill_trials(self, intent, limit=6):
         intent = str(intent).strip().lower()[:240]
-        limit = max(1, min(20, int(limit)))
+        # The graduation evaluator scans past malformed-only trials without
+        # counting them. Preserve the existing default of six for normal chat.
+        limit = max(1, min(500, int(limit)))
         with self._connect() as db:
             rows = db.execute(
                 """
