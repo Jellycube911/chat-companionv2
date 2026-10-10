@@ -420,6 +420,113 @@ class TrainingLabRegressions(unittest.TestCase):
         self.assertIsNone(lab._select_challenge(
             "mine", world, world.snapshot(), __import__("random").Random(1)))
 
+    def test_pending_navigation_completes_from_real_terminal_and_proceeds(self):
+        """Only a terminal MOVE + observed new position earns navigation credit."""
+        class DelayedMoveWorld(FakePhysicalWorld):
+            def __init__(self):
+                super().__init__()
+                self.destination = None
+                self.poll_count = 0
+
+            def execute(self, plan):
+                if plan["action"] == "move_to":
+                    self.calls.append(dict(plan))
+                    self.destination = [float(plan["x"]) + .5, float(plan["y"]),
+                                        float(plan["z"]) + .5]
+                    self.busy = True
+                    return {"ok": None, "status": "pending", "plan": plan,
+                            "result": {"state": "RUNNING", "reason": "repath_pending"}}
+                return super().execute(plan)
+
+            def job_state(self):
+                self.poll_count += 1
+                if self.poll_count >= 2:
+                    self.busy = False
+                    self.pos = list(self.destination)
+                    return {"jobActive": False, "lastJob": {
+                        "type": "MOVE", "state": "COMPLETED", "reason": "arrived"}}
+                return {"jobActive": True, "jobType": "MOVE",
+                        "jobState": "RUNNING", "jobReason": "repath_pending"}
+
+        world = DelayedMoveWorld()
+        with tempfile.TemporaryDirectory() as tmp:
+            db = MemoryStore(Path(tmp) / "memory.sqlite3")
+            with patch.object(lab, "store", db), patch.object(lab, "log_event"), \
+                 patch.object(lab.time, "sleep"):
+                result = lab.run_training(world, FakeLocalPlanner(),
+                    rounds=1, max_steps=1, report_dir=Path(tmp))
+        self.assertEqual(result["summary"]["passed"], 5)
+        self.assertEqual(result["summary"]["pending"], 0)
+        self.assertEqual([e["status"] for e in result["episodes"]],
+                         ["passed"] * 5)
+        self.assertEqual(len([p for p in world.calls if p["action"] == "move_to"]), 1)
+
+    def test_pending_navigation_server_failed_is_not_claimed_as_success(self):
+        class FailedMove(FakePhysicalWorld):
+            def execute(self, plan):
+                if plan["action"] == "move_to":
+                    self.calls.append(dict(plan))
+                    return {"ok": None, "status": "pending", "plan": plan,
+                            "result": {"state": "RUNNING", "reason": "repath_pending"}}
+                return super().execute(plan)
+            def job_state(self):
+                return {"jobActive": False, "lastJob": {
+                    "type": "MOVE", "state": "FAILED", "reason": "stuck"}}
+        world = FailedMove()
+        with tempfile.TemporaryDirectory() as tmp:
+            db = MemoryStore(Path(tmp) / "memory.sqlite3")
+            with patch.object(lab, "store", db), patch.object(lab, "log_event"):
+                report = lab.run_training(world, FakeLocalPlanner(),
+                    rounds=1, max_steps=1, report_dir=Path(tmp))
+        self.assertEqual(report["episodes"][2]["status"], "failed")
+        self.assertIn("stuck", report["episodes"][2]["reason"])
+        self.assertEqual(report["summary"]["pending"], 0)
+        self.assertTrue(any(p["action"] == "mine" for p in world.calls))
+        self.assertTrue(any(p["action"] == "collect" for p in world.calls))
+
+    def test_pending_job_timeout_cancels_only_matching_training_job(self):
+        class StalledMove(FakePhysicalWorld):
+            def __init__(self):
+                super().__init__()
+                self.busy = True
+                self.stopped = False
+            def job_state(self):
+                if self.stopped:
+                    return {"jobActive": False, "lastJob": {
+                        "type": "MOVE", "state": "CANCELLED",
+                        "reason": "owner_stop"}}
+                return {"jobActive": True, "jobType": "MOVE",
+                        "jobState": "RUNNING", "jobReason": "repath_pending"}
+            def stop_job(self):
+                self.stopped = True
+                self.busy = False
+                return {"ok": True}
+        world = StalledMove()
+        action = {"ok": None, "status": "pending",
+                  "plan": {"action": "move_to"},
+                  "result": {"state": "RUNNING", "reason": "repath_pending"}}
+        with patch.object(lab, "log_event"):
+            result = lab._settle_pending_job(
+                world, action, timeout_seconds=0.01, poll_seconds=0.001)
+        self.assertTrue(world.stopped)
+        self.assertEqual(result["status"], "settled")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["result"]["state"], "CANCELLED")
+        self.assertTrue(result["result"]["training_timeout"])
+
+    def test_pending_terminal_wrong_job_type_never_claimed_as_ours(self):
+        class ForeignJob(FakePhysicalWorld):
+            def job_state(self):
+                return {"jobActive": False, "lastJob": {
+                    "type": "MINE", "state": "COMPLETED",
+                    "reason": "block_mined|block=minecraft:dirt"}}
+        action = {"ok": None, "status": "pending",
+                  "plan": {"action": "move_to"},
+                  "result": {"state": "RUNNING", "reason": "moving"}}
+        with patch.object(lab, "log_event"):
+            result = lab._settle_pending_job(ForeignJob(), action, 0.01)
+        self.assertEqual(result["status"], "pending")
+
     def test_pending_job_never_becomes_a_failure_or_a_second_action(self):
         class PendingWorld(FakePhysicalWorld):
             def execute(self, plan):
@@ -433,7 +540,9 @@ class TrainingLabRegressions(unittest.TestCase):
         world = PendingWorld()
         with tempfile.TemporaryDirectory() as tmp:
             db = MemoryStore(Path(tmp) / "memory.sqlite3")
-            with patch.object(lab, "store", db), patch.object(lab, "log_event"):
+            with patch.object(lab, "store", db), patch.object(lab, "log_event"), \
+                 patch.object(lab, "_settle_pending_job",
+                              side_effect=lambda world, execution: execution):
                 report = lab.run_training(
                     world, FakeLocalPlanner(), rounds=2, max_steps=1,
                     report_dir=Path(tmp))
