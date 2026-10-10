@@ -475,6 +475,29 @@ class PracticeRegressions(unittest.TestCase):
         post.assert_called_once()
         self.assertEqual(post.call_args.args[0], "/find-blocks")
 
+    def test_static_http_routes_exist_in_neoforge_bridge(self):
+        # A previous regression invented /scan-blocks, and the test suite
+        # accidentally reinforced the typo. Check against real Java routes.
+        import pathlib
+        import re
+        root = pathlib.Path(__file__).resolve().parents[1]
+        java = (root / "neoforge" / "src" / "main" / "java" /
+                "dev" / "chatcompanion" / "neoforge" / "client" /
+                "LocalAgentBridge.java").read_text(encoding="utf-8")
+        supported = set(re.findall(
+            r'createContext\\("(/[a-z-]+)"', java
+        ))
+        self.assertIn("/find-blocks", supported)
+        for name in ("minecraft_agent.py", "practice_engine.py", "mcp_server.py"):
+            source = (root / "local-agent" / name).read_text(encoding="utf-8")
+            calls = set(re.findall(
+                r'''_(?:post|get)\\(\\s*["'](/[a-z-]+)["']''', source
+            ))
+            self.assertFalse(calls - supported, (
+                f"{name} references nonexistent bridge routes: "
+                f"{sorted(calls - supported)}"
+            ))
+
     def test_workstation_probe_uses_real_bridge_route_and_checks_result(self):
         with patch.object(agent, "_post", return_value={
             "ok": True, "blocks": [
