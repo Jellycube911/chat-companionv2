@@ -20,6 +20,12 @@ CLAIM = re.compile(
     re.I,
 )
 PHYSICAL_VERBS = ("crafted", "made", "got", "built", "placed", "mined", "chopped", "collected")
+IMPLICIT_CLAIM = re.compile(
+    r"^(?:(?:already|just|finally)\\s+)?(?:got|crafted|made|finished)\\b"
+    r"|\\b(?:is|it's|its)\\s+(?:finished|ready|done)\\b",
+    re.I,
+)
+NEGATION = re.compile(r"\\b(?:not|never|haven't|hasn't|didn't|can't|couldn't)\\b", re.I)
 
 
 def target_from_goal(goal):
@@ -144,10 +150,14 @@ def grounded_chat(answer, message, runtime, goals):
     if target and any(token in message for token in (
         "make", "craft", "already", "finished", "done", "got it", "ur task", "your task"
     )):
-        if CLAIM.search(text):
+        claims_task_completed = CLAIM.search(text) or IMPLICIT_CLAIM.search(text)
+        if claims_task_completed and not NEGATION.search(text):
             if not verified_craft_for_goal(runtime, goal):
                 return "not yet, still haven't crafted " + target.split(":")[-1].replace("_", " ")
-    if CLAIM.search(text):
+    asserts_success = bool(CLAIM.search(text) or IMPLICIT_CLAIM.search(text))
+    if NEGATION.search(text):
+        asserts_success = False
+    if asserts_success:
         # Generic craft claims require a recent world-verified result.
         if re.search(r"\b(?:craft|made|got|finish)", text, re.I):
             done = runtime.get("body_last_verified") or {}
