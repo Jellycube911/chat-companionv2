@@ -90,9 +90,21 @@ def exam_memory_context(memory):
                 })
                 break
     learned = []
-    for name in ("observe", "navigate", "orient", "mine", "collect"):
-        for row in memory.find_learned_skills("training." + name, 1):
-            learned.append({"skill": name, "procedure": row["procedure"][:450]})
+    required_action = {
+        "observe": "scan_blocks", "navigate": "move_to",
+        "orient": "look_at", "mine": "mine", "collect": "collect",
+    }
+    for name, expected in required_action.items():
+        # Retrieval can return a highly rated movement procedure for mining.
+        # Such a memory is unrelated to the actual skill being tested.
+        for row in memory.find_learned_skills("training." + name, 12):
+            try:
+                procedure = json.loads(row.get("procedure") or "{}")
+            except (TypeError, ValueError):
+                continue
+            if isinstance(procedure, dict) and procedure.get("action") == expected:
+                learned.append({"skill": name, "procedure": row["procedure"][:450]})
+                break
     return {"previous_learned_experiences": skills,
             "learned_procedures": learned}
 
@@ -120,6 +132,10 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
     empty_scans = 0
     exploration = None
     explored_sites = []
+    blocked_stands = {}
+    failed_target = None
+    approached_stand = None
+    retired_resources = set()
     consecutive_rejected_proposals = 0
     last_reason = "exam_incomplete"
     pending = False
@@ -201,8 +217,12 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
         else:
             permitted = ["scan_blocks"]
             next_objective = (
-                "Scan for a natural log, dirt, or sand block using exact or "
-                "contains, a numeric radius <= 10 and a limit <= 32.")
+                "Scan for a natural log, dirt, or sand block. Supply a block "
+                "identifier, not only a scan mode: for example "
+                "{'action':'scan_blocks','contains':'_log','radius':10,'limit':16} "
+                "or {'action':'scan_blocks','exact':['minecraft:dirt'],"
+                "'radius':10,'limit':16}. You choose the search type. "
+                "The field mode='contains' by itself is NOT a valid query.")
         prompt = json.dumps({
             "task": "stage1_exam", "mode": "uncoached_practical",
             "goal": ("Independently find a naturally occurring log, dirt or sand "
@@ -211,6 +231,7 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
                      "each action. You must demonstrate ALL FIVE abilities."),
             "permitted_actions": permitted,
             "next_objective": next_objective,
+            "last_failed_target": list(failed_target) if failed_target else None,
             "safe_resource_types": EXAM_MATERIALS,
             "world_state": {
                 "position": current, "yaw": before["state"].get("yaw"),
@@ -347,6 +368,8 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
                 kind = block.get("type")
                 if pos is None or kind not in EXAM_MATERIALS:
                     continue
+                if (kind, *pos) in retired_resources:
+                    continue
                 center = [v + 0.5 for v in pos]
                 if not (3.0 <= _distance(current, center) <= 10.0):
                     continue
@@ -358,7 +381,9 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
                     for y in (int(current[1]), pos[1], pos[1] - 1,
                               pos[1] + 1):
                         point = [pos[0] + dx, y, pos[2] + dz]
-                        if _walkable(world, point):
+                        if (_walkable(world, point)
+                                and tuple(point) not in
+                                blocked_stands.get((kind, *pos), set())):
                             standable.append(point)
                             break
                 if standable:
@@ -395,25 +420,52 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
             verified = (
                 receipt.get("state") == "COMPLETED"
                 and _distance(current, _position(after["state"])) >= .75
-                and previous - current_dist >= .4 and current_dist <= 4.5)
+                and (previous - current_dist >= .4 or
+                     failed_target == _key(selected))
+                and current_dist <= 4.5)
             reason = ("approached_observed_resource" if verified else
                       "movement_did_not_approach_resource")
             if verified:
                 approached = _key(selected)
+                approached_stand = tuple(int(round(v)) for v in xyz)
+                failed_target = None
                 faced = None
         elif action == "look_at" and successful and selected:
             verified = _bearing_error(after["state"], selected["pos"]) <= 22.5
             reason = "faced_observed_resource" if verified else "orientation_failed"
             if verified:
                 faced = _key(selected)
-        elif action == "mine" and successful and selected:
-            metrics = practice._parse_mining_metrics(receipt)
+        elif action == "mine" and selected:
+            metrics = practice._parse_mining_metrics(receipt) if successful else None
             verified = (receipt.get("state") == "COMPLETED"
                         and metrics is not None
                         and metrics.get("block") == selected["type"])
             reason = str(receipt.get("reason") or "mining_not_verified")
             if verified:
                 mined = _key(selected)
+            elif (receipt.get("state") == "FAILED" and
+                  reason.startswith("mining_blocked")):
+                # The real Minecraft body reported an obstructed line of
+                # sight. Repeating the same mine command cannot fix that.
+                # Remove only the failed standing position. Let Qwen pick
+                # another known approach or another resource itself.
+                key = _key(selected)
+                failed_target = key
+                if approached_stand is not None:
+                    blocked_stands.setdefault(key, set()).add(approached_stand)
+                remaining = [
+                    point for point in candidates[key]["standable_candidates"]
+                    if tuple(point) not in blocked_stands.get(key, set())
+                ]
+                if remaining:
+                    candidates[key] = dict(
+                        candidates[key], standable_candidates=remaining)
+                else:
+                    retired_resources.add(key)
+                    candidates.pop(key, None)
+                approached = None
+                approached_stand = None
+                faced = None
         elif action == "collect" and successful and mined is not None:
             typ = mined[0]
             count = lambda bag: sum(int(v.get("count", 0)) for v in bag
@@ -436,8 +488,11 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
              if target is not None else {"passed": False})
     passed = bool(proof["passed"]) and not pending
     # Preserve a compact but auditable record; no pass from proposal text alone.
+    ever_observed_resource = any(
+        step["action"] == "scan_blocks" and step["verified"]
+        for step in attempts)
     status = ("pending" if pending else "passed" if passed else
-              "unavailable" if not candidates else "failed")
+              "failed" if ever_observed_resource else "unavailable")
     evidence = {"verified": passed, "proof": proof, "steps": attempts,
                 "target": target, "dimension": initial["state"]["dimension"],
                 "start": origin}
