@@ -138,40 +138,43 @@ class PracticeRegressions(unittest.TestCase):
             {"invalid_targets": invalid}, goal, inventory,
         ))
 
-    def test_cocoa_obstruction_is_observed_not_blindly_mined(self):
+    def test_causal_obstruction_context_is_not_a_scripted_mining_plan(self):
         runtime = {"pending_mining_obstruction": {
             "at": agent.time.monotonic(),
-            "original": {
-                "action": "mine", "expected_block": "minecraft:jungle_log",
-                "x": 208, "y": 70, "z": -112,
-            },
+            "original": {"action": "mine", "expected_block": "minecraft:jungle_log",
+                         "x": 208, "y": 70, "z": -112},
             "blocker": {"type": "minecraft:cocoa", "x": 209, "y": 71, "z": -112},
+            "attempted": [],
         }}
-        plan = agent._mining_obstruction_recovery(runtime, None)
-        self.assertEqual(plan["expected_block"], "minecraft:cocoa")
-        self.assertEqual([plan["x"], plan["y"], plan["z"]], [209, 71, -112])
-        runtime["pending_mining_obstruction"]["blocker"]["type"] = "minecraft:stone"
-        self.assertIsNone(agent._mining_obstruction_recovery(runtime, None))
+        evidence = agent._mining_obstruction_recovery(runtime, None)
+        self.assertEqual(evidence["blocker"]["type"], "minecraft:cocoa")
+        self.assertNotIn("action", evidence)
+        candidate = {"action": "mine", "expected_block": "minecraft:cocoa",
+                     "x": 209, "y": 71, "z": -112}
+        self.assertTrue(agent._obstruction_decision_supported(
+            runtime, candidate, evidence))
+        self.assertFalse(agent._obstruction_decision_supported(
+            runtime, dict(candidate, x=300), evidence))
 
-    def test_mining_obstruction_only_clears_observed_vines(self):
-        now = agent.time.monotonic()
-        original = {"action": "mine", "intent": "chop observed log",
-                    "expected_block": "minecraft:jungle_log",
-                    "x": 208, "y": 70, "z": -112}
+    def test_generic_stone_obstruction_works_for_any_original_goal(self):
+        original = {"action": "mine", "expected_block": "minecraft:stone",
+                    "x": 204, "y": 67, "z": -95, "goal_id": 12}
         runtime = {"pending_mining_obstruction": {
-            "at": now, "original": original,
-            "blocker": {
-                "type": "minecraft:vine", "x": 208, "y": 71, "z": -113
-            },
+            "at": agent.time.monotonic(), "original": original,
+            "blocker": {"type": "minecraft:stone", "x": 203, "y": 67, "z": -95},
+            "attempted": [],
         }}
-        goal = {"source": "user", "id": 32, "title": "Chop a log"}
-        plan = agent._mining_obstruction_recovery(runtime, goal)
-        self.assertEqual(plan["action"], "mine")
-        self.assertEqual(plan["expected_block"], "minecraft:vine")
-        self.assertEqual([plan["x"], plan["y"], plan["z"]], [208, 71, -113])
-        self.assertEqual(plan["goal_id"], 32)
-        runtime["pending_mining_obstruction"]["blocker"]["type"] = "minecraft:stone"
-        self.assertIsNone(agent._mining_obstruction_recovery(runtime, goal))
+        goal = {"source": "user", "id": 12, "title": "Craft a stone pickaxe"}
+        evidence = agent._mining_obstruction_recovery(runtime, goal)
+        self.assertEqual(evidence["blocker"]["type"], "minecraft:stone")
+        recover = {"action": "mine", "expected_block": "minecraft:stone",
+                   "x": 203, "y": 67, "z": -95}
+        self.assertTrue(agent._obstruction_decision_supported(
+            runtime, recover, evidence))
+        self.assertFalse(agent._obstruction_decision_supported(
+            runtime, dict(recover, x=204), evidence))
+        self.assertIsNone(agent._mining_obstruction_recovery(
+            runtime, dict(goal, id=300)))
 
     def test_chopping_goal_requires_a_confirmed_mined_log(self):
         goal = {"id": 32, "source": "user", "title": "Chop a log"}
@@ -1292,34 +1295,39 @@ class GoalResourceRecoveryRegressions(unittest.TestCase):
             self.runtime, {"action": "scan_blocks",
                            "contains": ["minecraft:jungle_log"]}, other))
 
-    def test_chained_obstructions_are_observed_and_bounded(self):
+    def test_chained_obstructions_are_planned_and_verified_not_scripted(self):
         async def replay():
-            original = {
-                "action": "mine", "intent": "chop observed log",
-                "expected_block": "minecraft:jungle_log",
-                "x": 221, "y": 70, "z": -92,
-            }
-            runtime = {
-                "awareness": self.runtime["awareness"],
-                "pending_mining_obstruction": {
-                    "at": agent.time.monotonic(),
-                    "original": original,
-                    "blocker": {"type": "minecraft:vine",
-                                "x": 220, "y": 70, "z": -92},
-                    "attempted": [],
-                },
-                "invalid_targets": {agent._plan_target_key(original):
-                                    (agent.time.monotonic(), "mining_blocked|block=minecraft:vine")},
-            }
+            original = {"action": "mine", "intent": "test stone",
+                        "expected_block": "minecraft:stone",
+                        "x": 221, "y": 70, "z": -92}
+            runtime = {"awareness": self.runtime["awareness"],
+                       "pending_mining_obstruction": {
+                           "at": agent.time.monotonic(), "original": original,
+                           "blocker": {"type": "minecraft:vine", "x": 220,
+                                       "y": 70, "z": -92},
+                           "attempted": []},
+                       "invalid_targets": {agent._plan_target_key(original):
+                           (agent.time.monotonic(), "mining_blocked|block=minecraft:vine")}}
+            proposals = [
+                json.dumps({"action": "mine", "intent": "test removing blocker",
+                            "hypothesis": "blocker may obstruct view",
+                            "expected_block": "minecraft:vine",
+                            "x": 220, "y": 70, "z": -92}),
+                json.dumps({"action": "mine", "intent": "test removing next blocker",
+                            "hypothesis": "another blocker obstructs the ray",
+                            "expected_block": "minecraft:stone",
+                            "x": 219, "y": 70, "z": -92}),
+            ]
             attempts = []
             def execute(plan):
                 attempts.append(dict(plan))
                 if len(attempts) == 1:
                     return {"ok": False, "plan": plan,
-                            "result": {"state": "FAILED",
-                                       "reason": "mining_blocked|block=minecraft:vine|at=218,71,-93"}}
+                            "result": {"state": "FAILED", "reason":
+                                       "mining_blocked|block=minecraft:stone|at=219,70,-92"}}
                 return {"ok": True, "plan": plan,
-                        "result": {"state": "COMPLETED", "reason": "block_mined"}}
+                        "result": {"state": "COMPLETED", "reason":
+                                   "block_mined|block=minecraft:stone|tool=minecraft:wooden_pickaxe|break_ticks=28"}}
 
             with ExitStack() as stack:
                 stack.enter_context(patch.object(agent, "update_awareness"))
@@ -1327,9 +1335,8 @@ class GoalResourceRecoveryRegressions(unittest.TestCase):
                 stack.enter_context(patch.object(agent, "_report_planned_outcome"))
                 stack.enter_context(patch.object(agent, "execute_plan",
                                                  side_effect=execute))
-                stack.enter_context(patch.object(
-                    agent, "_local_fast_completion",
-                    return_value='{"action":"idle","intent":"idle"}'))
+                llm = stack.enter_context(patch.object(
+                    agent, "_local_fast_completion", side_effect=proposals))
                 stack.enter_context(patch.object(
                     agent, "store",
                     __import__("memory_store").MemoryStore(
@@ -1337,28 +1344,35 @@ class GoalResourceRecoveryRegressions(unittest.TestCase):
                         / "memory.sqlite3")))
                 first = await agent.run_planned_action(None, runtime)
                 self.assertFalse(first["ok"])
-                self.assertEqual(runtime["pending_mining_obstruction"]["blocker"]["x"], 218)
+                self.assertEqual(runtime["pending_mining_obstruction"]["blocker"]["type"],
+                                 "minecraft:stone")
                 second = await agent.run_planned_action(None, runtime)
                 self.assertTrue(second["ok"])
-            self.assertEqual([a["x"] for a in attempts], [220, 218])
+                self.assertEqual(llm.call_count, 2)
+                events = agent.store.recent_events(20)
+                self.assertTrue(any(e["kind"] == "obstruction_experiment" for e in events))
+            self.assertEqual([a["x"] for a in attempts], [220, 219])
             self.assertNotIn("pending_mining_obstruction", runtime)
             self.assertNotIn(agent._plan_target_key(original),
                              runtime["invalid_targets"])
         asyncio.run(replay())
 
-    def test_repeated_same_blocker_is_not_an_infinite_retry(self):
-        runtime = {
-            "pending_mining_obstruction": {
-                "at": agent.time.monotonic(),
-                "original": {"action": "mine",
-                             "expected_block": "minecraft:jungle_log"},
-                "blocker": {"type": "minecraft:vine", "x": 1, "y": 2, "z": 3},
-                "attempted": [[1, 2, 3]],
-            }
-        }
+    def test_failed_repeat_is_rejected_and_bounded(self):
+        original = {"action": "mine", "expected_block": "minecraft:stone",
+                    "x": 2, "y": 2, "z": 3}
+        mine = {"action": "mine", "expected_block": "minecraft:vine",
+                "x": 1, "y": 2, "z": 3}
+        runtime = {"pending_mining_obstruction": {
+            "at": agent.time.monotonic(), "original": original,
+            "blocker": {"type": "minecraft:vine", "x": 1, "y": 2, "z": 3},
+            "attempted": [{"plan": {k: mine.get(k) for k in (
+                "action", "x", "y", "z", "expected_block")}}],
+        }}
+        evidence = agent._mining_obstruction_recovery(runtime, None)
+        self.assertFalse(agent._obstruction_decision_supported(runtime, mine, evidence))
+        runtime["pending_mining_obstruction"]["attempted"] *= 4
         self.assertIsNone(agent._mining_obstruction_recovery(runtime, None))
         self.assertNotIn("pending_mining_obstruction", runtime)
-
 
     def test_mining_approach_failure_forces_different_observed_target(self):
         """Actual 2026-10-10 loop: never mine (203,67,-95) fourteen times."""
