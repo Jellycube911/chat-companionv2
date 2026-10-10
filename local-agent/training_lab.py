@@ -957,8 +957,10 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
         # Recalculate from durable gameplay evidence on every round.
         # When old skills deteriorate, Stage 2 becomes locked again.
         readiness = assess_training(store, report["episodes"])
-        tasks = CURRICULUM + ("explore",) + (("gather_wood",)
-                              if readiness["stage_2_unlocked"] else ())
+        tasks = CURRICULUM + ("explore",) + (
+            ("stage1_exam",) if readiness["basic_skills_ready_for_exam"]
+            and not readiness["stage_2_unlocked"] else ()) + (
+            ("gather_wood",) if readiness["stage_2_unlocked"] else ())
         for task in tasks:
             if task == "explore":
                 # Recovery is not a compulsory extra exercise. It activates
@@ -972,6 +974,30 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
             if time.monotonic() - started >= duration_seconds:
                 finished_due_to_time = True
                 break
+            if task == "stage1_exam":
+                from stage1_exam import run_exam
+                report["active_exercise"] = {
+                    "round": repetition + 1, "task": task,
+                    "status": "incomplete_not_scored", "attempts": [],
+                }
+                checkpoint()
+                def exam_step(saved):
+                    report["active_exercise"]["attempts"] = saved
+                    checkpoint()
+                practical = run_exam(
+                    world, planner, store, max_steps=18,
+                    checkpoint=exam_step)
+                practical["round"] = repetition + 1
+                report["episodes"].append(practical)
+                report.pop("active_exercise", None)
+                checkpoint()
+                print("[TRAIN] stage1_exam %-11s %d actions %s" %
+                      (practical["status"], practical["attempts"],
+                       practical["reason"][:80]), flush=True)
+                if practical["status"] == "pending":
+                    halted_on_pending = True
+                    break
+                continue
             initial = world.snapshot()
             challenge = (_exploration_challenge(world, initial, visited_sites)
                          if task == "explore" else
@@ -1198,6 +1224,9 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
     report["summary"]["stage"] = progress["stage"]
     report["summary"]["basic_skills_graduated"] = progress["graduated_count"]
     report["summary"]["stage_2_unlocked"] = progress["stage_2_unlocked"]
+    report["summary"]["stage_1_practical_passed"] = progress["practical_exam"]["passed"]
+    report["summary"]["stage_1_exam_attempts"] = sum(
+        e["task"] == "stage1_exam" for e in report["episodes"])
     report["summary"]["stage_2_wood_gather_successes"] = sum(
         e["task"] == "gather_wood" and e["status"] == "passed"
         for e in report["episodes"])
