@@ -103,6 +103,21 @@ def _item_count(inventory, item):
                if row.get("item") == item)
 
 
+def _inventory_gains(before, after):
+    """Observed positive inventory deltas only, never imagined item drops."""
+    def counts(inventory):
+        found = {}
+        for row in inventory:
+            if isinstance(row, dict) and isinstance(row.get("item"), str):
+                item = row["item"]
+                found[item] = found.get(item, 0) + max(
+                    0, int(row.get("count") or 0))
+        return found
+    old, new = counts(before), counts(after)
+    return {item: value - old.get(item, 0) for item, value in new.items()
+            if value > old.get(item, 0)}
+
+
 @dataclass
 class Challenge:
     name: str
@@ -1097,6 +1112,10 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
                         "verified": ok, "hypothesis": plan.get("hypothesis"),
                         "reason": evidence, "plan": plan,
                         "result": result.get("result"),
+                        # Diagnostic only. This cannot itself earn a
+                        # collection-skill pass without verified execution.
+                        "inventory_gains": _inventory_gains(
+                            observed["inventory"], after["inventory"]),
                     })
                     outcome = evidence
                     report["active_exercise"].pop("in_flight_action", None)
@@ -1231,6 +1250,16 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
         "stopped_due_to_environment": finished_due_to_environment,
         "exploration_moves": sum(e["task"] == "explore" and e["status"] == "passed"
                                  for e in episodes),
+        "mining_actions_with_inventory_gain": sum(
+            bool(a.get("inventory_gains"))
+            for e in episodes for a in e.get("experiments", [])
+            if a.get("plan", {}).get("action") == "mine"
+            and a.get("status") in {"completed", "failed", "progress"}),
+        "collect_actions_with_inventory_gain": sum(
+            bool(a.get("inventory_gains"))
+            for e in episodes for a in e.get("experiments", [])
+            if a.get("plan", {}).get("action") == "collect"
+            and a.get("status") in {"completed", "failed", "progress"}),
     }
     progress = assess_training(store, report["episodes"])
     report["graduation"] = progress
