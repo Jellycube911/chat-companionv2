@@ -61,9 +61,18 @@ def _exam_proof(steps, target, start_inventory, final_inventory):
     same_item = target["type"]
     count = lambda bag: sum(int(item.get("count", 0)) for item in bag
                              if item.get("item") == same_item)
+    pickup = next((
+        s.get("reason") for s in evidence
+        if s.get("action") == "collect" and s.get("verified")
+    ), None)
     return {
         "verified_steps": [x for x in actions],
         "ordered_actions": sequential,
+        "pickup_evidence": (
+            "automatic_during_mining"
+            if pickup == "item_already_picked_up_during_mining"
+            else "explicit_collect" if pickup == "collected_mined_resource"
+            else "unverified"),
         "inventory_before": count(start_inventory),
         "inventory_after": count(final_inventory),
         "inventory_increased": count(final_inventory) > count(start_inventory),
@@ -133,9 +142,14 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
     exploration = None
     explored_sites = []
     blocked_stands = {}
+    # A model may repeatedly navigate to a waypoint where the Minecraft
+    # body reports "already_at_destination". Track that failed affordance
+    # across all observed resources rather than re-offering it endlessly.
+    unproductive_waypoints = set()
     failed_target = None
     approached_stand = None
     retired_resources = set()
+    pickup_during_mining = False
     consecutive_rejected_proposals = 0
     last_reason = "exam_incomplete"
     pending = False
@@ -147,6 +161,21 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
                else memory_context)
     skills = context.get("previous_learned_experiences", [])
     learned = context.get("learned_procedures", [])
+
+    def retire_waypoint(waypoint):
+        """Remove a proven unproductive standing spot from every candidate."""
+        key = tuple(int(round(v)) for v in waypoint)
+        unproductive_waypoints.add(key)
+        for resource_key, candidate in list(candidates.items()):
+            remaining = [
+                point for point in candidate["standable_candidates"]
+                if tuple(point) != key
+            ]
+            if remaining:
+                candidate["standable_candidates"] = remaining
+            else:
+                retired_resources.add(resource_key)
+                candidates.pop(resource_key, None)
 
     def record(action, plan, result, verified, reason, target=None):
         nonlocal last_reason, consecutive_rejected_proposals
@@ -183,7 +212,9 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
         # An empty search must not strand the model in an invisible scan loop.
         # The host checks real standable terrain; Qwen still chooses whether
         # and where to walk. Exploration earns no exam progression credit.
-        if not candidates and empty_scans and exploration is None:
+        if (not candidates and
+                (empty_scans or retired_resources or unproductive_waypoints)
+                and exploration is None):
             exploration = _exploration_challenge(
                 world, before, visited_sites=explored_sites)
         exploration_positions = (
@@ -195,7 +226,11 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
         # the entire practical after resources are already known.
         if mined is not None:
             permitted = ["collect"]
-            next_objective = "Collect the item from the block you actually mined."
+            next_objective = (
+                "Collect the item from the block you actually mined. If "
+                "Minecraft already automatically picked it up during mining, "
+                "issue one collect action for a physical inventory check. "
+                "Do not repeat collection_complete:0 without inventory evidence.")
         elif faced is not None:
             permitted = ["mine"]
             next_objective = "Mine the observed resource you approached and faced."
@@ -232,6 +267,9 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
             "permitted_actions": permitted,
             "next_objective": next_objective,
             "last_failed_target": list(failed_target) if failed_target else None,
+            "previous_unproductive_waypoints": [
+                list(point) for point in sorted(unproductive_waypoints)[-8:]
+            ],
             "safe_resource_types": EXAM_MATERIALS,
             "world_state": {
                 "position": current, "yaw": before["state"].get("yaw"),
@@ -382,6 +420,7 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
                               pos[1] + 1):
                         point = [pos[0] + dx, y, pos[2] + dz]
                         if (_walkable(world, point)
+                                and tuple(point) not in unproductive_waypoints
                                 and tuple(point) not in
                                 blocked_stands.get((kind, *pos), set())):
                             standable.append(point)
@@ -430,6 +469,13 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
                 approached_stand = tuple(int(round(v)) for v in xyz)
                 failed_target = None
                 faced = None
+            else:
+                # "arrived" with no meaningful motion isn't evidence of
+                # approaching another resource. Qwen needs a new waypoint.
+                # Exclude this spot globally: multiple observed blocks may
+                # share the very same standable candidate.
+                retire_waypoint(xyz)
+                reason = "waypoint_no_progress"
         elif action == "look_at" and successful and selected:
             verified = _bearing_error(after["state"], selected["pos"]) <= 22.5
             reason = "faced_observed_resource" if verified else "orientation_failed"
@@ -443,6 +489,13 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
             reason = str(receipt.get("reason") or "mining_not_verified")
             if verified:
                 mined = _key(selected)
+                typ = selected["type"]
+                item_count = lambda bag: sum(
+                    int(v.get("count", 0)) for v in bag
+                    if v.get("item") == typ)
+                pickup_during_mining = (
+                    item_count(after["inventory"]) >
+                    item_count(before["inventory"]))
             elif (receipt.get("state") == "FAILED" and
                   reason.startswith("mining_blocked")):
                 # The real Minecraft body reported an obstructed line of
@@ -453,14 +506,9 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
                 failed_target = key
                 if approached_stand is not None:
                     blocked_stands.setdefault(key, set()).add(approached_stand)
-                remaining = [
-                    point for point in candidates[key]["standable_candidates"]
-                    if tuple(point) not in blocked_stands.get(key, set())
-                ]
-                if remaining:
-                    candidates[key] = dict(
-                        candidates[key], standable_candidates=remaining)
+                    retire_waypoint(approached_stand)
                 else:
+                    # No evidence of a usable view from this location.
                     retired_resources.add(key)
                     candidates.pop(key, None)
                 approached = None
@@ -473,10 +521,22 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
             # The pickup must happen *during this collect action*. A prior
             # accidental pickup, or a successful-looking tool receipt alone,
             # is not proof that the tested collection step worked.
+            gained_now = (
+                count(after["inventory"]) > count(before["inventory"])
+                and count(after["inventory"]) > count(initial["inventory"]))
+            # Vanilla Minecraft can put the drop directly into inventory
+            # during mining if Chat stands nearby. That's real acquisition,
+            # not an effect of this collect command. Keep the audit explicit.
+            already_picked_up = (
+                pickup_during_mining
+                and count(before["inventory"]) > count(initial["inventory"])
+                and count(after["inventory"]) >= count(before["inventory"]))
             verified = (receipt.get("state") == "COMPLETED"
-                        and count(after["inventory"]) > count(before["inventory"])
-                        and count(after["inventory"]) > count(initial["inventory"]))
-            reason = "collected_mined_resource" if verified else "no_inventory_gain"
+                        and (gained_now or already_picked_up))
+            reason = (
+                "collected_mined_resource" if gained_now
+                else "item_already_picked_up_during_mining" if already_picked_up
+                else "no_inventory_gain")
             if verified:
                 selected = candidates.get(mined)
         record(action, plan, result, verified, reason, selected)
