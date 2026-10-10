@@ -485,13 +485,13 @@ class PracticeRegressions(unittest.TestCase):
                 "dev" / "chatcompanion" / "neoforge" / "client" /
                 "LocalAgentBridge.java").read_text(encoding="utf-8")
         supported = set(re.findall(
-            r'createContext\\("(/[a-z-]+)"', java
+            r'createContext\("(/[a-z-]+)"', java
         ))
         self.assertIn("/find-blocks", supported)
         for name in ("minecraft_agent.py", "practice_engine.py", "mcp_server.py"):
             source = (root / "local-agent" / name).read_text(encoding="utf-8")
             calls = set(re.findall(
-                r'''_(?:post|get)\\(\\s*["'](/[a-z-]+)["']''', source
+                r'''_(?:post|get)\(\s*["'](/[a-z-]+)["']''', source
             ))
             self.assertFalse(calls - supported, (
                 f"{name} references nonexistent bridge routes: "
