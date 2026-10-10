@@ -753,6 +753,17 @@ class PracticeRegressions(unittest.TestCase):
         self.assertTrue(agent._is_activity_question("what is ur task"))
         self.assertTrue(agent._is_activity_question("what's your task"))
 
+    def test_another_axe_is_a_new_crafting_goal_not_old_inventory(self):
+        with patch.object(agent, "_remember_behavior_feedback"), patch.object(
+            agent, "_ensure_user_goal",
+            return_value={"id": 57, "title": "Craft minecraft:wooden_axe"},
+        ) as make_goal:
+            goal = asyncio.run(agent.fast_task_intent("now make another axe"))
+        self.assertEqual(goal["title"], "Craft minecraft:wooden_axe")
+        make_goal.assert_called_once_with(
+            "Craft minecraft:wooden_axe", "now make another axe", 9
+        )
+
     def test_wooden_hoe_command_registers_a_generic_crafting_goal(self):
         with patch.object(agent, "_remember_behavior_feedback"), patch.object(
             agent, "_ensure_user_goal",
