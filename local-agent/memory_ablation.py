@@ -38,6 +38,44 @@ def _arm_schedule(trials, seed):
     return schedule
 
 
+class _VisiblePlanner:
+    """Expose the otherwise silent, potentially slow Ollama proposal calls.
+
+    This wrapper changes no instructions, prompts, model options or outputs.
+    """
+    def __init__(self, planner):
+        self.planner = planner
+        self.trial_index = 0
+        self.total_trials = 0
+        self.condition = "unknown"
+        self.step = 0
+
+    def start_trial(self, index, total, condition):
+        self.trial_index = index
+        self.total_trials = total
+        self.condition = condition
+        self.step = 0
+
+    def propose(self, prompt):
+        self.step += 1
+        label = ("trial %d/%d %s, proposal %d" %
+                 (self.trial_index, self.total_trials, self.condition, self.step))
+        print("[MEMORY TEST] %s: Qwen is choosing an action..." % label,
+              flush=True)
+        started = time.monotonic()
+        try:
+            answer = self.planner.propose(prompt)
+        except BaseException as error:
+            print("[MEMORY TEST] %s: Qwen request failed after %.1fs (%s)" %
+                  (label, time.monotonic() - started, type(error).__name__),
+                  flush=True)
+            raise
+        action = answer.get("action") if isinstance(answer, dict) else "invalid"
+        print("[MEMORY TEST] %s: Qwen returned %s after %.1fs" %
+              (label, action, time.monotonic() - started), flush=True)
+        return answer
+
+
 def _summarize(trials):
     arms = {}
     for arm in ("memory_on", "memory_off"):
@@ -81,9 +119,15 @@ def _summarize(trials):
 def run_comparison(world, planner, memory, *, trials=6, max_steps=18,
                    seed=17, report_dir=REPORT_DIR, max_minutes=60):
     schedule = _arm_schedule(trials, seed)
+    print("[MEMORY TEST] Reading verified learning evidence from SQLite...",
+          flush=True)
     context = exam_memory_context(memory)  # Freeze historical context.
     exposed = (len(context["previous_learned_experiences"]) +
                len(context["learned_procedures"]))
+    print("[MEMORY TEST] Historical evidence: %d experiences, %d learned "
+          "procedures." % (len(context["previous_learned_experiences"]),
+                            len(context["learned_procedures"])), flush=True)
+    visible_planner = _VisiblePlanner(planner)
     path = Path(report_dir) / (
         "memory-comparison-" +
         datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") +
@@ -115,9 +159,12 @@ def run_comparison(world, planner, memory, *, trials=6, max_steps=18,
         _atomic_checkpoint(report, path)
 
     checkpoint()
+    print("[MEMORY TEST] Saving progress to: %s" % path, flush=True)
     if not exposed:
         report["status"] = "not_testable_no_verified_memories"
         checkpoint()
+        print("[MEMORY TEST] No verified experience to compare. "
+              "Run train.bat first.", flush=True)
         return report
 
     start = time.monotonic()
@@ -136,13 +183,24 @@ def run_comparison(world, planner, memory, *, trials=6, max_steps=18,
                 "experiments": [],
             }
             checkpoint()
+            print("[MEMORY TEST] Beginning trial %d/%d (%s) at %s" %
+                  (index, trials, arm, report["active_trial"]["start"]),
+                  flush=True)
+            visible_planner.start_trial(index, trials, arm)
 
             def progress(steps):
                 report["active_trial"]["experiments"] = steps
                 checkpoint()
+                if steps:
+                    latest = steps[-1]
+                    print("[MEMORY TEST] Trial %d/%d step %d: %s, %s (%s)" %
+                          (index, trials, len(steps),
+                           latest.get("action", "unknown"),
+                           "verified" if latest.get("verified") else "not verified",
+                           latest.get("reason", "unknown")), flush=True)
 
             trial = run_exam(
-                world, planner, memory,
+                world, visible_planner, memory,
                 max_steps=max_steps, checkpoint=progress,
                 memory_context=(context if arm == "memory_on" else {
                     "previous_learned_experiences": [],
@@ -193,11 +251,19 @@ def main():
     os.environ["COMPANION_CLOUD_TEACHER"] = "off"
     os.environ["COMPANION_TRAINING_MODE"] = "on"
     print("[MEMORY TEST] Real Minecraft only; preserves all existing memory.")
-    print("[MEMORY TEST] Stop the regular brain and training before starting.")
+    print("[MEMORY TEST] Stop the regular brain and training before starting.",
+          flush=True)
+    print("[MEMORY TEST] Acquiring exclusive companion control...", flush=True)
     with exclusive_controller():
+        print("[MEMORY TEST] Checking Minecraft connection and Chat body...",
+              flush=True)
         world = RealWorld()
         world.snapshot()
+        print("[MEMORY TEST] Minecraft connected. Checking local Ollama...",
+              flush=True)
         planner = OllamaPlanner()
+        print("[MEMORY TEST] Ollama ready (model: %s)." % planner.model,
+              flush=True)
         result = run_comparison(
             world, planner, store, trials=args.trials, max_steps=args.steps,
             seed=args.seed, max_minutes=args.minutes)
