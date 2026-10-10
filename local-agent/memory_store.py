@@ -213,6 +213,17 @@ class MemoryStore:
             )
             db.execute(
                 """
+                CREATE TABLE IF NOT EXISTS goal_progress (
+                    goal_id INTEGER PRIMARY KEY,
+                    metric TEXT NOT NULL,
+                    baseline INTEGER NOT NULL,
+                    target_delta INTEGER NOT NULL,
+                    FOREIGN KEY (goal_id) REFERENCES goals(id)
+                )
+                """
+            )
+            db.execute(
+                """
                 CREATE TABLE IF NOT EXISTS events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     kind TEXT NOT NULL,
@@ -851,6 +862,28 @@ class MemoryStore:
             }
             for row in rows
         ]
+
+    def set_goal_progress(self, goal_id, metric, baseline, target_delta):
+        """Snapshot a requested gain, not merely an item count already owned."""
+        with self._connect() as db:
+            db.execute(
+                """INSERT INTO goal_progress(goal_id, metric, baseline, target_delta)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(goal_id) DO UPDATE SET
+                       metric=excluded.metric,
+                       baseline=excluded.baseline,
+                       target_delta=excluded.target_delta""",
+                (int(goal_id), str(metric), max(0, int(baseline)),
+                 max(1, int(target_delta))),
+            )
+
+    def goal_progress(self, goal_id):
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT metric, baseline, target_delta FROM goal_progress WHERE goal_id=?",
+                (int(goal_id),),
+            ).fetchone()
+        return dict(row) if row else None
 
     def update_goal(self, goal_id, status=None, description=None, priority=None):
         goal_id = int(goal_id)
