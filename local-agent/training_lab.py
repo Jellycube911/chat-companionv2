@@ -24,6 +24,7 @@ from pathlib import Path
 import requests
 
 import practice_engine as practice
+from training_progress import assess_training
 from action_log import log_event, start_session
 from memory_store import store
 
@@ -274,6 +275,19 @@ def _select_challenge(name, world, snapshot, rng):
                      "standable_candidates": standable},
                     ("mine", "scan_blocks", "look_at", "move_to"), dim)
         return None
+    if name == "gather_wood":
+        # Stage 2 only receives real, exposed logs with a server-checked
+        # standing location. It must still choose and physically execute
+        # scanning, approach, mining and pickup actions.
+        trial = _select_challenge("mine", world, snapshot, rng)
+        if trial is None or not trial.target["type"].endswith("_log"):
+            return None
+        return Challenge(
+            name,
+            "Independently gather one naturally occurring log, from finding it "
+            "to physical mining and possession in companion inventory",
+            trial.target,
+            ("scan_blocks", "look_at", "move_to", "mine", "collect"), dim)
     if name == "collect":
         entities = [e for e in snapshot["entities"]
                     if e.get("droppedItem")
@@ -480,7 +494,8 @@ def _settle_pending_job(world, execution, timeout_seconds=35.0, poll_seconds=0.5
     return execution
 
 
-def _verify(challenge, before, after, execution):
+def _verify(challenge, before, after, execution, previous_attempts=(),
+            initial_inventory=None):
     """Training success must come from actual world state, not plan text."""
     plan = execution.get("plan") or {}
     action = plan.get("action")
@@ -493,6 +508,28 @@ def _verify(challenge, before, after, execution):
     if before["state"].get("dimension") != after["state"].get("dimension"):
         return False, "dimension_changed"
     target = challenge.target
+    if challenge.name == "gather_wood":
+        # Stage 2 is a compound goal. Never credit merely describing a
+        # solution, reaching a tree, or collecting unrelated items.
+        def mined_target(a):
+            p = a.get("plan") or {}
+            m = practice._parse_mining_metrics(a.get("result") or {})
+            return (p.get("action") == "mine" and m is not None
+                    and m.get("block") == target["type"]
+                    and (a.get("result") or {}).get("state") == "COMPLETED"
+                    and all(p.get(k) == v for k, v in
+                            zip(("x", "y", "z"), target["pos"])))
+        previously_mined = any(mined_target(a) for a in previous_attempts
+                               if a.get("status") in {"completed", "progress"})
+        current_mined = mined_target({
+            "plan": plan, "result": execution.get("result") or {}
+        }) if execution.get("ok") else False
+        acquired = _item_count(after["inventory"], target["type"]) > _item_count(
+            initial_inventory if initial_inventory is not None
+            else before["inventory"], target["type"])
+        if acquired and (previously_mined or current_mined):
+            return True, "wood_gathered_from_verified_mine_and_inventory"
+        return False, "wood_gathering_in_progress"
     if challenge.name == "observe":
         blocks = (execution.get("result") or {}).get("blocks") or []
         return (action == "scan_blocks" and
@@ -542,12 +579,33 @@ def _verified_history(intent, limit=12):
 
 def _record_episode(challenge, attempts, passed, elapsed, initial, reason):
     intent = "training." + challenge.name
+    # Condense huge scan responses instead of truncating JSON in mid-object.
+    # Graduation needs durable, parseable proof of physical execution.
+    reduced = []
+    for a in attempts[-8:]:
+        compact = dict(a)
+        result = compact.get("result")
+        if isinstance(result, dict):
+            compact["result"] = {
+                k: v for k, v in result.items()
+                if k in {"state", "reason", "ok", "error"}
+            }
+            if "blocks" in result:
+                compact["result"]["observed_count"] = len(result["blocks"])
+        if isinstance(compact.get("plan"), dict):
+            compact["plan"] = {
+                k: v for k, v in compact["plan"].items()
+                if k in {"action", "intent", "x", "y", "z",
+                         "expected_block", "exact", "contains"}
+            }
+        compact.pop("hypothesis", None)
+        reduced.append(compact)
     actions = json.dumps({
         "dimension": challenge.dimension,
         "start": [round(v, 1) for v in _position(initial["state"])],
         "target_kind": challenge.target.get("type") or challenge.target.get("item"),
-        "experiments": attempts[-8:],
-    }, ensure_ascii=False)[:4700]
+        "experiments": reduced,
+    }, ensure_ascii=False)
     hypothesis = (attempts[-1].get("hypothesis") if attempts else None) or \
                  "Test world-grounded " + challenge.name
     rejections = sum(a.get("status") == "rejected" for a in attempts)
@@ -649,7 +707,12 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
             len([a for a in episode.get("experiments", [])
                  if a.get("status") in {"completed", "failed"}])
             for episode in report["episodes"])
-        for task in CURRICULUM:
+        # Recalculate from durable gameplay evidence on every round.
+        # When old skills deteriorate, Stage 2 becomes locked again.
+        readiness = assess_training(store, report["episodes"])
+        tasks = CURRICULUM + (("gather_wood",)
+                              if readiness["stage_2_unlocked"] else ())
+        for task in tasks:
             if time.monotonic() - started >= duration_seconds:
                 finished_due_to_time = True
                 break
@@ -670,7 +733,7 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
             outcome = "no_verified_completion"
             verified = False
             episode_start = time.monotonic()
-            for step in range(max_steps):
+            for step in range(max(8, max_steps) if task == "gather_wood" else max_steps):
                 observed = world.snapshot()
                 if observed["state"].get("dimension") != challenge.dimension:
                     outcome = "dimension_changed"
@@ -709,9 +772,13 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
                           flush=True)
                     result = _settle_pending_job(world, result)
                 after = world.snapshot(allow_busy=True)
-                ok, evidence = _verify(challenge, observed, after, result)
+                ok, evidence = _verify(
+                    challenge, observed, after, result, attempts, initial["inventory"])
+                progress = task == "gather_wood" and result.get("ok") and not ok
                 attempts.append({
-                    "step": step + 1, "status": "completed" if ok else "failed",
+                    "step": step + 1,
+                    "status": ("completed" if ok else
+                               "progress" if progress else "failed"),
                     "verified": ok, "hypothesis": plan.get("hypothesis"),
                     "reason": evidence, "plan": plan,
                     "result": result.get("result"),
@@ -803,6 +870,14 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
         "stopped_due_to_time": finished_due_to_time,
         "stopped_due_to_no_actions": unproductive_rounds >= 3,
     }
+    progress = assess_training(store, report["episodes"])
+    report["graduation"] = progress
+    report["summary"]["stage"] = progress["stage"]
+    report["summary"]["basic_skills_graduated"] = progress["graduated_count"]
+    report["summary"]["stage_2_unlocked"] = progress["stage_2_unlocked"]
+    report["summary"]["stage_2_wood_gather_successes"] = sum(
+        e["task"] == "gather_wood" and e["status"] == "passed"
+        for e in report["episodes"])
     report["ended_at"] = datetime.now(timezone.utc).isoformat()
     report_dir = Path(report_dir)
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -813,6 +888,9 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
     report["report_path"] = str(output)
     store.record_event("training_session",
                        json.dumps(report["summary"])[:1500])
+    store.record_event("training_graduation",
+                       json.dumps({k: v for k, v in progress.items()
+                                   if k != "skills"})[:1300])
     log_event("training", "session_complete", **report["summary"],
               report_path=str(output))
     return report
@@ -843,6 +921,13 @@ def main(argv=None):
                               max_steps=args.steps, seed=args.seed,
                               duration_minutes=args.minutes)
         print("[TRAIN] Summary: " + json.dumps(result["summary"]))
+        for name, score in result["graduation"]["skills"].items():
+            print("[TRAIN] %-8s %2d/%d successes, %d sites, %s" % (
+                name, score["successes"], score["resolved_trials"],
+                score["distinct_success_sites"],
+                "GRADUATED" if score["graduated"] else "NEEDS PRACTICE"))
+        print("[TRAIN] Stage %d: %s" % (
+            result["graduation"]["stage"], result["graduation"]["stage_name"]))
         print("[TRAIN] Report: " + result["report_path"])
         print("[TRAIN] Existing SQLite memories preserved.")
 
