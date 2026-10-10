@@ -752,8 +752,11 @@ def build_practice_plan_input(runtime, directive=None):
             "The blocker is not the target. Decide ONE hypothesis: mine the "
             "observed blocker (exact type and coordinates), try an alternative "
             "standable viewpoint, or inspect/abandon if removal seems unsafe. "
-            "You are NOT being ordered to mine it. If you remove it, Minecraft "
-            "must confirm success; only then reconsider the original target. "
+            "You are NOT being ordered to mine it. Prefer the least "
+            "destructive useful experiment and avoid modifying signs of "
+            "player constructions, containers, or protected blocks without "
+            "clear necessity. If you remove it, Minecraft must confirm "
+            "success; only then reconsider the original target. "
             "You may not invent another block coordinate. Include goal_id and "
             "goal_reason for a prerequisite action. If previous experiments "
             "failed, change strategy rather than repeating a failed mine."
@@ -1619,6 +1622,10 @@ def _mining_obstruction_recovery(runtime, goal):
         runtime.pop("pending_mining_obstruction", None)
         return None
     original, blocker = pending.get("original") or {}, pending.get("blocker") or {}
+    current_dimension = ((runtime.get("awareness") or {}).get("state") or {}).get("dimension")
+    if pending.get("dimension") and current_dimension and pending["dimension"] != current_dimension:
+        runtime.pop("pending_mining_obstruction", None)
+        return None
     if not original or not blocker.get("type"):
         runtime.pop("pending_mining_obstruction", None)
         return None
@@ -1659,6 +1666,9 @@ def _obstruction_decision_supported(runtime, plan, pending):
     key = _plan_target_key(plan)
     if key is None or key == _plan_target_key(pending["original"]):
         return False
+    rejected = runtime.get("invalid_targets", {}).get(key)
+    if rejected and time.monotonic() - rejected[0] < _invalid_target_ttl(key):
+        return False
     blocker = pending["blocker"]
     try:
         xyz = [int(math.floor(float(plan[c]))) for c in ("x", "y", "z")]
@@ -1689,6 +1699,10 @@ def _obstruction_learning_update(runtime, plan, execution, reason, goal):
     if latest_key and key != latest_key and plan.get("action") not in {"scan_blocks", "idle"}:
         return
 
+    if execution.get("status") == "pending":
+        log_event("practice_host", "obstruction_experiment_waiting_for_terminal",
+                  experiment=plan, result=execution.get("result"))
+        return  # RUNNING means neither success nor failure was verified.
     record = {
         "cause": "obstructed_line_of_sight",
         "original": {k: original.get(k) for k in ("action", "x", "y", "z", "expected_block")},
@@ -2283,9 +2297,20 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
     )
     if obstacle is not None and continuation is None:
         if not _obstruction_decision_supported(runtime, plan, obstacle):
+            obstacle["rejected_proposals"] = int(obstacle.get("rejected_proposals", 0)) + 1
             log_event("practice_host", "obstruction_plan_ungrounded",
-                      proposal=plan, blocker=obstacle.get("blocker"))
-            runtime["planner_backoff_until"] = time.monotonic() + 8.0
+                      proposal=plan, blocker=obstacle.get("blocker"),
+                      rejected_count=obstacle["rejected_proposals"])
+            if obstacle["rejected_proposals"] >= 3:
+                runtime.pop("pending_mining_obstruction", None)
+                runtime["planner_backoff_until"] = time.monotonic() + 30.0
+                store.record_event("practice_stalled",
+                                   "Obstruction recovery stalled after three unsupported hypotheses")
+                _escalate_stalled_goal(runtime, user_goal,
+                                       "three unsupported obstruction hypotheses",
+                                       awareness_inventory)
+            else:
+                runtime["planner_backoff_until"] = time.monotonic() + 8.0
             return {"ok": False, "status": "obstruction_plan_ungrounded",
                     "plan": plan}
         if user_goal and user_goal.get("source") == "user":
