@@ -1396,6 +1396,30 @@ def _general_recipe_goal_action(runtime, goal, inventory):
         return action
     log_event("knowledge", "recipe_missing_step", target=target,
               reason=reason, dependency_chain=chain)
+    stalls = runtime.setdefault("knowledge_stalls", {})
+    count = int(stalls.get(target, 0)) + 1
+    stalls[target] = count
+    if count >= 3 and _cloud_teacher_enabled():
+        if os.getenv("OPENAI_API_KEY", "").strip():
+            request = store.request_learning(
+                "autonomous_goal:" + target,
+                "A Minecraft companion must achieve goal "
+                + str(goal.get("title")) + ". The SERVER recipe registry "
+                "gave the following dependency evidence: "
+                + json.dumps(chain, ensure_ascii=False)[:1200]
+                + ". Blocker: " + str(reason)
+                + ". Actual inventory: " + json.dumps(inventory, ensure_ascii=False)[:1400]
+                + ". Suggest one independently testable next acquisition or "
+                "world action. Never claim it happened.",
+                cooldown_seconds=1800,
+            )
+            log_event("knowledge", "goal_teacher_escalation",
+                      target=target, result=request)
+            stalls[target] = 0
+        elif count == 3:
+            print("[TEACHER] Cloud help enabled but OPENAI_API_KEY is missing. "
+                  "Local gameplay continues.", flush=True)
+            log_event("knowledge", "teacher_key_missing", target=target)
     return None
 
 
@@ -3929,7 +3953,14 @@ async def main():
         model=model_label,
         cloud_teacher=_cloud_teacher_enabled(),
         teacher_model=_teacher_model_name() if _cloud_teacher_enabled() else None,
+        teacher_key_configured=bool(os.getenv("OPENAI_API_KEY", "").strip()),
     )
+    if _cloud_teacher_enabled() and not os.getenv("OPENAI_API_KEY", "").strip():
+        print(
+            "[TEACHER] Cloud teacher is ON, but OPENAI_API_KEY is not set. "
+            "OpenAI learning requests cannot run until a key is configured.",
+            flush=True,
+        )
     python_executable = sys.executable
     server_file = BASE_DIR / "mcp_server.py"
 
