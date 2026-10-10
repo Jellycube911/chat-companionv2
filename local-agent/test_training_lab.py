@@ -134,6 +134,99 @@ class TrainingLabRegressions(unittest.TestCase):
                 disk = json.loads(Path(report["report_path"]).read_text())
                 self.assertEqual(disk["summary"]["passed"], 5)
 
+    def test_actual_uploaded_report_action_shapes_are_canonicalized(self):
+        """Two user reports: nested scan/look/move, target_pos and target."""
+        import practice_engine as practice
+        examples = [
+            ({"action": "scan_blocks",
+              "scan_blocks": {"contains": "minecraft:dandelion",
+                              "radius": 10, "limit": 100, "exposed_only": True}},
+             {"contains": "minecraft:dandelion", "radius": 10}),
+            ({"action": "scan_blocks",
+              "scan_blocks": {"contains": "minecraft:dirt",
+                              "radius": 5, "limit": 50}},
+             {"contains": "minecraft:dirt", "radius": 5}),
+            ({"action": "look_at",
+              "look_at": {"x": 58, "y": 83, "z": 174}},
+             {"x": 58, "y": 83, "z": 174}),
+            ({"action": "look_at", "target": [60, 87, 183]},
+             {"x": 60, "y": 87, "z": 183}),
+            ({"action": "move_to",
+              "move_to": {"x": 61, "y": 87, "z": 180}},
+             {"x": 61, "y": 87, "z": 180}),
+            ({"action": "move_to", "target_pos": [54, 87, 173]},
+             {"x": 54, "y": 87, "z": 173}),
+        ]
+        for original, expected in examples:
+            with self.subTest(original=original):
+                plan = practice.parse_plan(json.dumps(original))
+                self.assertIsNotNone(plan)
+                for key, value in expected.items():
+                    self.assertEqual(plan.get(key), value)
+                if plan["action"] == "scan_blocks":
+                    self.assertEqual(lab._plan_allowed(
+                        plan, lab.Challenge("observe", "observe",
+                            {"type": "minecraft:dirt"},
+                            ("scan_blocks",), "minecraft:overworld"))[0], True)
+                else:
+                    known = [expected[k] for k in ("x", "y", "z")]
+                    self.assertEqual(lab._plan_allowed(
+                        plan, lab.Challenge(
+                            "orient" if plan["action"] == "look_at" else "navigate",
+                            "test", {"pos": known},
+                            (plan["action"],), "minecraft:overworld")), (True, "ok"))
+
+    def test_live_training_runner_accepts_wrapped_qwen_actions(self):
+        """Replay all five stages through the real normalizing parser."""
+        import practice_engine as practice
+
+        class WrappedPlanner(FakeLocalPlanner):
+            def propose(self, payload):
+                p = super().propose(payload)
+                action = p["action"]
+                if action == "scan_blocks":
+                    return practice.parse_plan(json.dumps({
+                        "action": action,
+                        "scan_blocks": {"contains": "minecraft:dirt",
+                                        "radius": 7, "limit": 50}
+                    }))
+                if action == "look_at":
+                    return practice.parse_plan(json.dumps({
+                        "action": action,
+                        "target_pos": [p["x"], p["y"], p["z"]]
+                    }))
+                if action == "move_to":
+                    return practice.parse_plan(json.dumps({
+                        "action": action,
+                        "move_to": {"x": p["x"], "y": p["y"], "z": p["z"]}
+                    }))
+                return p
+        world = FakePhysicalWorld()
+        with tempfile.TemporaryDirectory() as tmp:
+            db = MemoryStore(Path(tmp) / "memory.sqlite3")
+            with patch.object(lab, "store", db), patch.object(lab, "log_event"):
+                result = lab.run_training(
+                    world, WrappedPlanner(), rounds=1, max_steps=3,
+                    report_dir=Path(tmp))
+            self.assertEqual(result["summary"]["rejected_proposals"], 0)
+            self.assertEqual(result["summary"]["passed"], 5)
+            self.assertEqual(result["summary"]["executed_primitives"], 5)
+
+    def test_no_progress_stop_prevents_permanent_json_rejection_loop(self):
+        class InvalidPlanner:
+            def propose(self, payload):
+                return {"action": "look_at", "intent": "wrong"}
+        world = FakePhysicalWorld()
+        with tempfile.TemporaryDirectory() as tmp:
+            db = MemoryStore(Path(tmp) / "memory.sqlite3")
+            with patch.object(lab, "store", db), patch.object(lab, "log_event"):
+                result = lab.run_training(
+                    world, InvalidPlanner(), rounds=12, max_steps=1,
+                    report_dir=Path(tmp))
+            self.assertTrue(result["summary"]["stopped_due_to_no_actions"])
+            self.assertEqual(result["summary"]["physical_actions"], 0)
+            self.assertLessEqual(len(result["episodes"]), 15)
+
     def test_inventory_is_required_for_verified_collection(self):
         task = lab.Challenge("collect", "collect", {
             "item": "minecraft:dirt", "pos": [11, 64, 10]
