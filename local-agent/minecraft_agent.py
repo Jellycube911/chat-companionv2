@@ -39,7 +39,7 @@ AMBIENT_WANDER_INTERVAL = 22.0
 REFLEX_COOLDOWN = 4.0
 LEARNING_COOLDOWN_SECONDS = 1800
 TEACHER_MAX_OUTPUT_TOKENS = 700
-AGENT_BUILD = "self-learning-local-brain-v10-craft-evidence-2026-10-09"
+AGENT_BUILD = "self-learning-local-brain-v11-workstation-route-2026-10-10"
 BASE_DIR = Path(__file__).resolve().parent
 
 set_tracing_disabled(True)
@@ -1371,6 +1371,11 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
                 "practice_host", "goal_continuation",
                 goal=active_user_goal.get("title"), plan=continuation,
             )
+        # A failed workstation probe cannot justify new crafting-table
+        # placement, and must not fall through to unconstrained Qwen actions.
+        if time.monotonic() < float(runtime.get("planner_backoff_until", 0.0) or 0.0):
+            log_event("practice_host", "planner_probe_backoff")
+            return {"ok": False, "status": "planner_backoff"}
 
     prompt = build_practice_plan_input(runtime, directive=directive)
     log_event(
