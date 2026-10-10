@@ -355,7 +355,8 @@ def _verify(challenge, before, after, execution):
                 "distance_before=%.2f after=%.2f" % (prior, current))
     if challenge.name == "mine":
         result = execution.get("result") or {}
-        mined = str(result.get("reason") or "").startswith("block_mined|")
+        metrics = practice._parse_mining_metrics(result)
+        mined = bool(metrics and metrics.get("block") == target["type"])
         target_match = (action == "mine" and
                         [int(plan[k]) for k in ("x", "y", "z")] == target["pos"])
         return (mined and target_match and
