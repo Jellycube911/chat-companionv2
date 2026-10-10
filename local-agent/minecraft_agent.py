@@ -43,7 +43,7 @@ AMBIENT_WANDER_INTERVAL = 22.0
 REFLEX_COOLDOWN = 4.0
 LEARNING_COOLDOWN_SECONDS = 1800
 TEACHER_MAX_OUTPUT_TOKENS = 700
-AGENT_BUILD = "self-learning-local-brain-v18-executable-plans-2026-10-10"
+AGENT_BUILD = "self-learning-local-brain-v19-user-goal-control-2026-10-10"
 BASE_DIR = Path(__file__).resolve().parent
 
 set_tracing_disabled(True)
