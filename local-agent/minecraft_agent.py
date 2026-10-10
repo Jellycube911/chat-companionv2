@@ -22,7 +22,7 @@ from agents.mcp import MCPServerStdio
 from memory_store import store
 from skill_executor import run_task
 from action_log import DEFAULT_LOG, log_event, log_exception, start_session
-from practice_engine import execute_plan, parse_plan
+from practice_engine import execute_plan, parse_plan, scan_query
 from knowledge_engine import decide_recipe, output_for_goal
 from body_truth import (record_action as record_body_action, grounded_chat as verify_chat_claims,
                         grounded_status as body_grounded_status, summarize_action as body_action_summary)
@@ -42,7 +42,7 @@ AMBIENT_WANDER_INTERVAL = 22.0
 REFLEX_COOLDOWN = 4.0
 LEARNING_COOLDOWN_SECONDS = 1800
 TEACHER_MAX_OUTPUT_TOKENS = 700
-AGENT_BUILD = "self-learning-local-brain-v15-shared-body-chat-2026-10-10"
+AGENT_BUILD = "self-learning-local-brain-v16-negative-scan-evidence-2026-10-10"
 BASE_DIR = Path(__file__).resolve().parent
 
 set_tracing_disabled(True)
@@ -117,6 +117,11 @@ authorize imaginary separate "axe heads" or crafting with a pickaxe.
 If recent evidence says move_to is repath_pending with no position change, do
 NOT repeat the same target. Change the action or target. If a scan found the
 desired block within about 4.5 blocks, try mine directly.
+An empty scan is evidence that its loaded search area has no matching targets,
+not progress toward gathering. Do not repeat that query in the same or smaller
+area. Test a wider area, a different resource hypothesis, or another useful
+action supported by current observations. Old failed trials are history, not
+instructions to retry stale targets. Never invent coordinates to escape a loop.
 
 EFFICIENCY LEARNING
 The host measures actual physical execution time and stores persistent reward
@@ -715,6 +720,20 @@ def build_practice_plan_input(runtime, directive=None):
             parts.append(
                 f"- [{event['kind']}] {_trim(event['summary'], 360)}"
             )
+
+    empty_scans = _recent_empty_scans(runtime)
+    if empty_scans:
+        parts.append("RECENT NEGATIVE SEARCH EVIDENCE (not acquired resources):")
+        for scan in empty_scans[-4:]:
+            parts.append(json.dumps({
+                key: scan[key] for key in ("query", "origin", "dimension", "count")
+            }, ensure_ascii=False))
+        parts.append(
+            "These searches returned ZERO targets. Repeating a covered query "
+            "is blocked. Choose a materially different search or a safe action "
+            "using current evidence. Historical mining errors do not prove "
+            "a target still exists here."
+        )
 
     goal = next((g for g in goals if g.get("source") == "user"), None)
     if goal and str(goal.get("title") or "").lower() == "craft a wooden pickaxe":
@@ -1584,6 +1603,70 @@ def _mining_obstruction_recovery(runtime, goal):
     return recovery
 
 
+def _recent_empty_scans(runtime):
+    """Short-lived spatial facts, never permanent claims of resource absence."""
+    now = time.monotonic()
+    dimension = ((runtime.get("awareness") or {}).get("state") or {}).get("dimension")
+    records = [
+        scan for scan in runtime.get("empty_resource_scans", [])
+        if now - scan["at"] < 120.0 and scan["dimension"] == dimension
+    ]
+    runtime["empty_resource_scans"] = records[-12:]
+    return runtime["empty_resource_scans"]
+
+
+def _covered_empty_scan(runtime, plan):
+    if plan.get("action") != "scan_blocks":
+        return None
+    try:
+        query = scan_query(plan)
+        state = (runtime.get("awareness") or {}).get("state") or {}
+        origin = [math.floor(float(state[axis])) for axis in ("x", "y", "z")]
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    for scan in reversed(_recent_empty_scans(runtime)):
+        previous = scan["query"]
+        if any(query[key] != previous[key] for key in ("contains", "exact", "exposed_only")):
+            continue
+        # The bridge scans a block-aligned cube. Smaller radii and different
+        # result limits cannot reveal targets in an already empty cube.
+        if all(abs(origin[i] - scan["origin"][i]) + query["radius"]
+               <= previous["radius"] for i in range(3)):
+            return scan
+    return None
+
+
+def _remember_scan_evidence(runtime, plan, execution):
+    if plan.get("action") != "scan_blocks" or not execution.get("ok"):
+        return
+    observation = execution.get("observation") or {}
+    state = (runtime.get("awareness") or {}).get("state") or {}
+    pos = observation.get("origin") or [state.get(axis) for axis in ("x", "y", "z")]
+    try:
+        origin = [math.floor(float(v)) for v in pos]
+        if len(origin) != 3:
+            return
+        query = observation.get("query") or scan_query(plan)
+    except (TypeError, ValueError, OverflowError):
+        return
+    blocks = (execution.get("result") or {}).get("blocks") or []
+    runtime["last_resource_scan"] = {
+        "at": time.monotonic(), "origin": dict(zip(("x", "y", "z"), pos)),
+        "blocks": blocks,
+    }
+    records = _recent_empty_scans(runtime)
+    if blocks:
+        # Fresh positive evidence supersedes a previous negative observation.
+        runtime["empty_resource_scans"] = [s for s in records if s["query"] != query]
+    else:
+        records.append({
+            "at": time.monotonic(), "query": query, "origin": origin,
+            "dimension": observation.get("dimension", state.get("dimension")),
+            "count": 0,
+        })
+        runtime["empty_resource_scans"] = records[-12:]
+
+
 def _material_action_from_scan(runtime, goal, inventory):
     """Convert observed blocks into a physical experiment, not another scan."""
     scan = runtime.get("last_resource_scan") or {}
@@ -1670,6 +1753,11 @@ def _brain_console_result(plan, execution):
     result = (execution or {}).get("result") or {}
     action = plan.get("action")
     if action == "scan_blocks":
+        if not execution.get("ok"):
+            print("[BRAIN] SCAN FAILED: " + _trim(str(
+                result.get("error") or execution.get("error") or "unverified response"
+            ), 110), flush=True)
+            return
         blocks = result.get("blocks") or []
         print(
             f"[BRAIN] OBSERVED: {len(blocks)} blocks. "
@@ -2038,9 +2126,6 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         log_event("practice_host", "goal_drift_replanned", plan=revision)
         plan = revision
 
-    if source == "practice":
-        _record_goal_navigation(runtime, user_goal, awareness_inventory, plan)
-
     target_key = _plan_target_key(plan)
     invalid = runtime.setdefault("invalid_targets", {})
     if (
@@ -2082,6 +2167,44 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         plan = revised
         target_key = revised_key
 
+    covered = _covered_empty_scan(runtime, plan)
+    if covered:
+        log_event("practice_host", "repeat_empty_scan_rejected", plan=plan, evidence=covered)
+        alternate = await _local_fast_completion(
+            runtime, PRACTICE_PLANNER_INSTRUCTIONS,
+            prompt + "\nREJECTED REDUNDANT SEARCH: " + json.dumps(plan)
+            + "\nThis area already returned ZERO matches: "
+            + json.dumps({k: covered[k] for k in ("query", "origin", "count")})
+            + "\nChoose ONE different evidence-based action or expand the search "
+            "beyond that area. Changing wording, result limit, or shrinking the "
+            "radius is not new information. Do not invent coordinates. JSON only.",
+            json_mode=True, max_tokens=220,
+        )
+        revision = parse_plan(alternate)
+        revised_key = _plan_target_key(revision) if revision else None
+        if (
+            revision is None or _covered_empty_scan(runtime, revision)
+            or not _plan_matches_user_goal(
+                revision, user_goal, directive or _current_user_subgoal(runtime)
+            )
+            or (revision.get("action") in {"move_to", "move_forward", "look_at"}
+                and user_goal and _goal_navigation_count(runtime, user_goal, awareness_inventory) >= 2)
+            or (revised_key in invalid
+                and time.monotonic() - invalid[revised_key][0] < _invalid_target_ttl(revised_key))
+        ):
+            runtime["planner_backoff_until"] = time.monotonic() + 30.0
+            store.record_event("practice_stalled", "Repeated empty search rejected; no new physical action executed.")
+            _escalate_stalled_goal(runtime, user_goal, "repeated empty search", awareness_inventory)
+            await _notify_once(runtime, "empty_search_stalled",
+                               "nothing there; stuck finding a different approach", cooldown=120.0)
+            return {"ok": False, "status": "scan_stalled", "plan": plan}
+        log_event("practice_host", "empty_scan_replanned", old=plan, new=revision)
+        plan = revision
+        target_key = revised_key
+
+    if source == "practice":
+        _record_goal_navigation(runtime, user_goal, awareness_inventory, plan)
+
     visible_goal = user_goal or next(
         (g for g in store.list_goals("active", 4)
          if g.get("source") != "system"), None
@@ -2095,16 +2218,9 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
     result = execution.get("result") or {}
     record_body_action(runtime, plan, execution)
     _brain_console_result(plan, execution)
-    if plan.get("action") == "scan_blocks" and execution.get("ok"):
-        blocks = result.get("blocks") or []
-        if isinstance(blocks, list) and blocks:
-            runtime["last_resource_scan"] = {
-                "at": time.monotonic(),
-                "origin": {
-                    "x": state.get("x"), "z": state.get("z")
-                },
-                "blocks": blocks,
-            }
+    _remember_scan_evidence(runtime, plan, execution)
+    if execution.get("ok") and plan.get("action") in {"mine", "place"}:
+        runtime.pop("empty_resource_scans", None)
     reason = str(
         result.get("error") or result.get("reason")
         or execution.get("error") or ""

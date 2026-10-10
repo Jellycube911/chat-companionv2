@@ -2,6 +2,30 @@
 
 This folder contains the local MCP brain used by the Minecraft companion.
 
+## Negative search evidence (v16)
+
+An empty block scan now records its query, origin, dimension and zero-result
+outcome in SQLite. It is an observation, not a successful learned skill or
+proof of gathering. The planner receives this evidence explicitly.
+
+For two minutes, repeating that query inside the already-searched cube is
+rejected, including smaller radii and different result limits. The local model
+gets one chance to choose a different action or wider search. If it repeats
+the exhausted search, the host pauses for 30 seconds and gives a rate-limited,
+truthful stall message. Existing user-goal teacher escalation still applies.
+No fallback mining target or movement coordinate is invented by this guard.
+
+Movement beyond the searched area, a different dimension, expiry, or a verified
+mining/placement change permits a fresh search. Failed requests do not establish
+resource absence. Spatial guards are session-local; stored observations remain
+historical evidence after restart, since another world could use the same
+coordinates. This addresses repeated empty scans; it does not establish general
+autonomous problem-solving or guarantee that the local model's next plan works.
+
+To update from v15, stop the brain, replace `minecraft_agent.py` and
+`practice_engine.py` together, and restart it. This change needs no new mod JAR.
+Keep `data/` and the existing SQLite database.
+
 ## Brain model selection
 
 The agent is **local-only by default**.

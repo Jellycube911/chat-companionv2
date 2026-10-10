@@ -108,6 +108,9 @@ def _state():
     owner = state.get("owner", {}) if isinstance(state, dict) else {}
     return {
         "server": state.get("serverState") if isinstance(state, dict) else None,
+        "dimension": state.get("dimension") if isinstance(state, dict) else None,
+        "block_pos": [math.floor(float(state.get(axis, 0))) for axis in ("x", "y", "z")]
+        if isinstance(state, dict) else None,
         "pos": [
             round(float(state.get("x", 0)), 2),
             round(float(state.get("y", 0)), 2),
@@ -317,7 +320,8 @@ def parse_plan(text):
     return plan
 
 
-def _scan_blocks(plan):
+def scan_query(plan):
+    """Canonical parameters shared by execution and observation deduplication."""
     contains = plan.get("contains")
     exact = plan.get("exact")
     if isinstance(contains, str):
@@ -326,16 +330,18 @@ def _scan_blocks(plan):
         exact = [exact]
     radius = max(1, min(20, int(plan.get("radius", 16) or 16)))
     limit = max(1, min(32, int(plan.get("limit", 16) or 16)))
-    result = _post(
-        "/find-blocks",
-        {
-            "contains": contains or [],
-            "exact": exact or [],
-            "radius": radius,
-            "limit": limit,
-            "exposed_only": bool(plan.get("exposed_only", False)),
-        },
-    )
+    return {
+        "contains": sorted(set(contains or [])),
+        "exact": sorted(set(exact or [])),
+        "radius": radius,
+        "limit": limit,
+        "exposed_only": bool(plan.get("exposed_only", False)),
+    }
+
+
+def _scan_blocks(plan):
+    query = scan_query(plan)
+    result = _post("/find-blocks", query)
     if _failed(result):
         return result
     return {
@@ -346,7 +352,7 @@ def _scan_blocks(plan):
                 "pos": [block.get("x"), block.get("y"), block.get("z")],
                 "distance": round(float(block.get("distance", 0)), 2),
             }
-            for block in result.get("blocks", [])[:limit]
+            for block in result.get("blocks", [])[:query["limit"]]
         ],
     }
 
@@ -833,9 +839,18 @@ def execute_plan(plan):
         result = _execute_action(plan, before)
 
         if plan["action"] == "scan_blocks":
+            blocks = result.get("blocks") or []
             observation = {
                 "action": "scan_blocks",
-                "result": result,
+                "query": scan_query(plan),
+                "origin": before["state"].get("block_pos") or before["state"].get("pos"),
+                "dimension": before["state"].get("dimension"),
+                "observed_at": time.time(),
+                "ok": not _failed(result),
+                "target_found": bool(blocks) if not _failed(result) else None,
+                "count": len(blocks) if not _failed(result) else None,
+                "targets": blocks[:3],
+                "error": result.get("error"),
             }
             store.record_event(
                 "practice_observation",
@@ -852,6 +867,7 @@ def execute_plan(plan):
                 "ok": not _failed(result),
                 "plan": plan,
                 "result": result,
+                "observation": observation,
                 "learning": None,
             }
 

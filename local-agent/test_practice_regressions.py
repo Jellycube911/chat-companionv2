@@ -1,6 +1,10 @@
 """Fast host-side regression tests for real-session failures (2026-10-09)."""
 import asyncio
+import json
+import tempfile
 import unittest
+from contextlib import ExitStack
+from pathlib import Path
 from unittest.mock import patch
 
 import minecraft_agent as agent
@@ -1079,6 +1083,145 @@ class PracticeRegressions(unittest.TestCase):
         a = {"action": "mine", "x": 205, "y": 71, "z": -120, "hypothesis": "A"}
         b = dict(a, hypothesis="B", tool="minecraft:string")
         self.assertEqual(agent._plan_target_key(a), agent._plan_target_key(b))
+
+
+class EmptySearchRegressions(unittest.TestCase):
+    """Replay the v15 repeated empty-search failure without a live model."""
+
+    def setUp(self):
+        self.runtime = {"awareness": {
+            "state": {"x": 10.5, "y": 70.0, "z": -10.5,
+                      "dimension": "minecraft:overworld", "health": 20,
+                      "maxHealth": 20},
+            "inventory": [],
+        }}
+        self.plan = {"action": "scan_blocks", "intent": "re-observe target block",
+                     "hypothesis": "confirm target before mining",
+                     "contains": ["minecraft:jungle_log"], "radius": 5, "limit": 1}
+        self.empty = {"ok": True, "result": {"ok": True, "blocks": []}}
+
+    def remember(self):
+        agent._remember_scan_evidence(self.runtime, self.plan, self.empty)
+
+    def test_wording_limit_and_smaller_radius_do_not_bypass_empty_evidence(self):
+        self.remember()
+        for radius in (4, 5):
+            revised = dict(self.plan, radius=radius, limit=32,
+                           contains="minecraft:jungle_log", hypothesis="a new wording")
+            self.assertIsNotNone(agent._covered_empty_scan(self.runtime, revised))
+        self.assertIsNone(agent._covered_empty_scan(
+            self.runtime, dict(self.plan, radius=6)))
+        self.assertIsNone(agent._covered_empty_scan(
+            self.runtime, dict(self.plan, contains=["_log"])))
+
+    def test_new_area_dimension_and_expired_observations_allow_retry(self):
+        self.remember()
+        self.runtime["awareness"]["state"]["x"] += 2
+        self.assertIsNone(agent._covered_empty_scan(self.runtime, self.plan))
+        self.runtime["awareness"]["state"]["x"] -= 2
+        self.runtime["empty_resource_scans"][0]["at"] -= 121
+        self.assertIsNone(agent._covered_empty_scan(self.runtime, self.plan))
+        self.remember()
+        self.runtime["awareness"]["state"]["dimension"] = "minecraft:the_nether"
+        self.assertIsNone(agent._covered_empty_scan(self.runtime, self.plan))
+
+    def test_transport_failure_is_not_negative_resource_evidence(self):
+        agent._remember_scan_evidence(self.runtime, self.plan, {
+            "ok": False, "result": {"ok": False, "error": "connection failed"}
+        })
+        self.assertIsNone(agent._covered_empty_scan(self.runtime, self.plan))
+
+    def test_empty_scan_replaces_old_positive_target_cache(self):
+        self.runtime["last_resource_scan"] = {"blocks": [{"pos": [1, 2, 3]}]}
+        self.remember()
+        self.assertEqual(self.runtime["last_resource_scan"]["blocks"], [])
+
+    def test_negative_evidence_survives_sqlite_reopen_without_learning_success(self):
+        from memory_store import MemoryStore
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "memory.sqlite3"
+            db = MemoryStore(path)
+            snapshot = {"state": {"pos": [10.5, 70, -10.5],
+                                   "dimension": "minecraft:overworld"}, "inventory": []}
+            with patch.object(practice, "store", db), patch.object(
+                practice, "_snapshot", return_value=snapshot
+            ), patch.object(practice, "_post", return_value={"ok": True, "blocks": []}):
+                result = practice.execute_plan(self.plan)
+            self.assertTrue(result["ok"])  # query succeeded, no resource acquired
+            self.assertFalse(result["observation"]["target_found"])
+            reopened = MemoryStore(path)
+            event = next(e for e in reopened.recent_events(20)
+                         if e["kind"] == "practice_observation")
+            evidence = json.loads(event["summary"])
+            self.assertEqual(evidence["query"]["contains"], ["minecraft:jungle_log"])
+            self.assertEqual(evidence["origin"], snapshot["state"]["pos"])
+            self.assertEqual(evidence["count"], 0)
+            self.assertEqual(reopened.recent_trials(), [])
+
+    def planner_environment(self, stack, completion, execution=None):
+        from memory_store import MemoryStore
+        tmp = stack.enter_context(tempfile.TemporaryDirectory())
+        stack.enter_context(patch.object(agent, "store", MemoryStore(Path(tmp) / "memory.sqlite3")))
+        stack.enter_context(patch.object(agent, "update_awareness"))
+        stack.enter_context(patch.object(agent, "_notify_once"))
+        stack.enter_context(patch.object(agent, "_report_planned_outcome"))
+        stack.enter_context(patch.object(agent, "_local_fast_completion", side_effect=completion))
+        return stack.enter_context(patch.object(agent, "execute_plan", side_effect=execution or (
+            lambda plan: dict(self.empty, plan=plan)
+        )))
+
+    def test_fifteen_repeated_plans_do_not_execute_fifteen_empty_scans(self):
+        async def completion(*args, **kwargs):
+            return json.dumps(self.plan)
+        with ExitStack() as stack:
+            execute = self.planner_environment(stack, completion)
+            first = asyncio.run(agent.run_planned_action(None, self.runtime))
+            self.assertTrue(first["ok"])
+            for index in range(14):
+                self.runtime.pop("planner_backoff_until", None)
+                self.plan["radius"] = 4 if index % 2 else 5
+                result = asyncio.run(agent.run_planned_action(None, self.runtime))
+                self.assertEqual(result["status"], "scan_stalled")
+            self.assertEqual(execute.call_count, 1)
+            prompt = agent.build_practice_plan_input(self.runtime)
+            self.assertIn("RECENT NEGATIVE SEARCH EVIDENCE", prompt)
+            self.assertIn("ZERO targets", prompt)
+            self.assertEqual(agent.store.recent_trials(), [])
+
+    def test_replanning_can_execute_a_wider_search(self):
+        self.remember()
+        wider = dict(self.plan, radius=12)
+        with ExitStack() as stack:
+            execute = self.planner_environment(stack, [json.dumps(self.plan), json.dumps(wider)])
+            result = asyncio.run(agent.run_planned_action(None, self.runtime))
+            self.assertTrue(result["ok"])
+            self.assertEqual(execute.call_args.args[0]["radius"], 12)
+
+    def test_replanning_cannot_execute_known_failed_target(self):
+        self.remember()
+        invalid = {"action": "mine", "x": 11, "y": 70, "z": -11,
+                   "intent": "mine log", "hypothesis": "retry old target"}
+        self.runtime["invalid_targets"] = {
+            agent._plan_target_key(invalid): (agent.time.monotonic(), "target_block_mismatch")
+        }
+        with ExitStack() as stack:
+            execute = self.planner_environment(stack, [json.dumps(self.plan), json.dumps(invalid)])
+            result = asyncio.run(agent.run_planned_action(None, self.runtime))
+            self.assertEqual(result["status"], "scan_stalled")
+            execute.assert_not_called()
+
+    def test_verified_world_change_invalidates_old_empty_evidence(self):
+        self.remember()
+        mine = {"action": "mine", "x": 11, "y": 70, "z": -11,
+                "expected_block": "minecraft:stone", "intent": "test stone",
+                "hypothesis": "mine observed stone"}
+        with ExitStack() as stack:
+            self.planner_environment(stack, [json.dumps(mine)], lambda plan: {
+                "ok": True, "plan": plan,
+                "result": {"state": "COMPLETED", "reason": "block_mined"},
+            })
+            asyncio.run(agent.run_planned_action(None, self.runtime))
+            self.assertIsNone(agent._covered_empty_scan(self.runtime, self.plan))
 
 
 if __name__ == "__main__":
