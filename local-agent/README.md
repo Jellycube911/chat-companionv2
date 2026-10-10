@@ -63,6 +63,37 @@ A trial is marked unavailable when there is no real suitable block, standable
 location or dropped item. Those are not counted as successes. The collection
 stage cannot run until a dropped item actually exists.
 
+**Stage 1 persistent checkpoints and independent exam (v4):**
+Each training session writes a readable `data/training_reports/training-*.json`
+file immediately, and atomically updates that same file after every exercise
+and physical action. Completed experiments remain available if Python exits,
+Minecraft stops, or the computer loses power. Ctrl+C marks the report
+`interrupted`; an unclean termination leaves `running` and the last
+`checkpoint_at` timestamp. An `active_exercise.in_flight_action` is explicitly
+unverified and NEVER counts as a completed skill. A new run begins a new
+report; earned learning evidence and trial history remain in the existing
+`data/companion_memory.sqlite3` SQLite database.
+
+**Stage 1 graduation now requires TWO independent checks:** (1) all five
+basic skills meet the established 9/10 evidence-backed success and three-site
+requirements, and (2) the **uncoached Stage 1 practical exam** passes.
+In the practical, the local Ollama model sees its own discoveries, previously
+learned SQLite skills, and valid physical standing locations. It must choose
+the target resource itself, then independently scan, move toward it, face it,
+mine it and pick up its resulting drop, in that order. The evaluator checks
+actual block observations, real movement, correct yaw, server-confirmed
+multi-tick block break and an inventory increase DURING the collection.
+No preselected resource coordinate, direct host action sequence, world edit,
+teleport or fabricated pickup is allowed. The successful exam receipt is
+saved in SQLite and is required by `training_progress.assess_training`
+to unlock Stage 2. Stage 2 remains the subsequent independent wood-gathering
+curriculum. The exam cannot be considered passed until actually executed in
+Minecraft with Qwen, regardless of unit tests or previous stage drills.
+
+The latest artifact must include `stage1_exam.py` alongside
+`training_lab.py`, `training_progress.py`, `practice_engine.py` and
+`memory_store.py`. Preserve your existing `data` folder when updating.
+
 **Stage 1 safe exploration recovery (v3):** If a round cannot
 navigate toward or mine any observed eligible resource, the trainer can
 offer a separate `explore` recovery objective: move to one of several
