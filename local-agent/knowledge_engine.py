@@ -131,9 +131,18 @@ def decide_recipe(goal, inventory, lookup, depth=3):
             # Try crafting a missing ingredient first. Inventory must be read
             # again after the physical step before the next action is chosen.
             for item in grid["missing"]:
-                action, reason = solve(item, level + 1)
-                if action is not None:
-                    return action, "intermediate:" + item
+                # A tag slot may accept oak, jungle, modded planks, etc.
+                # Never assume the first choice is the only material possible.
+                alternatives = [item]
+                for index, selected in enumerate(grid["grid"]):
+                    if selected == item and index < len(recipe["ingredients"]):
+                        alternatives.extend(recipe["ingredients"][index][:16])
+                for alternative in dict.fromkeys(alternatives):
+                    if alternative == output:
+                        continue
+                    action, _reason = solve(alternative, level + 1)
+                    if action is not None:
+                        return action, "intermediate:" + alternative
             return None, "missing_materials:" + repr(grid["missing"])
         finally:
             visited.remove(output)
