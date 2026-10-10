@@ -672,6 +672,110 @@ class PracticeRegressions(unittest.TestCase):
         post.assert_called_once()
         self.assertEqual(post.call_args.args[0], "/find-blocks")
 
+    def test_chat_and_body_share_the_same_verified_action_record(self):
+        import body_truth
+        runtime = {"awareness": {"inventory": [
+            {"item": "minecraft:stick", "count": 2},
+        ]}}
+        scan = {
+            "action": "scan_blocks", "intent": "locate jungle logs"
+        }
+        body_truth.record_action(runtime, scan, {
+            "ok": True, "result": {"ok": True, "blocks": [
+                {"type": "minecraft:jungle_log", "pos": [12, 70, 13]}
+            ]},
+        })
+        self.assertIsNone(runtime.get("body_last_verified"))
+        self.assertIn("scanned blocks", body_truth.summarize_action(
+            runtime["body_last_action"]
+        ))
+        self.assertIn("haven't", body_truth.grounded_chat(
+            "i got the wooden hoe", "did you craft it?", runtime,
+            [{"id": 55, "source": "user", "title": "Craft minecraft:wooden_hoe"}]
+        ))
+
+        plan = {"action": "craft", "intent": "craft wooden pickaxe", "goal_id": 9}
+        body_truth.record_action(runtime, plan, {
+            "ok": True, "result": {"item": "minecraft:wooden_pickaxe", "count": 1},
+        })
+        self.assertNotEqual(
+            body_truth.grounded_chat(
+                "i got the hoe", "is it done?", runtime,
+                [{"id": 55, "source": "user", "title": "Craft minecraft:wooden_hoe"}],
+            ),
+            "i got the hoe",
+        )
+
+    def test_chat_accepts_only_verified_matching_goal_craft(self):
+        import body_truth
+        goal = {"id": 55, "source": "user", "title": "Craft minecraft:wooden_hoe"}
+        runtime = {"awareness": {"inventory": [
+            {"item": "minecraft:wooden_hoe", "count": 1}
+        ]}}
+        self.assertFalse(body_truth.verified_craft_for_goal(runtime, goal))
+        # An existing item in inventory is not evidence of a NEW craft.
+        self.assertNotEqual(body_truth.grounded_chat(
+            "i crafted a wooden hoe", "is it ready?", runtime, [goal]
+        ), "i crafted a wooden hoe")
+        body_truth.record_action(runtime, {
+            "action": "craft", "intent": "craft wooden hoe", "goal_id": 55
+        }, {"ok": True, "result": {
+            "item": "minecraft:wooden_hoe", "count": 1,
+        }})
+        self.assertTrue(body_truth.verified_craft_for_goal(runtime, goal))
+        self.assertEqual(body_truth.grounded_chat(
+            "i crafted a wooden hoe", "is it ready?", runtime, [goal]
+        ), "i crafted a wooden hoe")
+
+    def test_user_feedback_about_scan_loop_stays_factual(self):
+        import body_truth
+        runtime = {"body_recent_actions": [
+            {"action": "scan_blocks"} for _ in range(6)
+        ]}
+        response = body_truth.grounded_chat(
+            "i got the hoe, but the log is gone.",
+            "ur task is putting u in a loop", runtime, [],
+        )
+        self.assertEqual(response, "yea, stuck rescanning. no progress yet")
+
+    def test_recognize_question_about_current_task(self):
+        self.assertTrue(agent._is_activity_question("what is ur task"))
+        self.assertTrue(agent._is_activity_question("what's your task"))
+
+    def test_wooden_hoe_command_registers_a_generic_crafting_goal(self):
+        with patch.object(agent, "_remember_behavior_feedback"), patch.object(
+            agent, "_ensure_user_goal",
+            return_value={"id": 55, "title": "Craft minecraft:wooden_hoe"},
+        ) as make_goal:
+            goal = asyncio.run(agent.fast_task_intent("Make a wooden hoe"))
+        self.assertEqual(goal["title"], "Craft minecraft:wooden_hoe")
+        make_goal.assert_called_once_with(
+            "Craft minecraft:wooden_hoe", "Make a wooden hoe", 9
+        )
+
+    def test_chat_context_includes_authoritative_physical_status(self):
+        import body_truth
+        runtime = {
+            "awareness": {
+                "state": {"x": 10, "y": 70, "z": 15},
+                "inventory": [
+                    {"item": "minecraft:jungle_planks", "count": 6}
+                ],
+            },
+            "body_last_action": {
+                "action": "mine", "ok": False,
+                "result": {"reason": "mining_blocked|block=minecraft:oak_leaves"}
+            },
+        }
+        with patch.object(agent.store, "list_goals", return_value=[
+            {"id": 55, "source": "user", "title": "Craft minecraft:wooden_hoe"}
+        ]), patch.object(agent.store, "recent_events", return_value=[]):
+            context = agent._chat_awareness_text(runtime)
+        self.assertIn("active player task=", context)
+        self.assertIn("mining_blocked", context)
+        self.assertIn("minecraft:jungle_planksx6", context)
+        self.assertIn("not crafted yet", context)
+
     def test_generic_crafting_goal_without_handwritten_item_rule(self):
         with patch.object(agent, "_remember_behavior_feedback"), patch.object(
             agent, "_ensure_user_goal",
