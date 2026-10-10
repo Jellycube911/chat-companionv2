@@ -1224,5 +1224,139 @@ class EmptySearchRegressions(unittest.TestCase):
             self.assertIsNone(agent._covered_empty_scan(self.runtime, self.plan))
 
 
+class GoalResourceRecoveryRegressions(unittest.TestCase):
+    """Replay user-goal/material drift and successive observed vine blockers."""
+
+    def setUp(self):
+        self.goal = {"id": 12, "source": "user", "title": "Craft a stone pickaxe"}
+        self.runtime = {
+            "awareness": {
+                "state": {"x": 218.3, "y": 70.0, "z": -93.68,
+                          "dimension": "minecraft:overworld"},
+                "inventory": [{"item": "minecraft:wooden_pickaxe", "count": 1}],
+            },
+            "knowledge_last": {
+                "target": "minecraft:stone_pickaxe",
+                "reason": "missing_materials:{'minecraft:cobblestone': 1}",
+                "chain": [{"output": "minecraft:stone_pickaxe",
+                           "missing": {"minecraft:cobblestone": 1,
+                                       "minecraft:blackstone": 1}}],
+            },
+        }
+
+    def test_recipe_shortage_rejects_unrelated_unlinked_scan(self):
+        unrelated = {"action": "scan_blocks", "contains": ["minecraft:jungle_log"],
+                     "radius": 5}
+        relevant = {"action": "scan_blocks", "contains": ["minecraft:stone"],
+                    "radius": 12}
+        self.assertEqual(agent._missing_goal_materials(self.runtime, self.goal),
+                         ["cobblestone", "blackstone"])
+        self.assertFalse(agent._scan_serves_user_goal(
+            self.runtime, unrelated, self.goal))
+        self.assertTrue(agent._scan_serves_user_goal(
+            self.runtime, relevant, self.goal))
+        linked = dict(unrelated, goal_id=12,
+                      goal_reason="testing wood as a prerequisite to a new tool")
+        self.assertTrue(agent._scan_serves_user_goal(
+            self.runtime, linked, self.goal))
+        self.assertFalse(agent._plan_matches_user_goal(
+            dict(relevant, goal_id=1), self.goal))
+
+    def test_observed_candidate_turned_into_goal_linked_mining_experiment(self):
+        self.runtime["last_resource_scan"] = {
+            "at": agent.time.monotonic(),
+            "origin": {"x": 218.3, "y": 70.0, "z": -93.68},
+            "blocks": [{"type": "minecraft:stone", "pos": [220, 70, -92]}],
+        }
+        step = agent._material_action_from_scan(
+            self.runtime, self.goal, self.runtime["awareness"]["inventory"])
+        self.assertEqual(step["action"], "mine")
+        self.assertEqual(step["expected_block"], "minecraft:stone")
+        self.assertEqual([step[k] for k in ("x", "y", "z")], [220, 70, -92])
+        self.assertEqual(step["goal_id"], 12)
+        self.assertIn("missing recipe", step["goal_reason"])
+        self.assertNotIn("tool", step)  # let actual tool evidence determine it
+        self.runtime["invalid_targets"] = {
+            agent._plan_target_key(step): (agent.time.monotonic(),
+                                            "mining_blocked|block=minecraft:vine")
+        }
+        self.assertIsNone(agent._material_action_from_scan(
+            self.runtime, self.goal, self.runtime["awareness"]["inventory"]))
+
+    def test_missing_recipe_context_is_specific_to_current_goal(self):
+        other = {"id": 15, "title": "Craft an iron pickaxe", "source": "user"}
+        self.assertEqual(agent._missing_goal_materials(self.runtime, other), [])
+        self.assertTrue(agent._scan_serves_user_goal(
+            self.runtime, {"action": "scan_blocks",
+                           "contains": ["minecraft:jungle_log"]}, other))
+
+    def test_chained_obstructions_are_observed_and_bounded(self):
+        async def replay():
+            original = {
+                "action": "mine", "intent": "chop observed log",
+                "expected_block": "minecraft:jungle_log",
+                "x": 221, "y": 70, "z": -92,
+            }
+            runtime = {
+                "awareness": self.runtime["awareness"],
+                "pending_mining_obstruction": {
+                    "at": agent.time.monotonic(),
+                    "original": original,
+                    "blocker": {"type": "minecraft:vine",
+                                "x": 220, "y": 70, "z": -92},
+                    "attempted": [],
+                },
+                "invalid_targets": {agent._plan_target_key(original):
+                                    (agent.time.monotonic(), "mining_blocked|block=minecraft:vine")},
+            }
+            attempts = []
+            def execute(plan):
+                attempts.append(dict(plan))
+                if len(attempts) == 1:
+                    return {"ok": False, "plan": plan,
+                            "result": {"state": "FAILED",
+                                       "reason": "mining_blocked|block=minecraft:vine|at=218,71,-93"}}
+                return {"ok": True, "plan": plan,
+                        "result": {"state": "COMPLETED", "reason": "block_mined"}}
+
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(agent, "update_awareness"))
+                stack.enter_context(patch.object(agent, "_notify_once"))
+                stack.enter_context(patch.object(agent, "_report_planned_outcome"))
+                stack.enter_context(patch.object(agent, "execute_plan",
+                                                 side_effect=execute))
+                stack.enter_context(patch.object(
+                    agent, "_local_fast_completion",
+                    return_value='{"action":"idle","intent":"idle"}'))
+                stack.enter_context(patch.object(
+                    agent, "store",
+                    __import__("memory_store").MemoryStore(
+                        Path(stack.enter_context(tempfile.TemporaryDirectory()))
+                        / "memory.sqlite3")))
+                first = await agent.run_planned_action(None, runtime)
+                self.assertFalse(first["ok"])
+                self.assertEqual(runtime["pending_mining_obstruction"]["blocker"]["x"], 218)
+                second = await agent.run_planned_action(None, runtime)
+                self.assertTrue(second["ok"])
+            self.assertEqual([a["x"] for a in attempts], [220, 218])
+            self.assertNotIn("pending_mining_obstruction", runtime)
+            self.assertNotIn(agent._plan_target_key(original),
+                             runtime["invalid_targets"])
+        asyncio.run(replay())
+
+    def test_repeated_same_blocker_is_not_an_infinite_retry(self):
+        runtime = {
+            "pending_mining_obstruction": {
+                "at": agent.time.monotonic(),
+                "original": {"action": "mine",
+                             "expected_block": "minecraft:jungle_log"},
+                "blocker": {"type": "minecraft:vine", "x": 1, "y": 2, "z": 3},
+                "attempted": [[1, 2, 3]],
+            }
+        }
+        self.assertIsNone(agent._mining_obstruction_recovery(runtime, None))
+        self.assertNotIn("pending_mining_obstruction", runtime)
+
+
 if __name__ == "__main__":
     unittest.main()
