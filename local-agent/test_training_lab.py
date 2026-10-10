@@ -242,6 +242,21 @@ class TrainingLabRegressions(unittest.TestCase):
             self.assertEqual(report["summary"]["rejected_proposals"], 2)
             self.assertEqual(len([p for p in world.calls if p["action"] == "mine"]), 0)
             self.assertFalse(db.recent_skill_trials("training.mine"))
+            feedback = [r for r in db.recall("training.protocol.mine")
+                        if r["kind"] == "training_protocol"
+                        and r["key"] == "training.protocol.mine"]
+            self.assertEqual(len(feedback), 1)
+            self.assertIn("block_identity_mismatch", feedback[0]["content"])
+            # A restarted model gets the specific schema lesson, while
+            # the world action still needs to be independently chosen.
+            scenario = lab.Challenge(
+                "mine", "physical mining",
+                {"type": "minecraft:oak_log", "pos": [15, 64, 10]},
+                ("mine",), "minecraft:overworld")
+            with patch.object(lab, "store", db):
+                incoming = json.loads(lab._prompt(
+                    scenario, world.snapshot(), [], [], []))
+            self.assertTrue(incoming["previous_interface_lessons"])
 
     def test_orientation_after_navigation_uses_same_world_confirmed_block(self):
         class StableResourceWorld(FakePhysicalWorld):
