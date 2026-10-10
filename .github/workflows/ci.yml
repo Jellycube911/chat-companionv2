@@ -23,6 +23,10 @@ jobs:
       - name: Check local Python agent
         run: |
           python -m py_compile local-agent/minecraft_agent.py local-agent/mcp_server.py local-agent/memory_store.py local-agent/context_builder.py local-agent/skill_executor.py local-agent/action_log.py local-agent/practice_engine.py local-agent/knowledge_engine.py local-agent/body_truth.py
+          test -f local-agent/run.bat
+          test -f local-agent/context_builder.py
+          grep -q 'minecraft_agent.py' local-agent/run.bat
+          grep -q 'COMPANION_MODEL_PROVIDER=local' local-agent/run.bat
           cd local-agent
           python - <<'PY'
           import agents, mcp, requests, memory_store, mcp_server, skill_executor, action_log, practice_engine, knowledge_engine, body_truth
@@ -405,12 +409,14 @@ jobs:
             local-agent/minecraft_agent.py
             local-agent/mcp_server.py
             local-agent/memory_store.py
+            local-agent/context_builder.py
             local-agent/skill_executor.py
             local-agent/action_log.py
             local-agent/practice_engine.py
             local-agent/training_lab.py
             local-agent/training_progress.py
             local-agent/train.bat
+            local-agent/run.bat
             local-agent/knowledge_engine.py
             local-agent/body_truth.py
             local-agent/requirements.txt
