@@ -458,6 +458,7 @@ def run_training(world, planner, *, rounds=2, max_steps=3, seed=7,
               "rounds": rounds, "max_steps": max_steps,
               "mode": "live_minecraft_no_world_reset",
               "episodes": [], "summary": {}}
+    halted_on_pending = False
     for repetition in range(rounds):
         for task in CURRICULUM:
             initial = world.snapshot()
@@ -533,6 +534,16 @@ def run_training(world, planner, *, rounds=2, max_steps=3, seed=7,
                     break
 
             elapsed = time.monotonic() - episode_start
+            if outcome == "physical_job_pending;no_parallel_actions":
+                halted_on_pending = True
+                report["episodes"].append({
+                    "round": repetition + 1, "task": task, "status": "pending",
+                    "reason": outcome, "attempts": len(attempts),
+                    "seconds": round(elapsed, 2), "experiments": attempts,
+                })
+                print("[TRAIN] %-8s still physically running; halting safely" % task,
+                      flush=True)
+                break
             _record_episode(challenge, attempts, verified, elapsed, initial, outcome)
             record = {
                 "round": repetition + 1, "task": task,
@@ -544,9 +555,11 @@ def run_training(world, planner, *, rounds=2, max_steps=3, seed=7,
             print("[TRAIN] %-8s %-11s %d action(s)  %s" %
                   (task, record["status"], record["attempts"], outcome[:90]),
                   flush=True)
+        if halted_on_pending:
+            break
 
     episodes = report["episodes"]
-    eligible = [e for e in episodes if e["status"] != "unavailable"]
+    eligible = [e for e in episodes if e["status"] in {"passed", "failed"}]
     total_physical = sum(sum(
         1 for a in e.get("experiments", [])
         if a.get("status") in {"completed", "failed"}
@@ -555,7 +568,8 @@ def run_training(world, planner, *, rounds=2, max_steps=3, seed=7,
     report["summary"] = {
         "eligible": len(eligible), "passed": successes,
         "failed": sum(e["status"] == "failed" for e in eligible),
-        "unavailable": len(episodes) - len(eligible),
+        "unavailable": sum(e["status"] == "unavailable" for e in episodes),
+        "pending": sum(e["status"] == "pending" for e in episodes),
         "completion_rate": round(successes / len(eligible), 3) if eligible else None,
         "physical_actions": total_physical,
         "rejected_proposals": sum(sum(a.get("status") == "rejected"
