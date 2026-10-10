@@ -737,6 +737,36 @@ def _reconcile_user_goals(execution):
         title = str(goal.get("title") or "")
         normalized = title.lower().strip()
 
+        result = (execution or {}).get("result") or {}
+        acted = (execution or {}).get("plan") or {}
+        if normalized == "chop a log":
+            if (
+                execution.get("ok")
+                and acted.get("action") == "mine"
+                and re.search(r"block_mined\\|block=minecraft:[a-z_]+_log(?:\\||$)",
+                              str(result.get("reason") or ""))
+            ):
+                store.update_goal(goal["id"], status="completed")
+                messages.append("chopped a log, task done")
+            continue
+
+        match_pick = re.fullmatch(
+            r"craft a (wooden|stone|iron|golden|diamond|netherite) pickaxe",
+            normalized,
+        )
+        if match_pick:
+            # Already carrying a pickaxe does not satisfy "make another".
+            # Completion requires proof that this execution crafted one.
+            if (
+                execution.get("ok")
+                and acted.get("action") == "craft"
+                and str(result.get("item") or "") ==
+                    "minecraft:" + match_pick.group(1) + "_pickaxe"
+            ):
+                store.update_goal(goal["id"], status="completed")
+                messages.append("crafted a " + match_pick.group(1) + " pickaxe")
+            continue
+
         match = re.fullmatch(r"gather\s+(\d+)\s+logs?", normalized)
         if match:
             target = int(match.group(1))
@@ -2035,8 +2065,26 @@ async def fast_task_intent(text):
             if goal["source"] == "user"
         ]
         return max(user_goals, key=lambda goal: int(goal["id"]), default=None)
+    # A user instruction embedded in corrective feedback is still a task.
+    # Do not lose it merely because the sentence begins "you can't ...".
+    if (
+        re.search(r"\b(?:use|with)\b.{0,45}\baxe\b", normalized)
+        and re.search(r"\b(?:chop|cut|mine|break)\b.{0,45}\b(?:logs?|trees?|wood)\b", normalized)
+    ):
+        return _ensure_user_goal("Chop a log", text, 9)
+
     if not _looks_like_direct_request(text):
         return None
+
+    if re.search(
+        r"\b(?:wooden|stone|iron|golden|diamond|netherite)\s+pickaxe\b",
+        normalized,
+    ) and re.search(r"\b(?:make|craft|get|obtain)\b", normalized):
+        material = re.search(
+            r"\b(wooden|stone|iron|golden|diamond|netherite)\s+pickaxe\b",
+            normalized,
+        ).group(1)
+        return _ensure_user_goal(f"Craft a {material} pickaxe", text, 9)
 
     if (
         re.search(r"\b(?:make|craft|get|obtain)\s+(?:an?\s+)?(?:wooden|stone|iron|golden|diamond|netherite)?\s*axe\b", normalized)
