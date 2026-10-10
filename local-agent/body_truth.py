@@ -21,11 +21,11 @@ CLAIM = re.compile(
 )
 PHYSICAL_VERBS = ("crafted", "made", "got", "built", "placed", "mined", "chopped", "collected")
 IMPLICIT_CLAIM = re.compile(
-    r"^(?:(?:already|just|finally)\\s+)?(?:got|crafted|made|finished)\\b"
-    r"|\\b(?:is|it's|its)\\s+(?:finished|ready|done)\\b",
+    r"^(?:(?:already|just|finally)\s+)?(?:got|crafted|made|finished)\b"
+    r"|\b(?:is|it's|its)\s+(?:finished|ready|done)\b",
     re.I,
 )
-NEGATION = re.compile(r"\\b(?:not|never|haven't|hasn't|didn't|can't|couldn't)\\b", re.I)
+NEGATION = re.compile(r"\b(?:not|never|haven't|hasn't|didn't|can't|couldn't)\b", re.I)
 
 
 def target_from_goal(goal):
