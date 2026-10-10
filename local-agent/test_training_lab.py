@@ -571,6 +571,25 @@ class TrainingLabRegressions(unittest.TestCase):
             "result": {"state": "COMPLETED"}
         })[0])
 
+    def test_text_only_exploration_uses_models_actual_confirmed_choice(self):
+        world = FakePhysicalWorld()
+        scenario = lab._exploration_challenge(world, world.snapshot())
+        destinations = scenario.target["standable_candidates"]
+        self.assertGreaterEqual(len(destinations), 2)
+        candidate = destinations[-1]
+        proposal = {
+            "action": "move_to",
+            "hypothesis": "I will explore verified site " + str(candidate),
+        }
+        bound = lab._ground_confirmed_coordinates(proposal, scenario)
+        self.assertEqual([bound[k] for k in ("x", "y", "z")], candidate)
+        self.assertEqual(lab._plan_allowed(bound, scenario), (True, "ok"))
+        guessed = lab._ground_confirmed_coordinates({
+            "action": "move_to",
+            "hypothesis": "Explore site [999, 64, 999]"
+        }, scenario)
+        self.assertEqual(lab._plan_allowed(guessed, scenario)[1], "missing_xyz")
+
     def test_unchanged_terrain_cannot_drive_infinite_observe_orient_loop(self):
         class NoPossibleGround(FakePhysicalWorld):
             def find(self, block_id, radius=7):
