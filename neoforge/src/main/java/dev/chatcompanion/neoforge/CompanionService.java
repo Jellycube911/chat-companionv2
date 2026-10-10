@@ -55,6 +55,9 @@ public final class CompanionService implements AutoCloseable {
     private final ConcurrentHashMap<UUID, Long> commandSequences = new ConcurrentHashMap<>();
     private final Map<UUID, PhysicalJob> work = new HashMap<>();
     private final Map<UUID, PlacementJob> placements = new HashMap<>();
+    // World-observed distance progress for each physical mining approach.
+    // Reset whenever the job ID changes; never infer success from navigation.
+    private final Map<UUID, MiningApproach> miningApproaches = new HashMap<>();
     private final ExecutorService io = new ThreadPoolExecutor(4, 4, 0, TimeUnit.MILLISECONDS,
             new ArrayBlockingQueue<>(256), r -> { Thread t = new Thread(r, "chat-companion-io"); t.setDaemon(true); return t; }, new ThreadPoolExecutor.AbortPolicy());
     private final CompletableFuture<String> contextId;
@@ -85,6 +88,7 @@ public final class CompanionService implements AutoCloseable {
         PhysicalJob progress(float next, int count) { return new PhysicalJob(companion, jobId, generation, type, block, initial, target, radius, limit, started, next, count); }
     }
     private record PlacementJob(BlockPos block, int slot, Direction face) {}
+    private record MiningApproach(UUID jobId, double bestDistance, long lastImprovementTick) {}
 
     CompanionService(MinecraftServer server, UUID epoch) {
         this.server = server; this.runtimeEpoch = epoch;
@@ -332,13 +336,17 @@ public final class CompanionService implements AutoCloseable {
                 if (companion != null && job.type() == CompanionEntity.JobType.MINE) {
                     clearBreakProgress(companion, job, (ServerLevel) companion.level());
                 }
+                miningApproaches.remove(owner);
                 work.remove(owner); placements.remove(owner);
                 if (companion != null) companion.stop("job_invalidated");
                 continue;
             }
             ServerLevel world = (ServerLevel) companion.level();
             if (world.getGameTime() - job.started() > 600) {
-                if (job.type() == CompanionEntity.JobType.MINE) clearBreakProgress(companion, job, world);
+                if (job.type() == CompanionEntity.JobType.MINE) {
+                    clearBreakProgress(companion, job, world);
+                    miningApproaches.remove(owner);
+                }
                 companion.failJob("task_deadline"); work.remove(owner); continue;
             }
             if (job.type() == CompanionEntity.JobType.MINE) tickMine(owner, companion, job, world);
@@ -354,11 +362,31 @@ public final class CompanionService implements AutoCloseable {
         }
 
         if (!withinBlockReach(companion, job.block())) {
+            // A target found by scanning may be buried far below Chat or be
+            // behind unwalkable terrain. Mine only after physical reach.
+            // The normal 600-tick deadline previously let the agent repeat
+            // a motionless 30-second approach indefinitely.
+            long tick = world.getGameTime();
+            double distance = Math.sqrt(companion.getEyePosition().distanceToSqr(
+                    Vec3.atCenterOf(job.block())));
+            MiningApproach approach = miningApproaches.get(owner);
+            if (approach == null || !approach.jobId().equals(job.jobId())
+                    || distance <= approach.bestDistance() - 0.35) {
+                approach = new MiningApproach(job.jobId(), distance, tick);
+                miningApproaches.put(owner, approach);
+            } else if (tick - approach.lastImprovementTick() >= 120) {
+                clearBreakProgress(companion, job, world);
+                companion.failJob("mining_approach_stalled");
+                work.remove(owner);
+                miningApproaches.remove(owner);
+                return;
+            }
             companion.jobProgress(0.0F, "approaching_block");
             moveNearBlock(companion, job.block(), world);
             return;
         }
 
+        miningApproaches.remove(owner);
         companion.getNavigation().stop();
         lookAtBlock(companion, job.block());
         // Surface the actual block occluding the ray. Choosing to remove it
