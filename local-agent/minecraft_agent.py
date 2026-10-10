@@ -914,7 +914,7 @@ def _reconcile_user_goals(execution):
             continue
 
         match = re.fullmatch(r"gather\s+(\d+)\s+logs?", normalized)
-        if match and inventory:
+        if match and "inventory" in after:
             target = int(match.group(1))
             count = _inventory_count(
                 inventory,
@@ -1274,6 +1274,15 @@ def _target_failure_needs_replan(execution):
     plan = (execution or {}).get("plan") or {}
     if plan.get("action") == "craft":
         return (execution or {}).get("ok") is False
+    if plan.get("action") in {"move_to", "move_forward"} and execution.get("ok") is False:
+        before = (execution.get("before") or {}).get("state") or {}
+        after = (execution.get("after") or {}).get("state") or {}
+        try:
+            start, end = before["pos"], after["pos"]
+            if math.dist([float(v) for v in start], [float(v) for v in end]) < 0.25:
+                return True
+        except (KeyError, TypeError, ValueError):
+            pass
     reason = str(result.get("error") or result.get("reason") or "")
     if plan.get("action") == "place":
         return (
@@ -1284,7 +1293,7 @@ def _target_failure_needs_replan(execution):
             )
         )
     return reason in {
-        "target_block_mismatch", "target_block_is_air", "destination_occupied",
+        "already_at_destination", "target_block_mismatch", "target_block_is_air", "destination_occupied",
         "mining_alignment_timeout", "mining_approach_stalled",
         "mining_no_standable_approach", "task_deadline",
     } or reason.startswith("mining_blocked|")
@@ -2681,6 +2690,11 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         (g for g in store.list_goals("active", 4)
          if g.get("source") != "system"), None
     )
+    # Auditable provenance: the host validates but never authors the
+    # mining/crafting target for this autonomous planning lane.
+    log_event("practice_host", "decision_provenance",
+              origin="qwen", plan=plan,
+              user_goal_id=(user_goal or {}).get("id"))
     _brain_console_decision(runtime, plan, visible_goal)
     runtime["physical_action_active"] = True
     try:
