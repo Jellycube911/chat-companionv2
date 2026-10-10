@@ -8,6 +8,116 @@ import practice_engine as practice
 
 
 class PracticeRegressions(unittest.TestCase):
+    def test_another_wooden_pickaxe_is_a_persistent_user_goal(self):
+        with patch.object(agent, "_remember_behavior_feedback"), patch.object(
+            agent, "_ensure_user_goal",
+            return_value={"id": 31, "title": "Craft a wooden pickaxe"},
+        ) as make_goal:
+            goal = asyncio.run(agent.fast_task_intent(
+                "make another wooden pickaxe now"
+            ))
+        self.assertEqual(goal["title"], "Craft a wooden pickaxe")
+        make_goal.assert_called_once_with(
+            "Craft a wooden pickaxe", "make another wooden pickaxe now", 9
+        )
+
+    def test_axe_chopping_correction_is_an_actual_user_goal(self):
+        msg = "ok so u cant do that, atleast use that wooden axe to cut logs now"
+        with patch.object(agent, "_remember_behavior_feedback"), patch.object(
+            agent, "_ensure_user_goal",
+            return_value={"id": 32, "title": "Chop a log"},
+        ) as make_goal:
+            goal = asyncio.run(agent.fast_task_intent(msg))
+        self.assertEqual(goal["title"], "Chop a log")
+        make_goal.assert_called_once_with("Chop a log", msg, 9)
+
+    def test_requested_extra_pickaxe_needs_a_new_verified_craft(self):
+        goal = {"id": 31, "source": "user", "title": "Craft a wooden pickaxe"}
+        inventory = [{"item": "minecraft:wooden_pickaxe", "count": 1}]
+        with patch.object(agent.store, "list_goals", return_value=[goal]), patch.object(
+            agent.store, "update_goal"
+        ) as update:
+            # Carrying a pickaxe before the command must never finish it.
+            self.assertEqual(agent._reconcile_user_goals({
+                "after": {"inventory": inventory}
+            }), [])
+            update.assert_not_called()
+            completed = agent._reconcile_user_goals({
+                "ok": True, "plan": {"action": "craft"},
+                "result": {"ok": True, "item": "minecraft:wooden_pickaxe"},
+                "after": {"inventory": inventory},
+            })
+            self.assertTrue(completed)
+            update.assert_called_once_with(31, status="completed")
+
+    def test_scans_turn_into_new_axe_experiment_not_same_scan(self):
+        now = agent.time.monotonic()
+        runtime = {
+            "awareness": {"state": {"x": 5.5, "z": 10.5}},
+            "invalid_targets": {},
+            "last_resource_scan": {
+                "at": now, "origin": {"x": 5.5, "z": 10.5},
+                "blocks": [
+                    {"type": "minecraft:jungle_log",
+                     "pos": [8, 70, 10], "distance": 3},
+                    {"type": "minecraft:jungle_log",
+                     "pos": [9, 70, 11], "distance": 4},
+                ],
+            },
+        }
+        goal = {"id": 32, "source": "user", "title": "Chop a log"}
+        inventory = [{"item": "minecraft:wooden_axe", "count": 1}]
+        selected = agent._material_action_from_scan(runtime, goal, inventory)
+        self.assertEqual(selected["action"], "mine")
+        self.assertEqual(selected["expected_block"], "minecraft:jungle_log")
+        self.assertEqual(selected["tool"], "minecraft:wooden_axe")
+        self.assertEqual(selected["goal_id"], 32)
+        runtime["invalid_targets"][agent._plan_target_key(selected)] = (
+            now, "mining_blocked|block=minecraft:vine"
+        )
+        alternate = agent._material_action_from_scan(runtime, goal, inventory)
+        self.assertEqual(alternate["action"], "mine")
+        self.assertNotEqual(
+            [alternate["x"], alternate["y"], alternate["z"]],
+            [selected["x"], selected["y"], selected["z"]],
+        )
+
+    def test_chopping_goal_requires_a_confirmed_mined_log(self):
+        goal = {"id": 32, "source": "user", "title": "Chop a log"}
+        with patch.object(agent.store, "list_goals", return_value=[goal]), patch.object(
+            agent.store, "update_goal"
+        ) as update:
+            self.assertEqual(agent._reconcile_user_goals({
+                "ok": False, "plan": {"action": "mine"},
+                "result": {"state": "FAILED", "reason": "mining_blocked|block=minecraft:vine"},
+            }), [])
+            update.assert_not_called()
+            msgs = agent._reconcile_user_goals({
+                "ok": True, "plan": {"action": "mine"},
+                "result": {"state": "COMPLETED", "reason":
+                           "block_mined|block=minecraft:jungle_log|tool=minecraft:wooden_axe|break_ticks=14"},
+            })
+            self.assertEqual(msgs, ["chopped a log, task done"])
+            update.assert_called_once_with(32, status="completed")
+
+    def test_brain_console_reports_goal_action_and_verification(self):
+        import contextlib
+        import io
+        stream = io.StringIO()
+        runtime = {}
+        with patch.object(agent, "log_event"), contextlib.redirect_stdout(stream):
+            agent._brain_console_decision(runtime, {
+                "action": "mine", "intent": "chop observed log",
+                "hypothesis": "mine observed wood", "x": 8, "y": 70, "z": 10,
+            }, {"title": "Chop a log"})
+            agent._brain_console_result({"action": "mine"}, {
+                "ok": True, "result": {"reason": "block_mined"},
+            })
+        output = stream.getvalue()
+        self.assertIn("[BRAIN] GOAL: Chop a log", output)
+        self.assertIn("[BRAIN] TEST: mine observed wood", output)
+        self.assertIn("[BRAIN] SUCCESS: mine -> block_mined", output)
+
     def test_near_standable_destination_is_allowed(self):
         before = {"state": {"pos": [0.0, 64.0, 0.0]}, "inventory": []}
         calls = []
