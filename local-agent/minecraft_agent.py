@@ -1127,13 +1127,14 @@ def _recover_blocked_craft(goal, inventory, runtime):
 
 def _workstation_probe():
     """Observe placed tables instead of assuming one is present from chat."""
-    found = _post("/scan-blocks", {
+    found = _post("/find-blocks", {
         "exact": ["minecraft:crafting_table"],
         "radius": 8,
         "limit": 8,
     })
     if not isinstance(found, dict) or found.get("ok") is False:
-        return []
+        log_event("practice_host", "workstation_probe_failed", result=found)
+        return None
     return [
         block for block in found.get("blocks", [])
         if block.get("type") == "minecraft:crafting_table"
