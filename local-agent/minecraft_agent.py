@@ -1351,6 +1351,38 @@ def _plan_target_key(plan):
     return f"{action}@{xyz}"
 
 
+def _mining_obstruction_recovery(runtime, goal):
+    """Clear only a harmless, observed vine, then retry the blocked log."""
+    pending = runtime.get("pending_mining_obstruction") or {}
+    if time.monotonic() - float(pending.get("at") or 0) > 90:
+        runtime.pop("pending_mining_obstruction", None)
+        return None
+    original = pending.get("original") or {}
+    if not original or str(original.get("expected_block") or "").endswith("_log") is False:
+        return None
+    if goal and goal.get("source") == "user" and goal.get("title") != "Chop a log":
+        return None
+    blocker = pending.get("blocker") or {}
+    if blocker.get("type") != "minecraft:vine":
+        return None
+    recovery = {
+        "action": "mine",
+        "intent": "clear vine obstructing observed log",
+        "hypothesis": "removing the server-observed vine opens line of sight to the target log",
+        "x": blocker.get("x"), "y": blocker.get("y"), "z": blocker.get("z"),
+        "expected_block": "minecraft:vine",
+    }
+    if goal and goal.get("source") == "user":
+        recovery["goal_id"] = goal.get("id")
+        recovery["goal_reason"] = "the observed vine blocks the specific log Alik wants chopped"
+    invalid = runtime.setdefault("invalid_targets", {})
+    key = _plan_target_key(recovery)
+    if key in invalid and time.monotonic() - invalid[key][0] < _invalid_target_ttl(key):
+        runtime.pop("pending_mining_obstruction", None)
+        return None
+    return recovery
+
+
 def _material_action_from_scan(runtime, goal, inventory):
     """Convert observed blocks into a physical experiment, not another scan."""
     scan = runtime.get("last_resource_scan") or {}
@@ -1589,6 +1621,13 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
             return {"ok": False, "status": "planner_backoff"}
 
     if continuation is None and source == "practice":
+        obstacle_followup = _mining_obstruction_recovery(
+            runtime, active_user_goal
+        )
+        if obstacle_followup:
+            continuation = obstacle_followup
+            log_event("practice_host", "clear_observed_obstruction", plan=continuation)
+    if continuation is None and source == "practice":
         scan_followup = _material_action_from_scan(
             runtime, active_user_goal, awareness_inventory
         )
@@ -1784,6 +1823,38 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         result.get("error") or result.get("reason")
         or execution.get("error") or ""
     )
+    if plan.get("action") == "mine":
+        if execution.get("ok") and str(plan.get("expected_block") or "") == "minecraft:vine":
+            pending = runtime.pop("pending_mining_obstruction", None) or {}
+            original = pending.get("original") or {}
+            if original:
+                runtime.setdefault("invalid_targets", {}).pop(
+                    _plan_target_key(original), None
+                )
+                log_event("practice_host", "obstruction_cleared", original=original)
+        elif not execution.get("ok") and str(plan.get("expected_block") or "") == "minecraft:vine":
+            runtime.pop("pending_mining_obstruction", None)
+        elif not execution.get("ok") and reason.startswith("mining_blocked|"):
+            parts = dict(
+                field.split("=", 1)
+                for field in reason.split("|")[1:]
+                if "=" in field
+            )
+            if parts.get("block") == "minecraft:vine":
+                try:
+                    x, y, z = [int(value) for value in parts["at"].split(",")]
+                except (KeyError, ValueError, TypeError):
+                    pass
+                else:
+                    runtime["pending_mining_obstruction"] = {
+                        "at": time.monotonic(),
+                        "original": dict(plan),
+                        "blocker": {"type": "minecraft:vine", "x": x, "y": y, "z": z},
+                    }
+                    log_event(
+                        "practice_host", "observed_mining_obstruction",
+                        target=plan, blocker=runtime["pending_mining_obstruction"]["blocker"],
+                    )
     if user_goal and plan.get("action") == "craft" and _is_table_prerequisite_failure(execution):
         runtime["pending_craft"] = {
             "goal_id": user_goal.get("id"), "plan": dict(plan)
