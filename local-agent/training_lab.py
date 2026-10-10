@@ -405,8 +405,15 @@ def _ground_confirmed_coordinates(plan, challenge):
     if all(plan.get(k) is not None for k in ("x", "y", "z")):
         return plan
     target = challenge.target.get("pos")
-    if not isinstance(target, (list, tuple)) or len(target) != 3:
-        return plan
+    candidates = ([target] if isinstance(target, (list, tuple))
+                  and len(target) == 3 else [])
+    if plan.get("action") == "move_to":
+        # Text-only directions are accepted only when they match a specific
+        # previously world-verified standing spot. In exploration Qwen has
+        # several options; the parser must not pick one for it.
+        candidates = list(challenge.target.get("standable_candidates") or [])
+        if challenge.name == "navigate":
+            candidates = [target]
     text = str(plan.get("hypothesis") or "")
     matches = re.findall(
         r"\[\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*\]",
@@ -414,7 +421,8 @@ def _ground_confirmed_coordinates(plan, challenge):
     )
     for match in matches:
         observed = [int(v) for v in match]
-        if observed == list(target):
+        if any(isinstance(p, (list, tuple)) and list(p) == observed
+               for p in candidates):
             fixed = dict(plan)
             for axis, value in zip(("x", "y", "z"), observed):
                 if fixed.get(axis) is None:
