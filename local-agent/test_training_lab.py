@@ -176,6 +176,25 @@ class TrainingLabRegressions(unittest.TestCase):
                             "test", {"pos": known},
                             (plan["action"],), "minecraft:overworld")), (True, "ok"))
 
+    def test_old_schema_only_memories_are_ignored_without_deleting_them(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = MemoryStore(Path(tmp) / "memory.sqlite3")
+            db.record_skill_trial(
+                "training.observe", "find dirt", json.dumps({
+                    "experiments": [{"status": "rejected",
+                                     "reason": "empty_scan_query"}]}),
+                "old interface rejection", False)
+            db.record_skill_trial(
+                "training.observe", "scan stone", json.dumps({
+                    "experiments": [{"status": "completed",
+                                     "verified": True}]}),
+                "real observed result", True)
+            with patch.object(lab, "store", db):
+                filtered = lab._verified_history("training.observe")
+            self.assertEqual(len(filtered), 1)
+            self.assertTrue(filtered[0]["success"])
+            self.assertEqual(len(db.recent_skill_trials("training.observe")), 2)
+
     def test_live_training_runner_accepts_wrapped_qwen_actions(self):
         """Replay all five stages through the real normalizing parser."""
         import practice_engine as practice
@@ -226,6 +245,9 @@ class TrainingLabRegressions(unittest.TestCase):
             self.assertTrue(result["summary"]["stopped_due_to_no_actions"])
             self.assertEqual(result["summary"]["physical_actions"], 0)
             self.assertLessEqual(len(result["episodes"]), 15)
+            self.assertFalse(db.recent_skill_trials("training.observe"))
+            self.assertFalse(db.recent_skill_trials("training.orient"))
+            self.assertFalse(db.recent_skill_trials("training.navigate"))
 
     def test_inventory_is_required_for_verified_collection(self):
         task = lab.Challenge("collect", "collect", {
