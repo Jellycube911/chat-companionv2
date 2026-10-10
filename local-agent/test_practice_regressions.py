@@ -387,8 +387,8 @@ class PracticeRegressions(unittest.TestCase):
             return_value=[{"title": "Obtain an axe", "source": "user", "priority": 9}],
         ):
             reply = agent._current_activity_text({"awareness": {"state": {"jobActive": False}}})
-            self.assertIn("planning", reply)
-            self.assertNotIn("working on", reply)
+            self.assertIn("working on wooden axe", reply)
+            self.assertIn("not crafted yet", reply)
 
     def test_unverified_chat_and_movement_corrections(self):
         self.assertTrue(agent._is_movement_feedback("u didnt freaking move"))
