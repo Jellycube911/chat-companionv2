@@ -298,14 +298,35 @@ def parse_plan(text):
         return None
 
     plan["action"] = action
-    if action == "scan_blocks" and isinstance(plan.get("query"), dict):
-        # Local models often echo the observation format {"query": {...}}
-        # instead of the primitive schema. This is a lossless argument
-        # adaptation, not a new gameplay action or inferred coordinate.
-        nested = plan["query"]
-        for field in ("contains", "exact", "radius", "limit", "exposed_only"):
-            if field not in plan and field in nested:
-                plan[field] = nested[field]
+    # Local models output a variety of equivalent JSON wrappers.
+    # Normalize syntax here rather than punishing correct intentions as
+    # failed Minecraft experiments. The executor still validates targets
+    # against real server observations before physical actions.
+    if action == "scan_blocks":
+        for wrapper in ("query", "scan_blocks"):
+            nested = plan.get(wrapper)
+            if isinstance(nested, dict):
+                for field in ("contains", "exact", "radius", "limit", "exposed_only"):
+                    if field not in plan and field in nested:
+                        plan[field] = nested[field]
+    if action in {"mine", "move_to", "look_at"}:
+        nested = plan.get(action)
+        if isinstance(nested, dict):
+            for field in ("x", "y", "z"):
+                if plan.get(field) is None and nested.get(field) is not None:
+                    plan[field] = nested[field]
+        # Alternate coordinate representations from Qwen are equivalent
+        # only when explicitly three numeric values; never guess missing axes.
+        if not all(plan.get(k) is not None for k in ("x", "y", "z")):
+            for wrapper in ("target_pos", "target"):
+                candidate = plan.get(wrapper)
+                if (isinstance(candidate, (tuple, list)) and len(candidate) == 3
+                        and all(isinstance(v, (int, float)) and
+                                not isinstance(v, bool) and math.isfinite(v)
+                                for v in candidate)):
+                    for axis, number in zip(("x", "y", "z"), candidate):
+                        plan.setdefault(axis, number)
+                    break
     plan["intent"] = str(plan.get("intent") or action).strip().lower()[:240]
     plan["hypothesis"] = str(
         plan.get("hypothesis") or f"{action} will advance the current goal"
