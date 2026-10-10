@@ -182,8 +182,9 @@ def _walkable(world, xyz):
     support = world.at(x, y - 1, z)
     if any(a.get("ok") is False for a in (feet, head, support)):
         return False
-    return (bool(feet.get("air") or feet.get("replaceable"))
-            and bool(head.get("air") or head.get("replaceable"))
+    # The normal move_to primitive rejects occupied feet coordinates, even
+    # for replaceable plants. Match that executor contract exactly.
+    return (bool(feet.get("air")) and bool(head.get("air"))
             and bool(support.get("solid_support_up")))
 
 
