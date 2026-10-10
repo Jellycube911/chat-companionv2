@@ -696,6 +696,12 @@ def skills(
             progress="cancelled by brain",
         )
 
+    # Never allow a model to complete a gameplay objective through
+    # prewritten gather/craft/build scripts. Keep status/list/cancel for
+    # diagnosing historical tasks without losing their SQLite records.
+    if action == "start":
+        return {"ok": False, "error":
+                "legacy_scripted_skills_disabled: propose primitive actions through Qwen"}
     if not skill:
         return {"ok": False, "error": "start requires skill"}
 
