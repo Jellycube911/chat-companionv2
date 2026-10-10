@@ -82,6 +82,26 @@ class PracticeRegressions(unittest.TestCase):
             [selected["x"], selected["y"], selected["z"]],
         )
 
+    def test_mining_obstruction_only_clears_observed_vines(self):
+        now = agent.time.monotonic()
+        original = {"action": "mine", "intent": "chop observed log",
+                    "expected_block": "minecraft:jungle_log",
+                    "x": 208, "y": 70, "z": -112}
+        runtime = {"pending_mining_obstruction": {
+            "at": now, "original": original,
+            "blocker": {
+                "type": "minecraft:vine", "x": 208, "y": 71, "z": -113
+            },
+        }}
+        goal = {"source": "user", "id": 32, "title": "Chop a log"}
+        plan = agent._mining_obstruction_recovery(runtime, goal)
+        self.assertEqual(plan["action"], "mine")
+        self.assertEqual(plan["expected_block"], "minecraft:vine")
+        self.assertEqual([plan["x"], plan["y"], plan["z"]], [208, 71, -113])
+        self.assertEqual(plan["goal_id"], 32)
+        runtime["pending_mining_obstruction"]["blocker"]["type"] = "minecraft:stone"
+        self.assertIsNone(agent._mining_obstruction_recovery(runtime, goal))
+
     def test_chopping_goal_requires_a_confirmed_mined_log(self):
         goal = {"id": 32, "source": "user", "title": "Chop a log"}
         with patch.object(agent.store, "list_goals", return_value=[goal]), patch.object(
