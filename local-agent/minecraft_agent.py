@@ -695,6 +695,14 @@ def build_practice_plan_input(runtime, directive=None):
             "Inventoried resources should be used before gathering more."
         )
     parts.append(
+        "USER STANDING GUIDANCE: Work independently toward an assigned objective. "
+        "After a successful block scan, use the observed coordinates for a "
+        "physical experiment, not the same scan over and over. If blocked, "
+        "try a different reachable target or change the approach. "
+        "Show concise decisions and verified results in the brain console. "
+        "Do not confuse a scanned resource with an obtained resource."
+    )
+    parts.append(
         "Choose ONE next primitive that best advances the current user directive "
         "or, if there is none, the highest-priority active goal. "
         "For every action supporting the active USER goal, include numeric goal_id "
@@ -2136,7 +2144,47 @@ def _looks_like_direct_request(text):
     )
 
 
+def _remember_behavior_feedback(text):
+    """Persist explicit user preferences; these are not physical success claims."""
+    normalized = _normalize_request_text(text)
+    if (
+        ("dont want to tell" in normalized or "don't want to tell" in normalized
+         or "do everything" in normalized or "autonomy" in normalized)
+        and ("yourself" in normalized or "by urself" in normalized or "autonomy" in normalized
+             or "everything" in normalized)
+    ):
+        store.remember(
+            "lesson", "user.agent_autonomy",
+            "Alik wants the companion to pursue assigned goals independently: "
+            "take the next testable action after observation, avoid repeating "
+            "identical scans, and learn from observed failures. No need to ask "
+            "Alik for each primitive.", 9,
+        )
+        store.record_event("user_feedback", "Alik wants stronger agent autonomy")
+    if (
+        ("companion brain" in normalized and
+         ("see" in normalized or "show" in normalized))
+        or ("thinking and doing" in normalized)
+    ):
+        store.remember(
+            "lesson", "user.agent_visibility",
+            "Show the current goal, proposed action, hypothesis and observed "
+            "result in the local brain console. Do not fabricate internal "
+            "thoughts or claim action success before Minecraft verifies it.", 9,
+        )
+        store.record_event("user_feedback", "Alik wants visible agent action decisions")
+    if "self learning" in normalized or "self-learning" in normalized:
+        store.remember(
+            "lesson", "user.agent_learning",
+            "Self-learning should update behavior from physical experiment "
+            "results, not count repeated scans as skill progress; prefer "
+            "testing a new action when scans already revealed targets.", 9,
+        )
+        store.record_event("user_feedback", "Alik wants stronger self-learning")
+
+
 async def fast_task_intent(text):
+    _remember_behavior_feedback(text)
     normalized = _normalize_request_text(text)
     if normalized in {"make it", "craft it", "get it"}:
         user_goals = [
