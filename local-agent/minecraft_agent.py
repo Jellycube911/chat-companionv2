@@ -736,6 +736,28 @@ def build_practice_plan_input(runtime, directive=None):
         )
 
     goal = next((g for g in goals if g.get("source") == "user"), None)
+    obstacle = _mining_obstruction_recovery(runtime, goal)
+    if obstacle:
+        parts.append(
+            "CURRENT OBSERVED OBSTRUCTION, HIGH PRIORITY: "
+            + json.dumps({
+                "original_target": obstacle["original"],
+                "line_of_sight_blocker": obstacle["blocker"],
+                "failed_experiments": obstacle.get("attempted", [])[-4:],
+            }, ensure_ascii=False)[:1400]
+        )
+        parts.append(
+            "CAUSAL REASONING: your intended action failed because Minecraft "
+            "observed another block between your eyes and your target. "
+            "The blocker is not the target. Decide ONE hypothesis: mine the "
+            "observed blocker (exact type and coordinates), try an alternative "
+            "standable viewpoint, or inspect/abandon if removal seems unsafe. "
+            "You are NOT being ordered to mine it. If you remove it, Minecraft "
+            "must confirm success; only then reconsider the original target. "
+            "You may not invent another block coordinate. Include goal_id and "
+            "goal_reason for a prerequisite action. If previous experiments "
+            "failed, change strategy rather than repeating a failed mine."
+        )
     if goal and str(goal.get("title") or "").lower() == "craft a wooden pickaxe":
         parts.append(
             "UNTESTED VANILLA RECIPE HYPOTHESIS for a wooden pickaxe: "
@@ -1582,42 +1604,140 @@ def _plan_target_key(plan):
     return f"{action}@{xyz}"
 
 
+
 def _mining_obstruction_recovery(runtime, goal):
-    """Clear only a server-observed soft obstruction, not arbitrary blocks."""
+    """Return causal evidence for Qwen, not a scripted block-breaking action.
+
+    This intentionally contains NO lists of 'easy' block types. The server's
+    raycast reports the actual blocker, even in modded worlds. Qwen decides
+    whether to clear it, change vantage, inspect more, or leave it alone.
+    """
     pending = runtime.get("pending_mining_obstruction") or {}
-    if time.monotonic() - float(pending.get("at") or 0) > 90:
+    if not pending:
+        return None
+    if time.monotonic() - float(pending.get("at") or 0) > 120:
         runtime.pop("pending_mining_obstruction", None)
         return None
-    original = pending.get("original") or {}
-    if not original or str(original.get("expected_block") or "").endswith("_log") is False:
-        return None
-    if goal and goal.get("source") == "user" and goal.get("title") != "Chop a log":
-        return None
-    blocker = pending.get("blocker") or {}
-    if blocker.get("type") not in {"minecraft:vine", "minecraft:cocoa"}:
-        return None
-    attempted = pending.setdefault("attempted", [])
-    marker = [blocker.get("x"), blocker.get("y"), blocker.get("z")]
-    if marker in attempted or len(attempted) >= 4:
+    original, blocker = pending.get("original") or {}, pending.get("blocker") or {}
+    if not original or not blocker.get("type"):
         runtime.pop("pending_mining_obstruction", None)
         return None
-    recovery = {
-        "action": "mine",
-        "intent": "clear observed obstruction in front of log",
-        "hypothesis": "removing the server-observed plant opens line of sight to the target log",
-        "x": blocker.get("x"), "y": blocker.get("y"), "z": blocker.get("z"),
-        "expected_block": blocker["type"],
-    }
     if goal and goal.get("source") == "user":
-        recovery["goal_id"] = goal.get("id")
-        recovery["goal_reason"] = "the observed plant blocks the specific log Alik wants chopped"
-    invalid = runtime.setdefault("invalid_targets", {})
-    key = _plan_target_key(recovery)
-    if key in invalid and time.monotonic() - invalid[key][0] < _invalid_target_ttl(key):
+        try:
+            matching = int(original.get("goal_id")) == int(goal.get("id"))
+        except (ValueError, TypeError):
+            matching = _plan_matches_user_goal(original, goal)
+        if not matching:
+            runtime.pop("pending_mining_obstruction", None)
+            return None
+    if len(pending.get("attempted", [])) >= 4:
         runtime.pop("pending_mining_obstruction", None)
+        runtime["planner_backoff_until"] = time.monotonic() + 15
+        log_event("practice_host", "obstruction_experiments_exhausted",
+                  target=original, blocker=blocker)
         return None
-    attempted.append(marker)
-    return recovery
+    return pending
+
+
+def _obstruction_decision_supported(runtime, plan, pending):
+    """Validate the grounding of a local model's proposed recovery experiment.
+
+    Mine is allowed only for the reported obstruction or another positively
+    scanned world block, never an invented coordinate. Navigation is still
+    checked against Minecraft by the primitive action executor.
+    """
+    if not isinstance(plan, dict):
+        return False
+    action = plan.get("action")
+    if action in {"idle", "scan_blocks", "look_at", "move_to", "move_forward"}:
+        return True
+    if action != "mine":
+        return False
+    key = _plan_target_key(plan)
+    if key is None or key == _plan_target_key(pending["original"]):
+        return False
+    blocker = pending["blocker"]
+    try:
+        xyz = [int(math.floor(float(plan[c]))) for c in ("x", "y", "z")]
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+    expected = str(plan.get("expected_block") or "")
+    if (xyz == [blocker.get(c) for c in ("x", "y", "z")]
+            and expected == blocker.get("type")):
+        return True
+    return any(
+        xyz == block.get("pos") and expected == block.get("type")
+        for block in (runtime.get("last_resource_scan") or {}).get("blocks", [])
+        if isinstance(block, dict)
+    )
+
+
+def _obstruction_learning_update(runtime, plan, execution, reason, goal):
+    """Update the evidence chain only after authoritative Minecraft feedback."""
+    pending = runtime.get("pending_mining_obstruction")
+    if not pending or not isinstance(plan, dict):
+        return
+    original = pending.get("original") or {}
+    attempted = pending.setdefault("attempted", [])
+    key = _plan_target_key(plan)
+    latest_key = pending.get("current_action_key")
+    if key is None and plan.get("action") not in {"scan_blocks", "idle", "move_forward", "look_at"}:
+        return
+    if latest_key and key != latest_key and plan.get("action") not in {"scan_blocks", "idle"}:
+        return
+
+    record = {
+        "cause": "obstructed_line_of_sight",
+        "original": {k: original.get(k) for k in ("action", "x", "y", "z", "expected_block")},
+        "blocker": pending.get("blocker"),
+        "experiment": {k: plan.get(k) for k in ("action", "x", "y", "z", "expected_block", "hypothesis")},
+        "verified": execution.get("ok") is True,
+        "outcome": reason[:180],
+    }
+    store.record_event("obstruction_experiment", json.dumps(record, ensure_ascii=False)[:1700])
+    log_event("practice_host", "obstruction_experiment_result", **record)
+    pending.pop("current_action_key", None)
+
+    if execution.get("ok") is True and plan.get("action") == "mine":
+        # The block actually changed. Re-examine the original goal target,
+        # without claiming it is already reachable or complete.
+        runtime.pop("pending_mining_obstruction", None)
+        runtime.setdefault("invalid_targets", {}).pop(_plan_target_key(original), None)
+        log_event("practice_host", "obstruction_removed_retest_original",
+                  original=original, result=execution.get("result"))
+        return
+    if execution.get("ok") is True and plan.get("action") == "move_to":
+        # A verified position change can alter line of sight; test it.
+        runtime.pop("pending_mining_obstruction", None)
+        runtime.setdefault("invalid_targets", {}).pop(_plan_target_key(original), None)
+        log_event("practice_host", "obstruction_vantage_changed",
+                  original=original)
+        return
+    if reason.startswith("mining_blocked|"):
+        new_blocker = _parse_observed_blocker(reason)
+        if new_blocker:
+            pending["blocker"] = new_blocker
+            pending["at"] = time.monotonic()
+            return
+    # The hypothesis failed. Keep causal context so Qwen can consider
+    # a different approach next cycle, within a bounded attempt budget.
+    pending["at"] = time.monotonic()
+
+
+def _parse_observed_blocker(reason):
+    if not str(reason).startswith("mining_blocked|"):
+        return None
+    parts = dict(
+        field.split("=", 1) for field in reason.split("|")[1:] if "=" in field
+    )
+    try:
+        coordinates = [int(v) for v in parts["at"].split(",")]
+        if len(coordinates) != 3 or not parts.get("block"):
+            return None
+    except (KeyError, ValueError, TypeError):
+        return None
+    return dict(zip(("x", "y", "z"), coordinates), type=parts["block"])
+
 
 
 def _recent_empty_scans(runtime):
@@ -2054,14 +2174,12 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
             log_event("practice_host", "planner_probe_backoff")
             return {"ok": False, "status": "planner_backoff"}
 
-    if continuation is None and source == "practice":
-        obstacle_followup = _mining_obstruction_recovery(
-            runtime, active_user_goal
-        )
-        if obstacle_followup:
-            continuation = obstacle_followup
-            log_event("practice_host", "clear_observed_obstruction", plan=continuation)
-    if continuation is None and source == "practice":
+    obstacle = _mining_obstruction_recovery(
+        runtime, active_user_goal
+    ) if source == "practice" else None
+    # A reported obstruction takes precedence over the stale positive scan.
+    # Only Qwen chooses the recovery hypothesis, after seeing its evidence.
+    if continuation is None and obstacle is None and source == "practice":
         scan_followup = _material_action_from_scan(
             runtime, active_user_goal, awareness_inventory
         )
@@ -2149,6 +2267,34 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         and plan.get("action") in {"move_to", "move_forward", "look_at"}
         and _goal_navigation_count(runtime, user_goal, awareness_inventory) >= 2
     )
+    if obstacle is not None and continuation is None:
+        if not _obstruction_decision_supported(runtime, plan, obstacle):
+            log_event("practice_host", "obstruction_plan_ungrounded",
+                      proposal=plan, blocker=obstacle.get("blocker"))
+            runtime["planner_backoff_until"] = time.monotonic() + 8.0
+            return {"ok": False, "status": "obstruction_plan_ungrounded",
+                    "plan": plan}
+        if user_goal and user_goal.get("source") == "user":
+            plan["goal_id"] = user_goal["id"]
+            plan["goal_reason"] = (
+                "investigate observed line-of-sight obstruction blocking the active goal"
+            )
+        if plan.get("action") == "mine":
+            blocker = obstacle.get("blocker") or {}
+            # A returned primitive is a hypothesis; the real bridge still
+            # checks actual block identity before mining.
+            if ([plan.get(axis) for axis in ("x", "y", "z")]
+                    == [blocker.get(axis) for axis in ("x", "y", "z")]):
+                plan["expected_block"] = blocker["type"]
+        obstacle["attempted"] = (
+            obstacle.get("attempted", []) + [{
+                "plan": {k: plan.get(k) for k in ("action", "x", "y", "z", "expected_block")},
+                "at": time.monotonic(),
+            }]
+        )[-4:]
+        obstacle["current_action_key"] = _plan_target_key(plan)
+        log_event("practice_host", "obstruction_hypothesis",
+                  blocker=obstacle["blocker"], plan=plan)
     drift = (
         not _plan_matches_user_goal(
             plan, user_goal, directive or _current_user_subgoal(runtime)
@@ -2303,50 +2449,37 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         result.get("error") or result.get("reason")
         or execution.get("error") or ""
     )
-    if plan.get("action") == "mine":
-        if execution.get("ok") and str(plan.get("expected_block") or "") in {"minecraft:vine", "minecraft:cocoa"}:
-            pending = runtime.pop("pending_mining_obstruction", None) or {}
-            original = pending.get("original") or {}
-            if original:
-                runtime.setdefault("invalid_targets", {}).pop(
-                    _plan_target_key(original), None
-                )
-                log_event("practice_host", "obstruction_cleared", original=original)
-        elif not execution.get("ok"):
-            parts = dict(
-                field.split("=", 1)
-                for field in reason.split("|")[1:]
-                if "=" in field
-            ) if reason.startswith("mining_blocked|") else {}
-            blocker = None
-            if parts.get("block") in {"minecraft:vine", "minecraft:cocoa"}:
-                try:
-                    x, y, z = [int(value) for value in parts["at"].split(",")]
-                except (KeyError, ValueError, TypeError):
-                    pass
-                else:
-                    blocker = {"type": parts["block"], "x": x, "y": y, "z": z}
-            clearing = str(plan.get("expected_block") or "") in {
-                "minecraft:vine", "minecraft:cocoa"
-            }
-            pending = runtime.get("pending_mining_obstruction") if clearing else None
-            if pending:
-                marker = [blocker["x"], blocker["y"], blocker["z"]] if blocker else None
-                if (blocker and marker not in pending.get("attempted", [])
-                        and len(pending.get("attempted", [])) < 4):
-                    pending["blocker"] = blocker
-                    pending["at"] = time.monotonic()
-                    log_event("practice_host", "observed_mining_obstruction",
-                              target=pending["original"], blocker=blocker)
-                else:
-                    runtime.pop("pending_mining_obstruction", None)
-            elif not clearing and blocker and str(plan.get("expected_block") or "").endswith("_log"):
-                runtime["pending_mining_obstruction"] = {
-                    "at": time.monotonic(), "original": dict(plan),
-                    "blocker": blocker, "attempted": [],
-                }
-                log_event("practice_host", "observed_mining_obstruction",
-                          target=plan, blocker=blocker)
+    # Treat raycast failures as observations of a causal relationship.
+    # No special lists of vines, stone, modded blocks, or target item kinds.
+    blocker = _parse_observed_blocker(reason) if not execution.get("ok") else None
+    pending = runtime.get("pending_mining_obstruction")
+    was_obstruction_experiment = (
+        obstacle is not None and continuation is None and
+        plan.get("goal_reason", "") ==
+        "investigate observed line-of-sight obstruction blocking the active goal"
+    ) or (
+        obstacle is not None and continuation is None and
+        plan.get("action") in {"scan_blocks", "idle", "move_to", "move_forward", "look_at", "mine"}
+    )
+    if was_obstruction_experiment:
+        _obstruction_learning_update(runtime, plan, execution, reason, user_goal)
+    elif plan.get("action") == "mine" and blocker:
+        runtime["pending_mining_obstruction"] = {
+            "at": time.monotonic(),
+            "original": dict(plan),
+            "blocker": blocker,
+            "attempted": [],
+            "dimension": state.get("dimension"),
+        }
+        store.record_event(
+            "obstruction_observed",
+            json.dumps({
+                "original": plan, "blocker": blocker,
+                "world_dimension": state.get("dimension"),
+            }, ensure_ascii=False)[:1700],
+        )
+        log_event("practice_host", "observed_mining_obstruction",
+                  target=plan, blocker=blocker)
     if user_goal and plan.get("action") == "craft" and _is_table_prerequisite_failure(execution):
         runtime["pending_craft"] = {
             "goal_id": user_goal.get("id"), "plan": dict(plan)
