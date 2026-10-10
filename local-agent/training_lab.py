@@ -948,242 +948,255 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
     stagnant_rounds = 0
     visited_sites = []
     finished_due_to_environment = False
-    for repetition in range(rounds):
-        preferred_resource = None
-        round_actions_start = sum(
-            len([a for a in episode.get("experiments", [])
-                 if a.get("status") in {"completed", "failed", "progress"}])
-            for episode in report["episodes"])
-        # Recalculate from durable gameplay evidence on every round.
-        # When old skills deteriorate, Stage 2 becomes locked again.
-        readiness = assess_training(store, report["episodes"])
-        tasks = CURRICULUM + ("explore",) + (
-            ("stage1_exam",) if readiness["basic_skills_ready_for_exam"]
-            and not readiness["stage_2_unlocked"] else ()) + (
-            ("gather_wood",) if readiness["stage_2_unlocked"] else ())
-        for task in tasks:
-            if task == "explore":
-                # Recovery is not a compulsory extra exercise. It activates
-                # only when the round cannot perform successful navigation
-                # or physical mining. It cannot graduate either skill.
-                round_examples = [e for e in report["episodes"]
-                                  if e.get("round") == repetition + 1]
-                if any(e.get("task") in {"navigate", "mine"}
-                       and e.get("status") == "passed" for e in round_examples):
-                    continue
-            if time.monotonic() - started >= duration_seconds:
-                finished_due_to_time = True
-                break
-            if task == "stage1_exam":
-                from stage1_exam import run_exam
-                report["active_exercise"] = {
-                    "round": repetition + 1, "task": task,
-                    "status": "incomplete_not_scored", "attempts": [],
-                }
-                checkpoint()
-                def exam_step(saved):
-                    report["active_exercise"]["attempts"] = saved
+    try:
+        for repetition in range(rounds):
+            preferred_resource = None
+            round_actions_start = sum(
+                len([a for a in episode.get("experiments", [])
+                     if a.get("status") in {"completed", "failed", "progress"}])
+                for episode in report["episodes"])
+            # Recalculate from durable gameplay evidence on every round.
+            # When old skills deteriorate, Stage 2 becomes locked again.
+            readiness = assess_training(store, report["episodes"])
+            tasks = CURRICULUM + ("explore",) + (
+                ("stage1_exam",) if readiness["basic_skills_ready_for_exam"]
+                and not readiness["stage_2_unlocked"] else ()) + (
+                ("gather_wood",) if readiness["stage_2_unlocked"] else ())
+            for task in tasks:
+                if task == "explore":
+                    # Recovery is not a compulsory extra exercise. It activates
+                    # only when the round cannot perform successful navigation
+                    # or physical mining. It cannot graduate either skill.
+                    round_examples = [e for e in report["episodes"]
+                                      if e.get("round") == repetition + 1]
+                    if any(e.get("task") in {"navigate", "mine"}
+                           and e.get("status") == "passed" for e in round_examples):
+                        continue
+                if time.monotonic() - started >= duration_seconds:
+                    finished_due_to_time = True
+                    break
+                if task == "stage1_exam":
+                    from stage1_exam import run_exam
+                    report["active_exercise"] = {
+                        "round": repetition + 1, "task": task,
+                        "status": "incomplete_not_scored", "attempts": [],
+                    }
                     checkpoint()
-                practical = run_exam(
-                    world, planner, store, max_steps=18,
-                    checkpoint=exam_step)
-                practical["round"] = repetition + 1
-                report["episodes"].append(practical)
-                report.pop("active_exercise", None)
-                checkpoint()
-                print("[TRAIN] stage1_exam %-11s %d actions %s" %
-                      (practical["status"], practical["attempts"],
-                       practical["reason"][:80]), flush=True)
-                if practical["status"] == "pending":
-                    halted_on_pending = True
-                    break
-                continue
-            initial = world.snapshot()
-            challenge = (_exploration_challenge(world, initial, visited_sites)
-                         if task == "explore" else
-                         _select_challenge(
-                             task, world, initial, rng,
-                             preferred_resource if task in {"orient", "mine"}
-                             else None))
-            if challenge is None:
-                record = {"round": repetition + 1, "task": task,
-                          "status": "unavailable", "reason": "no_natural_valid_scenario",
-                          "attempts": 0, "seconds": 0}
-                report["episodes"].append(record)
-                checkpoint()
-                print("[TRAIN] %-8s unavailable (no suitable world observation)" % task,
-                      flush=True)
-                continue
-
-            attempts = []
-            observed_extra = []
-            used = set()
-            outcome = "no_verified_completion"
-            verified = False
-            episode_start = time.monotonic()
-            report["active_exercise"] = {
-                "round": repetition + 1, "task": task,
-                "status": "incomplete_not_scored", "attempts": attempts,
-            }
-            checkpoint()
-            for step in range(max(8, max_steps) if task == "gather_wood" else max_steps):
-                observed = world.snapshot()
-                if observed["state"].get("dimension") != challenge.dimension:
-                    outcome = "dimension_changed"
-                    break
-                if observed["state"].get("jobActive"):
-                    outcome = "world_busy"
-                    break
-                history = _verified_history("training." + task, 12)[-6:]
-                plan = planner.propose(_prompt(
-                    challenge, observed, attempts, history, observed_extra))
-                plan = _ground_confirmed_coordinates(plan, challenge)
-                plan = _bind_observed_mining_identity(plan, challenge, observed_extra)
-                if isinstance(plan, dict) and plan.get("_schema_binding"):
-                    log_event("training", "schema_arguments_grounded",
-                              task=task, action=plan.get("action"),
-                              target=challenge.target.get("pos"))
-                valid, why = _plan_allowed(plan, challenge, observed_extra)
-                fingerprint = json.dumps({
-                    k: (plan or {}).get(k)
-                    for k in ("action", "x", "y", "z", "expected_block",
-                              "expected_contains", "contains", "exact", "radius")
-                }, sort_keys=True)
-                # A repeated proposal is only a repeat if the observations
-                # have not changed. Real location/blocker changes permit a
-                # new experiment without pretending the action improved.
-                evidence_key = json.dumps({
-                    "position": [round(v, 1) for v in _position(observed["state"])],
-                    "blockers": observed_extra,
-                }, sort_keys=True)
-                attempt_key = (fingerprint, evidence_key)
-                repeated = attempt_key in used
-                if repeated:
-                    valid, why = False, "repeat_without_new_evidence"
-                used.add(attempt_key)
-                if not valid:
-                    attempts.append({"step": step + 1, "status": "rejected",
-                                     "reason": why, "plan": plan,
-                                     "feedback": _interface_feedback(why, challenge)})
-                    outcome = why
-                    log_event("training", "proposal_rejected", task=task,
-                              reason=why, plan=plan)
-                    # An identical rejected command has no new information.
-                    # Stop this exercise rather than burn model calls and
-                    # mislabel the tool-interface failure as Minecraft.
+                    def exam_step(saved):
+                        report["active_exercise"]["attempts"] = saved
+                        checkpoint()
+                    practical = run_exam(
+                        world, planner, store, max_steps=18,
+                        checkpoint=exam_step)
+                    practical["round"] = repetition + 1
+                    report["episodes"].append(practical)
+                    report.pop("active_exercise", None)
                     checkpoint()
-                    if repeated:
+                    print("[TRAIN] stage1_exam %-11s %d actions %s" %
+                          (practical["status"], practical["attempts"],
+                           practical["reason"][:80]), flush=True)
+                    if practical["status"] == "pending":
+                        halted_on_pending = True
                         break
                     continue
-                report["active_exercise"]["in_flight_action"] = {
-                    "step": step + 1, "plan": plan, "status": "issued_unverified",
+                initial = world.snapshot()
+                challenge = (_exploration_challenge(world, initial, visited_sites)
+                             if task == "explore" else
+                             _select_challenge(
+                                 task, world, initial, rng,
+                                 preferred_resource if task in {"orient", "mine"}
+                                 else None))
+                if challenge is None:
+                    record = {"round": repetition + 1, "task": task,
+                              "status": "unavailable", "reason": "no_natural_valid_scenario",
+                              "attempts": 0, "seconds": 0}
+                    report["episodes"].append(record)
+                    checkpoint()
+                    print("[TRAIN] %-8s unavailable (no suitable world observation)" % task,
+                          flush=True)
+                    continue
+
+                attempts = []
+                observed_extra = []
+                used = set()
+                outcome = "no_verified_completion"
+                verified = False
+                episode_start = time.monotonic()
+                report["active_exercise"] = {
+                    "round": repetition + 1, "task": task,
+                    "status": "incomplete_not_scored", "attempts": attempts,
                 }
                 checkpoint()
-                # All game actions run through the same physical practice engine.
-                result = world.execute(plan)
-                if result.get("status") == "pending":
-                    print("[TRAIN] %-8s waiting for Minecraft physical job..." % task,
-                          flush=True)
-                    result = _settle_pending_job(world, result)
-                after = world.snapshot(allow_busy=True)
-                ok, evidence = _verify(
-                    challenge, observed, after, result, attempts, initial["inventory"])
-                progress = task == "gather_wood" and result.get("ok") and not ok
-                attempts.append({
-                    "step": step + 1,
-                    "status": ("completed" if ok else
-                               "progress" if progress else "failed"),
-                    "verified": ok, "hypothesis": plan.get("hypothesis"),
-                    "reason": evidence, "plan": plan,
-                    "result": result.get("result"),
-                })
-                outcome = evidence
-                report["active_exercise"].pop("in_flight_action", None)
-                checkpoint()
-                blocker = _observed_obstruction(result)
-                if blocker and blocker not in observed_extra:
-                    observed_extra.append(blocker)
-                    log_event("training", "occlusion_observed",
-                              task=task, blocker=blocker)
-                log_event("training", "physical_trial",
-                          task=task, verified=ok, evidence=evidence,
-                          action=plan.get("action"))
-                if ok:
-                    verified = True
-                    break
-                # A still-running job may be acting physically; do not launch
-                # another action on top of it or label it a failed skill.
-                if result.get("status") == "pending":
-                    outcome = "physical_job_pending;no_parallel_actions"
-                    break
+                for step in range(max(8, max_steps) if task == "gather_wood" else max_steps):
+                    observed = world.snapshot()
+                    if observed["state"].get("dimension") != challenge.dimension:
+                        outcome = "dimension_changed"
+                        break
+                    if observed["state"].get("jobActive"):
+                        outcome = "world_busy"
+                        break
+                    history = _verified_history("training." + task, 12)[-6:]
+                    plan = planner.propose(_prompt(
+                        challenge, observed, attempts, history, observed_extra))
+                    plan = _ground_confirmed_coordinates(plan, challenge)
+                    plan = _bind_observed_mining_identity(plan, challenge, observed_extra)
+                    if isinstance(plan, dict) and plan.get("_schema_binding"):
+                        log_event("training", "schema_arguments_grounded",
+                                  task=task, action=plan.get("action"),
+                                  target=challenge.target.get("pos"))
+                    valid, why = _plan_allowed(plan, challenge, observed_extra)
+                    fingerprint = json.dumps({
+                        k: (plan or {}).get(k)
+                        for k in ("action", "x", "y", "z", "expected_block",
+                                  "expected_contains", "contains", "exact", "radius")
+                    }, sort_keys=True)
+                    # A repeated proposal is only a repeat if the observations
+                    # have not changed. Real location/blocker changes permit a
+                    # new experiment without pretending the action improved.
+                    evidence_key = json.dumps({
+                        "position": [round(v, 1) for v in _position(observed["state"])],
+                        "blockers": observed_extra,
+                    }, sort_keys=True)
+                    attempt_key = (fingerprint, evidence_key)
+                    repeated = attempt_key in used
+                    if repeated:
+                        valid, why = False, "repeat_without_new_evidence"
+                    used.add(attempt_key)
+                    if not valid:
+                        attempts.append({"step": step + 1, "status": "rejected",
+                                         "reason": why, "plan": plan,
+                                         "feedback": _interface_feedback(why, challenge)})
+                        outcome = why
+                        log_event("training", "proposal_rejected", task=task,
+                                  reason=why, plan=plan)
+                        # An identical rejected command has no new information.
+                        # Stop this exercise rather than burn model calls and
+                        # mislabel the tool-interface failure as Minecraft.
+                        checkpoint()
+                        if repeated:
+                            break
+                        continue
+                    report["active_exercise"]["in_flight_action"] = {
+                        "step": step + 1, "plan": plan, "status": "issued_unverified",
+                    }
+                    checkpoint()
+                    # All game actions run through the same physical practice engine.
+                    result = world.execute(plan)
+                    if result.get("status") == "pending":
+                        print("[TRAIN] %-8s waiting for Minecraft physical job..." % task,
+                              flush=True)
+                        result = _settle_pending_job(world, result)
+                    after = world.snapshot(allow_busy=True)
+                    ok, evidence = _verify(
+                        challenge, observed, after, result, attempts, initial["inventory"])
+                    progress = task == "gather_wood" and result.get("ok") and not ok
+                    attempts.append({
+                        "step": step + 1,
+                        "status": ("completed" if ok else
+                                   "progress" if progress else "failed"),
+                        "verified": ok, "hypothesis": plan.get("hypothesis"),
+                        "reason": evidence, "plan": plan,
+                        "result": result.get("result"),
+                    })
+                    outcome = evidence
+                    report["active_exercise"].pop("in_flight_action", None)
+                    checkpoint()
+                    blocker = _observed_obstruction(result)
+                    if blocker and blocker not in observed_extra:
+                        observed_extra.append(blocker)
+                        log_event("training", "occlusion_observed",
+                                  task=task, blocker=blocker)
+                    log_event("training", "physical_trial",
+                              task=task, verified=ok, evidence=evidence,
+                              action=plan.get("action"))
+                    if ok:
+                        verified = True
+                        break
+                    # A still-running job may be acting physically; do not launch
+                    # another action on top of it or label it a failed skill.
+                    if result.get("status") == "pending":
+                        outcome = "physical_job_pending;no_parallel_actions"
+                        break
 
-            elapsed = time.monotonic() - episode_start
-            if outcome == "physical_job_pending;no_parallel_actions":
-                halted_on_pending = True
-                report["episodes"].append({
-                    "round": repetition + 1, "task": task, "status": "pending",
-                    "reason": outcome, "attempts": len(attempts),
-                    "seconds": round(elapsed, 2), "experiments": attempts,
-                })
+                elapsed = time.monotonic() - episode_start
+                if outcome == "physical_job_pending;no_parallel_actions":
+                    halted_on_pending = True
+                    report["episodes"].append({
+                        "round": repetition + 1, "task": task, "status": "pending",
+                        "reason": outcome, "attempts": len(attempts),
+                        "seconds": round(elapsed, 2), "experiments": attempts,
+                    })
+                    report.pop("active_exercise", None)
+                    checkpoint()
+                    print("[TRAIN] %-8s still physically running; halting safely" % task,
+                          flush=True)
+                    break
+                real_actions = any(a.get("status") in {"completed", "failed", "progress"}
+                                   for a in attempts)
+                _record_episode(challenge, attempts, verified, elapsed, initial, outcome)
+                record = {
+                    "round": repetition + 1, "task": task,
+                    "status": ("passed" if verified else
+                               "failed" if real_actions else "interface_error"),
+                    "attempts": len(attempts), "seconds": round(elapsed, 2),
+                    "reason": outcome, "experiments": attempts,
+                }
+                report["episodes"].append(record)
                 report.pop("active_exercise", None)
                 checkpoint()
-                print("[TRAIN] %-8s still physically running; halting safely" % task,
+                if task == "navigate" and verified:
+                    preferred_resource = {
+                        "type": challenge.target["resource_type"],
+                        "pos": challenge.target["resource_pos"],
+                    }
+                if task in {"explore", "navigate"} and verified:
+                    # Location visits are spatial evidence, not learned routes.
+                    # The next recovery step should prefer genuinely new ground.
+                    visited_sites.append(_position(initial["state"]))
+                    visited_sites.append(_position(world.snapshot()["state"]))
+                print("[TRAIN] %-8s %-11s %d action(s)  %s" %
+                      (task, record["status"], record["attempts"], outcome[:90]),
+                      flush=True)
+            if halted_on_pending or finished_due_to_time:
+                break
+            round_examples = [e for e in report["episodes"]
+                              if e.get("round") == repetition + 1]
+            progressed = any(e.get("task") in {"navigate", "mine", "explore"}
+                             and e.get("status") == "passed" for e in round_examples)
+            stagnant_rounds = 0 if progressed else stagnant_rounds + 1
+            round_actions_end = sum(
+                len([a for a in episode.get("experiments", [])
+                     if a.get("status") in {"completed", "failed", "progress"}])
+                for episode in report["episodes"])
+            if round_actions_end == round_actions_start:
+                unproductive_rounds += 1
+            else:
+                unproductive_rounds = 0
+            # Stop rather than making dozens of LLM calls while the action
+            # interface or local environment cannot support any real trial.
+            if unproductive_rounds >= 3:
+                print("[TRAIN] No executed actions in 3 rounds; stopping to report the blocker.",
                       flush=True)
                 break
-            real_actions = any(a.get("status") in {"completed", "failed", "progress"}
-                               for a in attempts)
-            _record_episode(challenge, attempts, verified, elapsed, initial, outcome)
-            record = {
-                "round": repetition + 1, "task": task,
-                "status": ("passed" if verified else
-                           "failed" if real_actions else "interface_error"),
-                "attempts": len(attempts), "seconds": round(elapsed, 2),
-                "reason": outcome, "experiments": attempts,
-            }
-            report["episodes"].append(record)
-            report.pop("active_exercise", None)
-            checkpoint()
-            if task == "navigate" and verified:
-                preferred_resource = {
-                    "type": challenge.target["resource_type"],
-                    "pos": challenge.target["resource_pos"],
-                }
-            if task in {"explore", "navigate"} and verified:
-                # Location visits are spatial evidence, not learned routes.
-                # The next recovery step should prefer genuinely new ground.
-                visited_sites.append(_position(initial["state"]))
-                visited_sites.append(_position(world.snapshot()["state"]))
-            print("[TRAIN] %-8s %-11s %d action(s)  %s" %
-                  (task, record["status"], record["attempts"], outcome[:90]),
-                  flush=True)
-        if halted_on_pending or finished_due_to_time:
-            break
-        round_examples = [e for e in report["episodes"]
-                          if e.get("round") == repetition + 1]
-        progressed = any(e.get("task") in {"navigate", "mine", "explore"}
-                         and e.get("status") == "passed" for e in round_examples)
-        stagnant_rounds = 0 if progressed else stagnant_rounds + 1
-        round_actions_end = sum(
-            len([a for a in episode.get("experiments", [])
-                 if a.get("status") in {"completed", "failed", "progress"}])
-            for episode in report["episodes"])
-        if round_actions_end == round_actions_start:
-            unproductive_rounds += 1
-        else:
-            unproductive_rounds = 0
-        # Stop rather than making dozens of LLM calls while the action
-        # interface or local environment cannot support any real trial.
-        if unproductive_rounds >= 3:
-            print("[TRAIN] No executed actions in 3 rounds; stopping to report the blocker.",
-                  flush=True)
-            break
-        if stagnant_rounds >= 3:
-            # Do not keep rehearsing observe/orient when no actual resource
-            # or exploratory movement can progress. Report the blocker.
-            finished_due_to_environment = True
-            print("[TRAIN] Three rounds without resource or exploration "
-                  "progress; halting instead of repeating scans.", flush=True)
-            break
+            if stagnant_rounds >= 3:
+                # Do not keep rehearsing observe/orient when no actual resource
+                # or exploratory movement can progress. Report the blocker.
+                finished_due_to_environment = True
+                print("[TRAIN] Three rounds without resource or exploration "
+                      "progress; halting instead of repeating scans.", flush=True)
+                break
+
+    except BaseException as error:
+        # Ctrl+C should preserve a clearly closed partial report; if the
+        # interpreter is killed without cleanup, status remains "running"
+        # and the last atomic checkpoint is still intact.
+        report["status"] = (
+            "interrupted" if isinstance(error, (KeyboardInterrupt, SystemExit))
+            else "error")
+        report["stop_reason"] = type(error).__name__
+        report["ended_at"] = datetime.now(timezone.utc).isoformat()
+        checkpoint()
+        raise
 
     episodes = report["episodes"]
     eligible = [e for e in episodes if e["status"] in {"passed", "failed"}]
