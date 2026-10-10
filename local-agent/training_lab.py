@@ -31,7 +31,7 @@ from memory_store import store
 BASE_DIR = Path(__file__).resolve().parent
 REPORT_DIR = BASE_DIR / "data" / "training_reports"
 CURRICULUM = ("observe", "navigate", "orient", "mine", "collect")
-TRAINING_BUILD = "minecraft-training-lab-v2"
+TRAINING_BUILD = "minecraft-training-lab-v3"
 # Safety filter for selecting a training resource, NOT a gameplay strategy.
 # No chests, machines, crops, player buildings or precious ores are harvested.
 PRACTICE_MATERIALS = ("minecraft:dirt", "minecraft:stone", "minecraft:grass_block",
@@ -194,6 +194,52 @@ def _walkable(world, xyz):
             and bool(support.get("solid_support_up")))
 
 
+def _exploration_challenge(world, snapshot, visited_sites=()):
+    """Offer safe, *observed* alternative ground when mining isn't available.
+
+    The environment provides candidate standing spots; Qwen decides whether
+    and where to move. No hardcoded route, resource, teleport, or success.
+    Explore is its own skill and never substitutes for resource navigation.
+    """
+    origin = _position(snapshot["state"])
+    x0, y0, z0 = (math.floor(v) for v in origin)
+    dim = str(snapshot["state"].get("dimension") or "unknown")
+    # Check a small radial sample, never every block in a huge radius.
+    directions = ((1, 0), (-1, 0), (0, 1), (0, -1),
+                  (1, 1), (1, -1), (-1, 1), (-1, -1))
+    options = []
+    for radius in (6, 4):
+        for dx, dz in directions:
+            x, z = x0 + dx * radius, z0 + dz * radius
+            for y in (y0, y0 - 1, y0 + 1):
+                candidate = [x, y, z]
+                center = [x + 0.5, float(y), z + 0.5]
+                # Avoid rehearsing previously visited areas. A location
+                # being merely standable is not evidence of a new resource.
+                if any(_distance(center, previous) < 3.0
+                       for previous in visited_sites):
+                    continue
+                if _walkable(world, candidate):
+                    novelty = min(
+                        (_distance(center, previous) for previous in visited_sites),
+                        default=_distance(center, origin))
+                    options.append((novelty, candidate))
+                    break
+                # Additional heights are checked only if the previous was
+                # unwalkable; never dig/construct/teleport to make it walkable.
+    options.sort(key=lambda row: row[0], reverse=True)
+    candidates = [pos for _, pos in options[:8]]
+    if not candidates:
+        return None
+    return Challenge(
+        "explore",
+        "No safely reachable training resource was found here. "
+        "Choose a new Minecraft-confirmed standing position to explore and "
+        "observe new terrain. Walking does not count as mining or collecting.",
+        {"standable_candidates": candidates},
+        ("move_to",), dim)
+
+
 def _resource_candidates(world, origin):
     """Observe actual exposed resources and find walkable mining approaches.
 
@@ -217,15 +263,28 @@ def _resource_candidates(world, origin):
             usable.append((distance, block["type"], pos))
     usable.sort(key=lambda sample: (not sample[1].endswith("_log"), sample[0]))
     candidates = []
+    checked_standing = {}
     for _, block_type, pos in usable[:24]:
         standable = []
-        for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            neighbour = [pos[0] + dx, pos[1], pos[2] + dz]
-            if _walkable(world, neighbour):
-                standable.append(neighbour)
+        # An exposed log isn't necessarily on the same Y as the ground.
+        # Search general nearby feet-height positions, not just four
+        # identical-height neighbors. This also handles slopes and foliage.
+        for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1),
+                       (1, 1), (1, -1), (-1, 1), (-1, -1)):
+            for y in (math.floor(origin[1]), pos[1], pos[1] - 1,
+                      pos[1] + 1):
+                neighbour = [pos[0] + dx, y, pos[2] + dz]
+                key = tuple(neighbour)
+                if key not in checked_standing:
+                    checked_standing[key] = _walkable(world, neighbour)
+                if checked_standing[key]:
+                    standable.append(neighbour)
+                    break
         if standable:
             candidates.append({"type": block_type, "pos": pos,
                                "standable_candidates": standable})
+        if len(candidates) >= 12:
+            break
     return candidates
 
 
@@ -626,6 +685,17 @@ def _verify(challenge, before, after, execution, previous_attempts=(),
         error = _bearing_error(after["state"], target["pos"])
         return (action == "look_at" and error <= 22.5,
                 "yaw_error_degrees=%.1f" % error)
+    if challenge.name == "explore":
+        travelled = _distance(_position(before["state"]), _position(after["state"]))
+        end = _position(after["state"])
+        standing = target.get("standable_candidates") or ()
+        closest = min((_distance(end, p) for p in standing), default=math.inf)
+        completed = str((execution.get("result") or {}).get("state")) == "COMPLETED"
+        return (
+            action == "move_to" and completed and travelled >= 2.0
+            and closest <= 2.5,
+            "physical_exploration_moved=%.2f|nearest_confirmed_ground=%.2f" %
+            (travelled, closest))
     if challenge.name == "navigate":
         prior = _distance(_position(before["state"]), target["pos"])
         current = _distance(_position(after["state"]), target["pos"])
@@ -838,6 +908,9 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
     halted_on_pending = False
     finished_due_to_time = False
     unproductive_rounds = 0
+    stagnant_rounds = 0
+    visited_sites = []
+    finished_due_to_environment = False
     for repetition in range(rounds):
         preferred_resource = None
         round_actions_start = sum(
@@ -847,16 +920,28 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
         # Recalculate from durable gameplay evidence on every round.
         # When old skills deteriorate, Stage 2 becomes locked again.
         readiness = assess_training(store, report["episodes"])
-        tasks = CURRICULUM + (("gather_wood",)
+        tasks = CURRICULUM + ("explore",) + (("gather_wood",)
                               if readiness["stage_2_unlocked"] else ())
         for task in tasks:
+            if task == "explore":
+                # Recovery is not a compulsory extra exercise. It activates
+                # only when the round cannot perform successful navigation
+                # or physical mining. It cannot graduate either skill.
+                round_examples = [e for e in report["episodes"]
+                                  if e.get("round") == repetition + 1]
+                if any(e.get("task") in {"navigate", "mine"}
+                       and e.get("status") == "passed" for e in round_examples):
+                    continue
             if time.monotonic() - started >= duration_seconds:
                 finished_due_to_time = True
                 break
             initial = world.snapshot()
-            challenge = _select_challenge(
-                task, world, initial, rng,
-                preferred_resource if task in {"orient", "mine"} else None)
+            challenge = (_exploration_challenge(world, initial, visited_sites)
+                         if task == "explore" else
+                         _select_challenge(
+                             task, world, initial, rng,
+                             preferred_resource if task in {"orient", "mine"}
+                             else None))
             if challenge is None:
                 record = {"round": repetition + 1, "task": task,
                           "status": "unavailable", "reason": "no_natural_valid_scenario",
@@ -983,10 +1068,27 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
                     "type": challenge.target["resource_type"],
                     "pos": challenge.target["resource_pos"],
                 }
+            if task in {"explore", "navigate"} and verified:
+                # Location visits are spatial evidence, not learned routes.
+                # The next recovery step should prefer genuinely new ground.
+                visited_sites.append(_position(initial["state"]))
+                visited_sites.append(_position(world.snapshot()["state"]))
             print("[TRAIN] %-8s %-11s %d action(s)  %s" %
                   (task, record["status"], record["attempts"], outcome[:90]),
                   flush=True)
         if halted_on_pending or finished_due_to_time:
+            break
+        round_examples = [e for e in report["episodes"]
+                          if e.get("round") == repetition + 1]
+        progressed = any(e.get("task") in {"navigate", "mine", "explore"}
+                         and e.get("status") == "passed" for e in round_examples)
+        stagnant_rounds = 0 if progressed else stagnant_rounds + 1
+        if stagnant_rounds >= 3:
+            # Avoid endless observe/orient success while no resources can be
+            # reached. Keep the diagnosis in the report for the next session.
+            finished_due_to_environment = True
+            print("[TRAIN] Three rounds without resource or exploration "
+                  "progress; halting instead of repeating scans.", flush=True)
             break
         round_actions_end = sum(
             len([a for a in episode.get("experiments", [])
@@ -1033,6 +1135,9 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
         "teacher_calls": 0,
         "stopped_due_to_time": finished_due_to_time,
         "stopped_due_to_no_actions": unproductive_rounds >= 3,
+        "stopped_due_to_environment": finished_due_to_environment,
+        "exploration_moves": sum(e["task"] == "explore" and e["status"] == "passed"
+                                 for e in episodes),
     }
     progress = assess_training(store, report["episodes"])
     report["graduation"] = progress
