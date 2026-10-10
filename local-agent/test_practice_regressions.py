@@ -1228,7 +1228,9 @@ class GoalResourceRecoveryRegressions(unittest.TestCase):
     """Replay user-goal/material drift and successive observed vine blockers."""
 
     def setUp(self):
-        self.goal = {"id": 12, "source": "user", "title": "Craft a stone pickaxe"}
+        self.goal = {"id": 12, "source": "user", "title": "Craft a stone pickaxe",
+                     "description": "Craft a stone pickaxe using observed materials",
+                     "priority": 9, "status": "active"}
         self.runtime = {
             "awareness": {
                 "state": {"x": 218.3, "y": 70.0, "z": -93.68,
