@@ -1243,6 +1243,77 @@ def _approach_existing_workstation(table, runtime, goal):
     }
 
 
+def _wooden_pickaxe_goal_action(runtime, goal, inventory):
+    """A known vanilla recipe as a testable hypothesis, never a claimed success.
+
+    Use items that physically exist before deciding to search for more logs.
+    Only the Minecraft /craft response can prove the output.
+    """
+    if not goal or goal.get("source") != "user":
+        return None
+    if str(goal.get("title") or "").lower() != "craft a wooden pickaxe":
+        return None
+    counts = {}
+    for entry in inventory or []:
+        item = str(entry.get("item") or "")
+        counts[item] = counts.get(item, 0) + int(entry.get("count") or 0)
+    planks = sorted(
+        (item for item, count in counts.items()
+         if item.startswith("minecraft:") and item.endswith("_planks") and count >= 3),
+        key=lambda item: -counts[item],
+    )
+    sticks = counts.get("minecraft:stick", 0)
+    base = {
+        "action": "craft",
+        "goal_id": goal.get("id"),
+        "goal_reason": "craft the explicitly requested wooden pickaxe with observed inventory",
+    }
+    if planks and sticks >= 2:
+        plank = planks[0]
+        plan = {
+            **base, "intent": "craft wooden pickaxe",
+            "hypothesis": "three planks and two sticks in a 3x3 grid produce a wooden pickaxe",
+            "width": 3, "height": 3,
+            "grid": [plank, plank, plank, "", "minecraft:stick", "",
+                     "", "minecraft:stick", ""],
+        }
+    elif sticks < 2 and any(
+        item.endswith("_planks") and count >= 2
+        for item, count in counts.items()
+    ):
+        plank = next(
+            item for item, count in counts.items()
+            if item.endswith("_planks") and count >= 2
+        )
+        plan = {
+            **base, "intent": "craft sticks for wooden pickaxe",
+            "hypothesis": "two vertically stacked planks should produce sticks",
+            "width": 1, "height": 2, "grid": [plank, plank],
+        }
+    else:
+        log = next(
+            (item for item, count in counts.items()
+             if item.startswith("minecraft:") and item.endswith("_log") and count > 0),
+            None,
+        )
+        if log is None:
+            return None
+        plan = {
+            **base, "intent": "craft planks for wooden pickaxe",
+            "hypothesis": "a single collected log should yield planks",
+            "width": 1, "height": 1, "grid": [log],
+        }
+    key = _plan_target_key(plan)
+    invalid = runtime.setdefault("invalid_targets", {})
+    if key in invalid:
+        when, reason = invalid[key]
+        if (time.monotonic() - when < _invalid_target_ttl(key)
+                and "crafting table within reach" not in str(reason).lower()):
+            log_event("practice_host", "known_recipe_quarantined", key=key, reason=reason)
+            return None
+    return plan
+
+
 def _resume_blocked_crafting(runtime, goal, inventory):
     """One evidence-based follow-up primitive; no recipe hardcoding."""
     recipe = _recover_blocked_craft(goal, inventory, runtime)
@@ -1605,10 +1676,16 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         None,
     )
     continuation = None
-    if source == "practice" and active_user_goal is not None:
+    if source in {"practice", "command"} and active_user_goal is not None:
         continuation = await asyncio.to_thread(
             _resume_blocked_crafting, runtime, active_user_goal, awareness_inventory
         )
+        if continuation is None and not (
+            time.monotonic() < float(runtime.get("planner_backoff_until", 0.0) or 0.0)
+        ):
+            continuation = _wooden_pickaxe_goal_action(
+                runtime, active_user_goal, awareness_inventory
+            )
         if continuation:
             log_event(
                 "practice_host", "goal_continuation",
@@ -1884,6 +1961,15 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         log_event("practice_host", "prerequisite_resolved", cleared=cleared)
     if execution.get("ok") and plan.get("action") == "craft":
         runtime.pop("pending_craft", None)
+    if plan.get("action") == "mine" and execution.get("ok"):
+        observed = runtime.get("last_resource_scan") or {}
+        observed_blocks = observed.get("blocks") or []
+        xyz = [plan.get(axis) for axis in ("x", "y", "z")]
+        observed["blocks"] = [
+            block for block in observed_blocks if block.get("pos") != xyz
+        ]
+        if len(observed_blocks) != len(observed["blocks"]):
+            log_event("practice_host", "mined_target_retired", target=xyz)
     _handle_craft_learning(runtime, plan, execution, user_goal, awareness_inventory)
     await update_awareness(runtime)
     log_event(
