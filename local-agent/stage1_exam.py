@@ -108,6 +108,7 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
     from training_lab import (
         _position, _distance, _bearing_error, _walkable,
         _settle_pending_job, _observed_obstruction,
+        _exploration_challenge,
     )
     initial = world.snapshot()
     origin = _position(initial["state"])
@@ -117,6 +118,9 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
     mined = None
     approached = None
     faced = None
+    empty_scans = 0
+    exploration = None
+    explored_sites = []
     last_reason = "exam_incomplete"
     pending = False
     started = time.monotonic()
@@ -150,6 +154,15 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
         if before["state"].get("jobActive"):
             last_reason = "world_busy"
             break
+        # An empty search must not strand the model in an invisible scan loop.
+        # The host checks real standable terrain; Qwen still chooses whether
+        # and where to walk. Exploration earns no exam progression credit.
+        if not candidates and empty_scans and exploration is None:
+            exploration = _exploration_challenge(
+                world, before, visited_sites=explored_sites)
+        exploration_positions = (
+            exploration.target["standable_candidates"]
+            if exploration is not None and not candidates else [])
         prompt = json.dumps({
             "task": "stage1_exam", "mode": "uncoached_practical",
             "goal": ("Independently find a naturally occurring log, dirt or sand "
@@ -167,6 +180,7 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
                                          if e.get("droppedItem")][:5],
             },
             "own_observed_resources": list(candidates.values())[:15],
+            "exploration_standable_positions": exploration_positions,
             "confirmed_progress": {
                 "approached": approached,
                 "faced": faced, "mined": mined,
@@ -178,8 +192,10 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
             "previous_learned_experiences": skills,
             "learned_procedures": learned,
             "rule": ("Choose one JSON primitive. Do not invent coordinates. "
-                     "Scan before approaching. Move only to provided verified "
-                     "standable positions. Mining requires expected_block "
+                     "Scan before approaching. If a scan finds no usable "
+                     "resource, choose a verified exploration_standable_position "
+                     "and move to search a different area. Move only to provided "
+                     "verified standable positions. Mining requires expected_block "
                      "matching an observed resource. Physical Minecraft "
                      "outcomes, not claims, decide success."),
         }, ensure_ascii=False)
@@ -193,6 +209,7 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
             record(action, plan, {}, False, "unsupported_action")
             continue
         selected = None
+        exploration_move = False
         if action == "scan_blocks":
             try:
                 query = practice.scan_query(plan)
@@ -226,7 +243,12 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
                         if all(abs(xyz[i] - c["pos"][i]) <= 0.05
                                for i in range(3))
                     ), None)
-                if selected is None:
+                if (selected is None and action == "move_to" and
+                        not candidates and any(
+                            all(abs(xyz[i] - point[i]) <= .05 for i in range(3))
+                            for point in exploration_positions)):
+                    exploration_move = True
+                elif selected is None:
                     record(action, plan, {}, False, "unobserved_coordinates")
                     continue
             if action == "look_at" and (
@@ -281,9 +303,9 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
                 if pos is None or kind not in EXAM_MATERIALS:
                     continue
                 center = [v + 0.5 for v in pos]
-                if not (3.0 <= _distance(origin, center) <= 10.0):
+                if not (3.0 <= _distance(current, center) <= 10.0):
                     continue
-                if abs(pos[1] - origin[1]) > 3:
+                if abs(pos[1] - current[1]) > 3:
                     continue
                 standable = []
                 for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1),
@@ -303,8 +325,24 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None,
                         break
             verified = found_target is not None
             selected = found_target
+            if verified:
+                empty_scans = 0
+                exploration = None
+            else:
+                empty_scans += 1
             reason = ("exam_observed_usable_resource" if verified
                       else "no_exam_resource_in_scan")
+        elif action == "move_to" and successful and exploration_move:
+            verified = (receipt.get("state") == "COMPLETED" and
+                        _distance(current, _position(after["state"])) >= 2.0)
+            reason = ("explored_new_area" if verified
+                      else "exploration_no_progress")
+            selected = {"exploration_position": [int(v) for v in xyz]}
+            if verified:
+                explored_sites.append(_position(after["state"]))
+                candidates.clear()
+                exploration = None
+                empty_scans = 0
         elif action == "move_to" and successful and selected:
             previous = _distance(current, [v + .5 for v in selected["pos"]])
             current_dist = _distance(_position(after["state"]),
