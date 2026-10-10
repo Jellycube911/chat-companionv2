@@ -391,6 +391,7 @@ jobs:
           python -m py_compile local-agent/training_lab.py local-agent/training_progress.py local-agent/stage1_exam.py local-agent/memory_ablation.py
           python -m py_compile local-agent/test_context_builder.py
           python -m unittest discover -s local-agent -p 'test_context_builder.py' -v
+          python -m unittest discover -s local-agent -p 'test_goal_control.py' -v
           python -m unittest discover -s local-agent -p 'test_practice_regressions.py' -v
           python -m unittest discover -s local-agent -p 'test_stage1_exam.py' -v
           python -m unittest discover -s local-agent -p 'test_memory_ablation.py' -v
