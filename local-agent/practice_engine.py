@@ -123,6 +123,7 @@ def _state():
         "job_state": state.get("jobState") if isinstance(state, dict) else None,
         "job_reason": state.get("jobReason") if isinstance(state, dict) else None,
         "job_progress": state.get("jobProgress") if isinstance(state, dict) else None,
+        "last_job": (state.get("lastJob") or {}) if isinstance(state, dict) else {},
     }
 
 
@@ -873,6 +874,26 @@ def execute_plan(plan):
 
         after = _snapshot()
         terminal = result.get("state") if isinstance(result, dict) else None
+        if terminal == "RUNNING" and not after["state"].get("job_active", False):
+            # Mining can cross its deadline between the final timed poll
+            # and this after-snapshot. A terminal Minecraft result outranks
+            # the earlier RUNNING observation, but only for a matching job.
+            previous = after["state"].get("last_job") or {}
+            matching = {
+                "mine": "MINE", "move_to": "MOVE", "move_forward": "MOVE",
+                "collect": "COLLECT", "place": "PLACE",
+            }.get(plan["action"])
+            if (matching and str(previous.get("type") or "").upper() == matching
+                    and str(previous.get("state") or "").upper() in {
+                        "FAILED", "COMPLETED", "CANCELLED", "UNKNOWN"
+                    }):
+                result = {
+                    "state": str(previous["state"]).upper(),
+                    "reason": str(previous.get("reason") or "unknown"),
+                }
+                terminal = result["state"]
+                log_event("practice_host", "late_job_terminal",
+                          action=plan["action"], terminal=result)
         if terminal == "RUNNING":
             summary = {
                 "ok": None,
