@@ -473,7 +473,43 @@ class PracticeRegressions(unittest.TestCase):
         self.assertEqual(result, saved)
         self.assertEqual(runtime["pending_craft"]["goal_id"], 9)
         post.assert_called_once()
-        self.assertEqual(post.call_args.args[0], "/scan-blocks")
+        self.assertEqual(post.call_args.args[0], "/find-blocks")
+
+    def test_workstation_probe_uses_real_bridge_route_and_checks_result(self):
+        with patch.object(agent, "_post", return_value={
+            "ok": True, "blocks": [
+                {"type": "minecraft:crafting_table", "distance": 2.5},
+                {"type": "minecraft:jungle_log", "distance": 2.0},
+            ],
+        }) as post:
+            blocks = agent._workstation_probe()
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0]["type"], "minecraft:crafting_table")
+        post.assert_called_once_with("/find-blocks", {
+            "exact": ["minecraft:crafting_table"], "radius": 8, "limit": 8,
+        })
+
+    def test_failed_workstation_probe_is_not_treated_as_missing_table(self):
+        goal = {"source": "user", "id": 9, "title": "Obtain an axe"}
+        recipe = {
+            "action": "craft", "intent": "craft wooden axe", "width": 3,
+            "height": 3,
+            "grid": ["minecraft:jungle_planks"] * 3 +
+                    ["minecraft:stick"] * 2 + [""] * 4,
+        }
+        inventory = [
+            {"item": "minecraft:crafting_table", "count": 1},
+            {"item": "minecraft:jungle_planks", "count": 6},
+            {"item": "minecraft:stick", "count": 5},
+        ]
+        runtime = {"pending_craft": {"goal_id": 9, "plan": recipe}}
+        with patch.object(agent, "_post", return_value={
+            "ok": False, "error": "server unavailable", "status_code": 500
+        }) as post, patch.object(agent, "log_event"):
+            result = agent._resume_blocked_crafting(runtime, goal, inventory)
+        self.assertIsNone(result)
+        self.assertGreater(runtime["planner_backoff_until"], 0)
+        post.assert_called_once()
 
     def test_missing_workstation_places_one_table_then_retries_recipe(self):
         craft = {"action": "craft", "intent": "craft wooden axe",
