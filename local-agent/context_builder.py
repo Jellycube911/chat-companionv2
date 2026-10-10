@@ -21,11 +21,22 @@ def load_context(store, *, query="", goals=None, memory_limit=6,
         store.find_learned_skills(search_query, limit=skill_limit)
         if search_query else []
     )
+    # Historical confidence counters include legacy mislabelled successes.
+    # Only offer skills supported by at least two completed, evidence-backed
+    # attempts. Untested teacher ideas stay in memory as hypotheses.
+    verified_skills = []
+    for skill in skills:
+        trials = store.recent_skill_trials(skill["intent"], 80)
+        verified = sum(t["success"] and t.get("evidence_status") == "verified"
+                       for t in trials)
+        if verified >= 2:
+            verified_skills.append({**skill, "verified_successes": verified})
+
     return {
         "query": search_query,
         "goals": goals,
         "memories": memories,
-        "skills": skills,
-        "trials": store.recent_trials(trial_limit),
+        "skills": verified_skills,
+        "trials": store.recent_trials_digest(trial_limit),
         "episodes": store.recent_episodes(episode_limit),
     }
