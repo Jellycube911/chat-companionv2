@@ -63,6 +63,34 @@ A trial is marked unavailable when there is no real suitable block, standable
 location or dropped item. Those are not counted as successes. The collection
 stage cannot run until a dropped item actually exists.
 
+**Testing whether accumulated memory helps (live memory ablation):**
+Run `test_memory.bat` with Minecraft and Ollama running, but stop both
+`run.bat` and `train.bat` first. Six uncoached physical practical trials
+are attempted in balanced, randomized order: three with **verified past
+training experiences and learned procedures exposed to Qwen**, three with
+those two prior-memory fields empty. The same model, safety checks,
+Minecraft mechanics, immediate action feedback, and instructions are
+used in both conditions. Only the provided past-experience context changes.
+Historical SQLite evidence is frozen at the start of the comparison so the
+six prompts are assessed against the same archive; no memories are deleted
+or reset. All gameplay remains physical, so mining consumes actual blocks.
+Individual test outcomes are **not** stored as Stage 1 exam graduation
+successes, although the normal action-practice log still preserves real
+tool interactions.
+
+Find an atomic, in-progress
+`data/training_reports/memory-comparison-*.json` report, with success and
+failure counts, times, verified physical steps, starting locations, and
+actual exposed-memory counts per arm. Ctrl+C keeps a marked partial report.
+`not_testable_no_verified_memories` means there was no suitable prior
+learning evidence, and no comparison actions were performed.
+**Interpret cautiously:** natural resource access, drops, obstacles, and
+positions change between trials, so these are randomized but not perfectly
+matched scenarios. A higher score with memory is supporting evidence,
+not by itself a demonstration of causal learning. Repeated trials across
+unfamiliar environments are necessary. If scores are similar, Qwen's
+pretrained capability may explain much of the task success.
+
 **Stage 1 persistent checkpoints and independent exam (v4):**
 Each training session writes a readable `data/training_reports/training-*.json`
 file immediately, and atomically updates that same file after every exercise
