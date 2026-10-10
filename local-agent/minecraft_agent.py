@@ -2535,6 +2535,8 @@ def _normalize_request_text(text):
         "hey ",
         "sorry ",
         "actually ",
+        "now ",
+        "then ",
     )
     changed = True
     while changed:
@@ -2636,6 +2638,13 @@ async def fast_task_intent(text):
         return max(user_goals, key=lambda goal: int(goal["id"]), default=None)
     # A user instruction embedded in corrective feedback is still a task.
     # Do not lose it merely because the sentence begins "you can't ...".
+    if re.search(
+        r"^(?:make|craft|get|obtain)\s+(?:another|one more)\s+(?:(?:wooden|wood)\s+)?axe\b",
+        normalized,
+    ):
+        # Another means produce a NEW item, not merely own an axe.
+        return _ensure_user_goal("Craft minecraft:wooden_axe", text, 9)
+
     if (
         re.search(r"\b(?:use|with)\b.{0,45}\baxe\b", normalized)
         and re.search(r"\b(?:chop|cut|mine|break)\b.{0,45}\b(?:logs?|trees?|wood)\b", normalized)
