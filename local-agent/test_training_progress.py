@@ -24,11 +24,15 @@ def record_site_trial(db, skill, start, success=True):
                 "result": ({"ok": True, "observed_count": 1} if skill == "observe"
                            else {"ok": True} if skill == "orient"
                            else {"state": "COMPLETED" if success else "FAILED",
-                                 "reason": "arrived" if success else "stuck"}),
+                                 "reason": ("block_mined|block=minecraft:stone|tool=minecraft:air|break_ticks=8"
+                                            if skill == "mine" and success else
+                                            "collection_complete:1" if skill == "collect" and success
+                                            else "arrived" if success else "stuck")}),
             }],
         }),
         json.dumps({"verified": success,
-                    "outcome": "verified" if success else "physical_failure"}),
+                    "outcome": ("target_item_before=0 after=1" if skill == "collect" and success
+                                else "verified" if success else "physical_failure")}),
         success,
     )
 
