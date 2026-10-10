@@ -1130,7 +1130,8 @@ def _target_failure_needs_replan(execution):
         )
     return reason in {
         "target_block_mismatch", "target_block_is_air", "destination_occupied",
-        "mining_alignment_timeout",
+        "mining_alignment_timeout", "mining_approach_stalled",
+        "mining_no_standable_approach", "task_deadline",
     } or reason.startswith("mining_blocked|")
 
 
