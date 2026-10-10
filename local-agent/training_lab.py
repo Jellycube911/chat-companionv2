@@ -384,6 +384,21 @@ def _verify(challenge, before, after, execution):
     return False, "unknown_task"
 
 
+def _verified_history(intent, limit=12):
+    """Exclude legacy interface-only rejections without erasing user memory."""
+    records = store.recent_skill_trials(intent, limit)
+    genuine = []
+    for entry in records:
+        try:
+            experiments = json.loads(entry.get("actions") or "{}")["experiments"]
+            if any(e.get("status") in {"completed", "failed"}
+                   for e in experiments if isinstance(e, dict)):
+                genuine.append(entry)
+        except (ValueError, KeyError, TypeError, AttributeError):
+            continue
+    return genuine
+
+
 def _record_episode(challenge, attempts, passed, elapsed, initial, reason):
     intent = "training." + challenge.name
     actions = json.dumps({
@@ -422,7 +437,7 @@ def _record_episode(challenge, attempts, passed, elapsed, initial, reason):
     )
     # Promote only after 3 verified successes in genuinely different starting
     # locations. Do not trust a memorized coordinate or a single lucky trial.
-    history = store.recent_skill_trials(intent, 12)
+    history = _verified_history(intent, 12)
     successes = [h for h in history if h.get("success")]
     origins = set()
     for h in successes:
@@ -522,7 +537,7 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
                 if observed["state"].get("jobActive"):
                     outcome = "world_busy"
                     break
-                history = store.recent_skill_trials("training." + task, 6)
+                history = _verified_history("training." + task, 12)[-6:]
                 plan = planner.propose(_prompt(
                     challenge, observed, attempts, history, observed_extra))
                 valid, why = _plan_allowed(plan, challenge, observed_extra)
