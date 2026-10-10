@@ -1669,6 +1669,64 @@ def _brain_console_result(plan, execution):
         )
 
 
+def _escalate_stalled_goal(runtime, goal, reason, inventory):
+    """Sparse cloud lesson after multiple unproductive planning cycles."""
+    if not goal or goal.get("source") != "user":
+        return
+    key = str(goal.get("id") or goal.get("title"))
+    stalls = runtime.setdefault("goal_stalls", {})
+    count = int(stalls.get(key, 0)) + 1
+    stalls[key] = count
+    if count < 5:
+        return
+    stalls[key] = 0
+    if not _cloud_teacher_enabled():
+        log_event("knowledge", "teacher_disabled_for_stall", goal=key, reason=reason)
+        return
+    if not os.getenv("OPENAI_API_KEY", "").strip():
+        log_event("knowledge", "teacher_key_missing_for_stall", goal=key)
+        return
+    recent = store.recent_trials(5)
+    data = {
+        "goal": goal.get("title"), "description": goal.get("description"),
+        "stalled_reason": reason,
+        "inventory": inventory[:22],
+        "recipe_evidence": runtime.get("knowledge_last"),
+        "recent_trials": [
+            {"intent": t.get("intent"), "success": t.get("success"),
+             "outcome": _trim(t.get("outcome", ""), 190)}
+            for t in recent
+        ],
+    }
+    response = store.request_learning(
+        "goal_stalled:" + key,
+        "Local Minecraft companion cannot make progress. Study the observed "
+        "state, recommend one testable Minecraft action that uses the existing "
+        "MCP abilities, and describe how to verify it. Avoid guessing success. "
+        + json.dumps(data, ensure_ascii=False, default=str)[:3400],
+        cooldown_seconds=1800,
+    )
+    log_event("knowledge", "stalled_goal_teacher_request",
+              goal=key, reason=reason, request=response)
+
+
+def _goal_progress_evidence(runtime, goal, execution):
+    if not goal:
+        return
+    if execution.get("ok") and (execution.get("plan") or {}).get("action") in {
+        "craft", "mine", "place", "collect"
+    }:
+        runtime.setdefault("goal_stalls", {}).pop(str(goal.get("id")), None)
+    else:
+        plan = execution.get("plan") or {}
+        _escalate_stalled_goal(
+            runtime, goal,
+            str(plan.get("action") or "no action") + ": " +
+            _execution_failure_reason(execution), 
+            ((runtime.get("awareness") or {}).get("inventory") or []),
+        )
+
+
 async def run_planned_action(planner_agent, runtime, directive=None, source="practice"):
     started = time.monotonic()
 
@@ -1880,6 +1938,13 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
 
     plan = parse_plan(raw)
     if plan is None:
+        _escalate_stalled_goal(
+            runtime,
+            next((g for g in store.list_goals("active", 20)
+                  if g.get("source") == "user"), None),
+            "local model returned invalid action JSON",
+            awareness_inventory,
+        )
         log_event(
             "practice_host",
             "invalid_plan",
@@ -2089,6 +2154,7 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         if len(observed_blocks) != len(observed["blocks"]):
             log_event("practice_host", "mined_target_retired", target=xyz)
     _handle_craft_learning(runtime, plan, execution, user_goal, awareness_inventory)
+    _goal_progress_evidence(runtime, user_goal, execution)
     await update_awareness(runtime)
     log_event(
         "practice_host",
