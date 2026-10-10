@@ -32,7 +32,7 @@ if not exist ".venv\Scripts\python.exe" (
 REM ----- INSTALL / UPDATE REQUIREMENTS -----
 if exist "requirements.txt" (
     echo Checking Python requirements...
-    ".venv\Scripts\python.exe" -m pip install -r requirements.txt
+    ".venv\Scripts\python.exe" -m pip install --quiet -r requirements.txt
 
     if errorlevel 1 (
         echo.
@@ -101,6 +101,8 @@ echo.
 echo ==========================================
 echo Starting Chat...
 echo ==========================================
+echo.
+echo Chat accepts goals like: make a wooden axe
 echo.
 
 ".venv\Scripts\python.exe" minecraft_agent.py
