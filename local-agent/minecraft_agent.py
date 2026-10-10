@@ -20,6 +20,7 @@ from agents.exceptions import MaxTurnsExceeded
 from agents.mcp import MCPServerStdio
 
 from memory_store import store
+from context_builder import load_context
 from skill_executor import run_task
 from action_log import DEFAULT_LOG, log_event, log_exception, start_session
 from practice_engine import execute_plan, parse_plan, scan_query
@@ -629,20 +630,19 @@ def _chat_awareness_text(runtime):
 
 def build_practice_plan_input(runtime, directive=None):
     goals = store.list_goals("active", 4)
-    trials = store.recent_trials(4)
     events = store.recent_events(5)
-
-    learning_query = " ".join(
-        [directive or ""]
-        + [f"{goal['title']} {goal['description']}" for goal in goals[:3]]
+    context = load_context(
+        store, query=directive or "", goals=goals,
+        memory_limit=6, skill_limit=8, trial_limit=4, episode_limit=5,
     )
+    trials = context["trials"]
     learned = [
-        skill for skill in store.find_learned_skills(learning_query, 8)
+        skill for skill in context["skills"]
         if float(skill.get("confidence", 0)) >= 0.6
         and int(skill.get("successes", 0)) >= 2
         and int(skill.get("successes", 0)) >= int(skill.get("failures", 0))
     ][:3]
-    relevant_memory = store.recall(learning_query, 4)
+    relevant_memory = context["memories"]
     efficiency = store.list_efficiency(12)
 
     parts = [_awareness_text(runtime)]
@@ -2700,22 +2700,47 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
 
 def build_turn_input(message, source, runtime):
     if source in {"minecraft", "console"}:
+        context = load_context(
+            store, query=message, goals=[],
+            memory_limit=6, skill_limit=4, trial_limit=3, episode_limit=6,
+        )
         parts = [_chat_awareness_text(runtime)]
-        recent = store.recent_episodes(2)
-        if recent:
+        if context["episodes"]:
             parts.append("RECENT CHAT:")
-            for episode in recent:
+            for episode in context["episodes"]:
                 parts.append(f"Alik: {_trim(episode['user'], 160)}")
                 parts.append(
                     f"Chat: {_trim(_format_ingame_reply(episode['assistant']), 120)}"
                 )
 
-        relevant = store.recall(message, 2)
-        if relevant:
-            parts.append("RELEVANT MEMORY:")
-            for memory in relevant:
+        if context["memories"]:
+            parts.append("RELEVANT PERSISTENT MEMORY:")
+            for memory in context["memories"]:
                 parts.append(
-                    f"- {_trim(memory['content'], 220)}"
+                    f"- [{memory['kind']}/{memory['key']}] "
+                    f"{_trim(memory['content'], 260)}"
+                )
+
+        verified_skills = [
+            skill for skill in context["skills"]
+            if int(skill.get("successes", 0)) >= 1
+            and int(skill.get("successes", 0)) > int(skill.get("failures", 0))
+        ][:3]
+        if verified_skills:
+            parts.append("RELEVANT TESTED SKILLS (verify in the current world):")
+            for skill in verified_skills:
+                parts.append(
+                    f"- {skill['name']} confidence={skill['confidence']}: "
+                    f"{_trim(skill['procedure'], 240)}"
+                )
+
+        if context["trials"]:
+            parts.append("RECENT PHYSICAL EXPERIMENTS (not imagined success):")
+            for trial in context["trials"][:2]:
+                parts.append(
+                    f"- intent={_trim(trial['intent'], 90)} "
+                    f"success={trial['success']} "
+                    f"outcome={_trim(trial['outcome'], 180)}"
                 )
 
         parts.append("CURRENT MESSAGE FROM ALIK:")
@@ -2727,16 +2752,13 @@ def build_turn_input(message, source, runtime):
         parts.append("/no_think")
         return "\n".join(parts)
 
-    relevant = store.recall(message, 4)
-    goals = store.list_goals("active", 4)
-    learning_query = " ".join(
-        [message]
-        + [
-            f"{goal['title']} {goal['description']}"
-            for goal in goals[:3]
-        ]
+    context = load_context(
+        store, query=message, goals=store.list_goals("active", 4),
+        memory_limit=6, skill_limit=5, trial_limit=5, episode_limit=5,
     )
-    learned_skills = store.find_learned_skills(learning_query, 4)
+    relevant = context["memories"]
+    goals = context["goals"]
+    learned_skills = context["skills"]
     tasks = [
         task
         for task in store.list_tasks(8)
@@ -2745,7 +2767,7 @@ def build_turn_input(message, source, runtime):
 
     parts = [_awareness_text(runtime)]
 
-    recent_trials = store.recent_trials(5)
+    recent_trials = context["trials"]
     if recent_trials:
         parts.append("RECENT SELF-LEARNING EXPERIMENTS:")
         for trial in recent_trials:
