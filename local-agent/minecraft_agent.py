@@ -4766,4 +4766,12 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # The laboratory and the normal brain must NEVER issue competing
+    # Minecraft body commands. Both modes hold the same OS-level lock.
+    from training_lab import exclusive_controller
+    try:
+        with exclusive_controller():
+            asyncio.run(main())
+    except RuntimeError as error:
+        print("[BRAIN] " + str(error), file=sys.stderr)
+        raise SystemExit(1) from error
