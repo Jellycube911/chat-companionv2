@@ -235,7 +235,12 @@ def _select_challenge(name, world, snapshot, rng):
         # It misses reachable trees if the target is >5 blocks away, and often
         # shows stone under the companion's feet. Ask the REAL bridge for
         # exposed candidate blocks instead; never conjure mining coordinates.
-        seen = world.find(PRACTICE_MATERIALS, radius=10)
+        # Use separate observation filters so a crowded field of nearby
+        # ground blocks cannot consume the server's result limit and hide a
+        # physically reachable tree. Both lists come from actual block scans.
+        logs = tuple(v for v in PRACTICE_MATERIALS if v.endswith("_log"))
+        terrain = tuple(v for v in PRACTICE_MATERIALS if not v.endswith("_log"))
+        seen = world.find(logs, radius=10) + world.find(terrain, radius=10)
         usable = []
         for block in seen:
             pos = [block.get(k) for k in ("x", "y", "z")]
