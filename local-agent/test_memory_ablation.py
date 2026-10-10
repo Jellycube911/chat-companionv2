@@ -107,6 +107,32 @@ class MemoryComparisonRegressions(unittest.TestCase):
                              "incomplete_unverified")
             self.assertFalse(db.recent_skill_trials("training.stage1_exam"))
 
+    def test_ablation_stops_after_two_scanning_only_trials(self):
+        class ScansOnlyPlanner:
+            def propose(self, prompt):
+                return {"action": "scan_blocks", "exact": ["minecraft:oak_log"],
+                        "radius": 7, "limit": 16}
+
+        class EmptyScanWorld(RealisticExamWorld):
+            def execute(self, plan):
+                if plan["action"] == "scan_blocks":
+                    self.calls.append(dict(plan))
+                    return {"ok": True, "plan": plan,
+                            "result": {"ok": True, "blocks": []}}
+                return super().execute(plan)
+
+        with tempfile.TemporaryDirectory() as folder:
+            db = MemoryStore(Path(folder) / "memory.sqlite3")
+            train_basic_skills(db)
+            world = EmptyScanWorld()
+            report = run_comparison(
+                world, ScansOnlyPlanner(), db, trials=6, max_steps=1,
+                report_dir=Path(folder) / "reports")
+            self.assertEqual(report["status"], "stopped_no_physical_actions")
+            self.assertEqual(len(report["trials"]), 2)
+            self.assertTrue(all(x["attempts"] == 1 for x in report["trials"]))
+            self.assertFalse(db.recent_skill_trials("training.stage1_exam"))
+
     def test_descriptive_statistics_do_not_claim_learning(self):
         summary = _summarize([
             {"condition": "memory_on", "status": "passed",
