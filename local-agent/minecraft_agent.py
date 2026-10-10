@@ -1570,30 +1570,10 @@ def _general_recipe_goal_action(runtime, goal, inventory):
         return action
     log_event("knowledge", "recipe_missing_step", target=target,
               reason=reason, dependency_chain=chain)
-    stalls = runtime.setdefault("knowledge_stalls", {})
-    count = int(stalls.get(target, 0)) + 1
-    stalls[target] = count
-    if count >= 3 and _cloud_teacher_enabled():
-        if os.getenv("OPENAI_API_KEY", "").strip():
-            request = store.request_learning(
-                "autonomous_goal:" + target,
-                "A Minecraft companion must achieve goal "
-                + str(goal.get("title")) + ". The SERVER recipe registry "
-                "gave the following dependency evidence: "
-                + json.dumps(chain, ensure_ascii=False)[:1200]
-                + ". Blocker: " + str(reason)
-                + ". Actual inventory: " + json.dumps(inventory, ensure_ascii=False)[:1400]
-                + ". Suggest one independently testable next acquisition or "
-                "world action. Never claim it happened.",
-                cooldown_seconds=1800,
-            )
-            log_event("knowledge", "goal_teacher_escalation",
-                      target=target, result=request)
-            stalls[target] = 0
-        elif count == 3:
-            print("[TEACHER] Cloud help enabled but OPENAI_API_KEY is missing. "
-                  "Local gameplay continues.", flush=True)
-            log_event("knowledge", "teacher_key_missing", target=target)
+    # A recipe shortage is an observed inventory state, not a failed learning
+    # experiment. Never consult the cloud teacher just because the same
+    # shortage was read on successive planning ticks. Physical failures and
+    # genuine goal stalls have their own evidence-based escalation paths.
     return None
 
 
@@ -2409,6 +2389,9 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
             runtime["planner_backoff_until"] = time.monotonic() + 20.0
             log_event("practice_host", "planner_schema_stalled",
                       initial=malformed, revision=candidate)
+            _escalate_stalled_goal(runtime, user_goal,
+                                   "repeated malformed primitive: " + malformed,
+                                   awareness_inventory)
             return {"ok": False, "status": "planner_schema_stalled",
                     "plan": plan, "error": malformed}
         log_event("practice_host", "planner_schema_repaired", plan=candidate)
