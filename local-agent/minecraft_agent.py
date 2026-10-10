@@ -4376,6 +4376,16 @@ async def local_task_worker(input_queue, runtime):
             await asyncio.sleep(0.35)
             continue
 
+        # Queued tasks created by older builds must not run the now-disabled
+        # scripted executor after a restart. Preserve their audit history.
+        store.update_task(task["id"], status="cancelled",
+                          progress="legacy scripted gameplay disabled; Qwen plans primitives")
+        store.record_event("legacy_task_disabled",
+                           f"Legacy task #{task['id']} paused permanently: {task['skill']}")
+        log_event("practice_host", "legacy_task_cancelled",
+                  task_id=task["id"], skill=task["skill"])
+        continue
+
         runtime["active_task"] = task["id"]
         print(f"\n[SKILL] Starting #{task['id']} {task['skill']} {task.get('args', {})}")
 
