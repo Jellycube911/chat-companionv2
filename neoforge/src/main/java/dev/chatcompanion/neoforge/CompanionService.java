@@ -18,6 +18,8 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Supplier;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.particles.BlockParticleOption;
+import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceKey;
@@ -435,9 +437,19 @@ public final class CompanionService implements AutoCloseable {
         companion.jobProgress(progress, "breaking");
 
         int crackStage = Math.min(9, Math.max(0, (int)Math.floor(progress * 10.0F)));
+        // Vanilla-style visible damage: broadcast crack stages while a held
+        // mining job is still running, rather than only showing the final
+        // world edit. Keep the full swing cycle visible to nearby players.
         world.destroyBlockProgress(companion.getId(), job.block(), crackStage);
-        if ((breakingTicks - 1) % 4 == 0) companion.swing(InteractionHand.MAIN_HAND);
+        if ((breakingTicks - 1) % 8 == 0) companion.swing(InteractionHand.MAIN_HAND);
+        if (breakingTicks % 5 == 0) {
+            Vec3 hit = Vec3.atCenterOf(job.block());
+            world.sendParticles(new BlockParticleOption(ParticleTypes.BLOCK, job.initial()),
+                    hit.x, hit.y, hit.z, 2, 0.18, 0.18, 0.18, 0.04);
+        }
 
+        // Actual survival breaking speed is computed from block hardness and
+        // held tool above. These visuals never accelerate or replace mining.
         if (progress >= 1.0F) {
             fake.setYRot(companion.getYRot());
             fake.setXRot(companion.getXRot());
