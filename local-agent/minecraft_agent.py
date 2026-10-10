@@ -745,6 +745,16 @@ def build_practice_plan_input(runtime, directive=None):
             "do not claim success without that Minecraft response."
         )
     if goal:
+        missing = _missing_goal_materials(runtime, goal)
+        if missing:
+            parts.append(
+                "CURRENT RECIPE RESOURCE SHORTAGE (candidate alternatives, not "
+                "all simultaneously required): " + ", ".join(missing[:12])
+                + ". Seek related world blocks first and TEST their actual drops. "
+                "Do not search unrelated logs just because they were relevant "
+                "to an earlier goal. If a scan finds a candidate, mine its "
+                "observed coordinates, then check inventory."
+            )
         budget = max(0, 2 - _goal_navigation_count(
             runtime, goal, (runtime.get("awareness") or {}).get("inventory") or []
         ))
@@ -1585,6 +1595,11 @@ def _mining_obstruction_recovery(runtime, goal):
     blocker = pending.get("blocker") or {}
     if blocker.get("type") not in {"minecraft:vine", "minecraft:cocoa"}:
         return None
+    attempted = pending.setdefault("attempted", [])
+    marker = [blocker.get("x"), blocker.get("y"), blocker.get("z")]
+    if marker in attempted or len(attempted) >= 4:
+        runtime.pop("pending_mining_obstruction", None)
+        return None
     recovery = {
         "action": "mine",
         "intent": "clear observed obstruction in front of log",
@@ -1600,6 +1615,7 @@ def _mining_obstruction_recovery(runtime, goal):
     if key in invalid and time.monotonic() - invalid[key][0] < _invalid_target_ttl(key):
         runtime.pop("pending_mining_obstruction", None)
         return None
+    attempted.append(marker)
     return recovery
 
 
@@ -1667,12 +1683,60 @@ def _remember_scan_evidence(runtime, plan, execution):
         runtime["empty_resource_scans"] = records[-12:]
 
 
+
+def _missing_goal_materials(runtime, goal):
+    """Read missing ingredient alternatives from the last live recipe lookup."""
+    knowledge = runtime.get("knowledge_last") or {}
+    if (not goal or knowledge.get("target") != output_for_goal(goal.get("title"))
+            or not str(knowledge.get("reason") or "").startswith("missing_materials:")):
+        return []
+    root = (knowledge.get("chain") or [{}])[0]
+    missing = root.get("missing") or {}
+    return [
+        str(item).split(":")[-1].lower()
+        for item, amount in missing.items()
+        if isinstance(item, str) and int(amount or 0) > 0
+    ]
+
+
+def _resource_may_supply_missing(block_type, materials):
+    """Lexical resource hypothesis, NOT a guarantee of a Minecraft drop."""
+    block = str(block_type or "").lower().split(":")[-1].strip("_")
+    return bool(len(block) >= 4 and any(
+        block in material or material in block
+        for material in materials if len(material) >= 4
+    ))
+
+
+def _scan_serves_user_goal(runtime, plan, goal):
+    """Avoid repeating unrelated resource searches while a recipe is blocked.
+
+    A reasoned goal-linked experiment is still allowed; unknown modpack
+    conversions remain testable rather than hard-coded away.
+    """
+    if plan.get("action") != "scan_blocks" or not goal:
+        return True
+    missing = _missing_goal_materials(runtime, goal)
+    if not missing:
+        return True
+    try:
+        linked = int(plan.get("goal_id")) == int(goal["id"])
+    except (KeyError, TypeError, ValueError):
+        linked = False
+    if linked and len(str(plan.get("goal_reason") or "").strip()) >= 8:
+        return True
+    query = scan_query(plan)
+    return any(_resource_may_supply_missing(item, missing)
+               for item in query["contains"] + query["exact"])
+
+
 def _material_action_from_scan(runtime, goal, inventory):
     """Convert observed blocks into a physical experiment, not another scan."""
     scan = runtime.get("last_resource_scan") or {}
     if time.monotonic() - float(scan.get("at") or 0) > 100:
         return None
-    if goal and goal.get("source") == "user" and goal.get("title") != "Chop a log":
+    missing = _missing_goal_materials(runtime, goal)
+    if goal and goal.get("source") == "user" and goal.get("title") != "Chop a log" and not missing:
         return None
     state = ((runtime.get("awareness") or {}).get("state") or {})
     origin = scan.get("origin") or {}
@@ -1685,7 +1749,9 @@ def _material_action_from_scan(runtime, goal, inventory):
     candidates = [
         block for block in scan.get("blocks", [])
         if isinstance(block, dict)
-        and str(block.get("type") or "").endswith("_log")
+        and ((
+            str(block.get("type") or "").endswith("_log") and not missing
+        ) or _resource_may_supply_missing(block.get("type"), missing))
         and isinstance(block.get("pos"), list)
         and len(block["pos"]) == 3
     ]
@@ -1693,22 +1759,27 @@ def _material_action_from_scan(runtime, goal, inventory):
     for block in candidates:
         pos = block["pos"]
         candidate = {
-            "action": "mine", "intent": "chop observed log",
-            "hypothesis": "mine a world-observed log to test useful woodcutting",
+            "action": "mine",
+            "intent": "test mining observed missing resource" if missing else "chop observed log",
+            "hypothesis": ("test whether this observed block physically yields a missing "
+                           "recipe material" if missing else
+                           "mine a world-observed log to test useful woodcutting"),
             "x": pos[0], "y": pos[1], "z": pos[2],
             "expected_block": block["type"],
         }
         if goal and goal.get("source") == "user":
             candidate.update({
                 "goal_id": goal.get("id"),
-                "goal_reason": "this cuts the log that Alik asked me to chop",
+                "goal_reason": ("this tests an observed source for the missing recipe "
+                                "material" if missing else
+                                "this cuts the log that Alik asked me to chop"),
             })
         axes = [
             str(item.get("item")) for item in inventory or []
             if re.fullmatch(r"minecraft:[a-z_]+_axe", str(item.get("item") or ""))
             and int(item.get("count") or 0) > 0
         ]
-        if axes:
+        if axes and not missing:
             candidate["tool"] = axes[0]
         key = _plan_target_key(candidate)
         if key in invalid and time.monotonic() - invalid[key][0] < _invalid_target_ttl(key):
@@ -2077,8 +2148,11 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         and plan.get("action") in {"move_to", "move_forward", "look_at"}
         and _goal_navigation_count(runtime, user_goal, awareness_inventory) >= 2
     )
-    drift = not _plan_matches_user_goal(
-        plan, user_goal, directive or _current_user_subgoal(runtime)
+    drift = (
+        not _plan_matches_user_goal(
+            plan, user_goal, directive or _current_user_subgoal(runtime)
+        )
+        or not _scan_serves_user_goal(runtime, plan, user_goal)
     )
     if drift or exhausted:
         cause = "navigation_budget_exhausted" if exhausted else "plan_unrelated_to_user_goal"
@@ -2102,6 +2176,7 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
             or not _plan_matches_user_goal(
                 revision, user_goal, directive or _current_user_subgoal(runtime)
             )
+            or not _scan_serves_user_goal(runtime, revision, user_goal)
             or (exhausted and revision.get("action") in {"move_to", "move_forward", "look_at"})
         )
         if invalid:
@@ -2155,6 +2230,7 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
             or not _plan_matches_user_goal(
                 revised, user_goal, directive or _current_user_subgoal(runtime)
             )
+            or not _scan_serves_user_goal(runtime, revised, user_goal)
             or (
                 revised_key in invalid
                 and time.monotonic() - invalid[revised_key][0] < _invalid_target_ttl(revised_key)
@@ -2187,6 +2263,7 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
             or not _plan_matches_user_goal(
                 revision, user_goal, directive or _current_user_subgoal(runtime)
             )
+            or not _scan_serves_user_goal(runtime, revision, user_goal)
             or (revision.get("action") in {"move_to", "move_forward", "look_at"}
                 and user_goal and _goal_navigation_count(runtime, user_goal, awareness_inventory) >= 2)
             or (revised_key in invalid
@@ -2234,29 +2311,41 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
                     _plan_target_key(original), None
                 )
                 log_event("practice_host", "obstruction_cleared", original=original)
-        elif not execution.get("ok") and str(plan.get("expected_block") or "") in {"minecraft:vine", "minecraft:cocoa"}:
-            runtime.pop("pending_mining_obstruction", None)
-        elif not execution.get("ok") and reason.startswith("mining_blocked|"):
+        elif not execution.get("ok"):
             parts = dict(
                 field.split("=", 1)
                 for field in reason.split("|")[1:]
                 if "=" in field
-            )
+            ) if reason.startswith("mining_blocked|") else {}
+            blocker = None
             if parts.get("block") in {"minecraft:vine", "minecraft:cocoa"}:
                 try:
                     x, y, z = [int(value) for value in parts["at"].split(",")]
                 except (KeyError, ValueError, TypeError):
                     pass
                 else:
-                    runtime["pending_mining_obstruction"] = {
-                        "at": time.monotonic(),
-                        "original": dict(plan),
-                        "blocker": {"type": parts["block"], "x": x, "y": y, "z": z},
-                    }
-                    log_event(
-                        "practice_host", "observed_mining_obstruction",
-                        target=plan, blocker=runtime["pending_mining_obstruction"]["blocker"],
-                    )
+                    blocker = {"type": parts["block"], "x": x, "y": y, "z": z}
+            clearing = str(plan.get("expected_block") or "") in {
+                "minecraft:vine", "minecraft:cocoa"
+            }
+            pending = runtime.get("pending_mining_obstruction") if clearing else None
+            if pending:
+                marker = [blocker["x"], blocker["y"], blocker["z"]] if blocker else None
+                if (blocker and marker not in pending.get("attempted", [])
+                        and len(pending.get("attempted", [])) < 4):
+                    pending["blocker"] = blocker
+                    pending["at"] = time.monotonic()
+                    log_event("practice_host", "observed_mining_obstruction",
+                              target=pending["original"], blocker=blocker)
+                else:
+                    runtime.pop("pending_mining_obstruction", None)
+            elif not clearing and blocker and str(plan.get("expected_block") or "").endswith("_log"):
+                runtime["pending_mining_obstruction"] = {
+                    "at": time.monotonic(), "original": dict(plan),
+                    "blocker": blocker, "attempted": [],
+                }
+                log_event("practice_host", "observed_mining_obstruction",
+                          target=plan, blocker=blocker)
     if user_goal and plan.get("action") == "craft" and _is_table_prerequisite_failure(execution):
         runtime["pending_craft"] = {
             "goal_id": user_goal.get("id"), "plan": dict(plan)
