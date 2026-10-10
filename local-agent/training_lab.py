@@ -462,20 +462,31 @@ def _prompt(challenge, snapshot, attempts, history, observed_extra=()):
     }, ensure_ascii=False)
 
 
-def run_training(world, planner, *, rounds=2, max_steps=3, seed=7,
-                 report_dir=REPORT_DIR):
+def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
+                 report_dir=REPORT_DIR, duration_minutes=20):
     rng = random.Random(seed)
-    rounds = max(1, min(20, int(rounds)))
+    rounds = max(1, min(100, int(rounds)))
     max_steps = max(1, min(8, int(max_steps)))
+    duration_seconds = max(1.0, min(120.0, float(duration_minutes))) * 60.0
     started = time.monotonic()
     report = {"version": TRAINING_BUILD,
               "started_at": datetime.now(timezone.utc).isoformat(),
               "rounds": rounds, "max_steps": max_steps,
+              "duration_limit_minutes": float(duration_minutes),
               "mode": "live_minecraft_no_world_reset",
               "episodes": [], "summary": {}}
     halted_on_pending = False
+    finished_due_to_time = False
+    unproductive_rounds = 0
     for repetition in range(rounds):
+        round_actions_start = sum(
+            len([a for a in episode.get("experiments", [])
+                 if a.get("status") in {"completed", "failed"}])
+            for episode in report["episodes"])
         for task in CURRICULUM:
+            if time.monotonic() - started >= duration_seconds:
+                finished_due_to_time = True
+                break
             initial = world.snapshot()
             challenge = _select_challenge(task, world, initial, rng)
             if challenge is None:
@@ -570,7 +581,21 @@ def run_training(world, planner, *, rounds=2, max_steps=3, seed=7,
             print("[TRAIN] %-8s %-11s %d action(s)  %s" %
                   (task, record["status"], record["attempts"], outcome[:90]),
                   flush=True)
-        if halted_on_pending:
+        if halted_on_pending or finished_due_to_time:
+            break
+        round_actions_end = sum(
+            len([a for a in episode.get("experiments", [])
+                 if a.get("status") in {"completed", "failed"}])
+            for episode in report["episodes"])
+        if round_actions_end == round_actions_start:
+            unproductive_rounds += 1
+        else:
+            unproductive_rounds = 0
+        # Stop rather than making dozens of LLM calls while the action
+        # interface or local environment cannot support any real trial.
+        if unproductive_rounds >= 3:
+            print("[TRAIN] No executed actions in 3 rounds; stopping to report the blocker.",
+                  flush=True)
             break
 
     episodes = report["episodes"]
@@ -600,6 +625,8 @@ def run_training(world, planner, *, rounds=2, max_steps=3, seed=7,
                 for a in e.get("experiments", [])) for e in eligible),
         "duration_seconds": round(time.monotonic() - started, 2),
         "teacher_calls": 0,
+        "stopped_due_to_time": finished_due_to_time,
+        "stopped_due_to_no_actions": unproductive_rounds >= 3,
     }
     report["ended_at"] = datetime.now(timezone.utc).isoformat()
     report_dir = Path(report_dir)
@@ -618,8 +645,12 @@ def run_training(world, planner, *, rounds=2, max_steps=3, seed=7,
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Physical Minecraft learning lab")
-    parser.add_argument("--rounds", type=int, default=2)
-    parser.add_argument("--steps", type=int, default=3)
+    parser.add_argument("--rounds", type=int, default=12,
+                        help="Maximum repeated curriculum rounds (default 12)")
+    parser.add_argument("--steps", type=int, default=4,
+                        help="Maximum hypotheses per objective (default 4)")
+    parser.add_argument("--minutes", type=float, default=20,
+                        help="Maximum training session length (default 20 minutes)")
     parser.add_argument("--seed", type=int, default=7)
     args = parser.parse_args(argv)
     # Training has no cloud worker and never selects the OpenAI provider.
@@ -634,7 +665,8 @@ def main(argv=None):
         planner = OllamaPlanner()
         start_session(build=TRAINING_BUILD, model="local:" + planner.model)
         result = run_training(world, planner, rounds=args.rounds,
-                              max_steps=args.steps, seed=args.seed)
+                              max_steps=args.steps, seed=args.seed,
+                              duration_minutes=args.minutes)
         print("[TRAIN] Summary: " + json.dumps(result["summary"]))
         print("[TRAIN] Report: " + result["report_path"])
         print("[TRAIN] Existing SQLite memories preserved.")
