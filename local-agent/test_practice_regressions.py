@@ -440,6 +440,106 @@ class PracticeRegressions(unittest.TestCase):
             "result": {"ok": False, "error": "no_valid_placement"},
         }))
 
+    def test_blocked_axe_plan_recovers_from_persistent_trial_after_restart(self):
+        # Mirrors the real sequence: axe request rejected for missing table,
+        # followed by a successful placement and a fresh planning tick.
+        grid = ["minecraft:jungle_planks", "minecraft:jungle_planks", "",
+                "minecraft:jungle_planks", "minecraft:stick", "",
+                "", "minecraft:stick", ""]
+        saved = {"action": "craft", "intent": "craft wooden axe",
+                 "hypothesis": "try axe", "width": 3, "height": 3, "grid": grid,
+                 "goal_id": 9, "goal_reason": "this completes the requested axe"}
+        trial = {
+            "actions": __import__("json").dumps(saved),
+            "outcome": __import__("json").dumps({
+                "result": {"ok": False,
+                           "error": "A 3x3 recipe requires a crafting table within reach."}
+            }),
+            "success": False,
+        }
+        inventory = [
+            {"item": "minecraft:jungle_planks", "count": 6},
+            {"item": "minecraft:stick", "count": 5},
+        ]
+        goal = {"source": "user", "id": 9, "title": "Obtain an axe"}
+        runtime = {}
+        with patch.object(agent.store, "recent_trials", return_value=[trial]), patch.object(
+            agent, "log_event"
+        ), patch.object(agent, "_post", return_value={
+            "blocks": [{"type": "minecraft:crafting_table", "distance": 2.2,
+                        "x": 211, "y": 70, "z": -108}]
+        }) as post:
+            result = agent._resume_blocked_crafting(runtime, goal, inventory)
+        self.assertEqual(result, saved)
+        self.assertEqual(runtime["pending_craft"]["goal_id"], 9)
+        post.assert_called_once()
+        self.assertEqual(post.call_args.args[0], "/scan-blocks")
+
+    def test_missing_workstation_places_one_table_then_retries_recipe(self):
+        craft = {"action": "craft", "intent": "craft wooden axe",
+                 "width": 3, "height": 3,
+                 "grid": ["minecraft:jungle_planks"] * 3 +
+                         ["minecraft:stick"] * 2 + [""] * 4}
+        goal = {"source": "user", "id": 9, "title": "Obtain an axe"}
+        inventory = [
+            {"item": "minecraft:crafting_table", "count": 2},
+            {"item": "minecraft:jungle_planks", "count": 6},
+            {"item": "minecraft:stick", "count": 5},
+        ]
+        runtime = {"pending_craft": {"goal_id": 9, "plan": craft}}
+        scan = {"blocks": []}
+        with patch.object(agent, "_post", return_value=scan) as post:
+            action = agent._resume_blocked_crafting(runtime, goal, inventory)
+        self.assertEqual(action["action"], "place")
+        self.assertEqual(action["item"], "minecraft:crafting_table")
+        self.assertEqual(post.call_count, 1)
+
+        # The next planning tick sees the actual placed table and reuses
+        # the identical recipe, without placing another one.
+        with patch.object(agent, "_post", return_value={
+            "blocks": [{"type": "minecraft:crafting_table", "distance": 2.1}]
+        }):
+            action2 = agent._resume_blocked_crafting(runtime, goal, inventory)
+        self.assertEqual(action2, craft)
+
+    def test_placed_but_distant_workstation_does_not_waste_another_table(self):
+        goal = {"source": "user", "id": 9, "title": "Obtain an axe"}
+        craft = {"action": "craft", "intent": "craft wooden axe",
+                 "width": 3, "height": 3,
+                 "grid": ["minecraft:jungle_planks"] * 3 +
+                         ["minecraft:stick"] * 2 + [""] * 4}
+        runtime = {"pending_craft": {"goal_id": 9, "plan": craft}}
+        inventory = [
+            {"item": "minecraft:crafting_table", "count": 2},
+            {"item": "minecraft:jungle_planks", "count": 6},
+            {"item": "minecraft:stick", "count": 5},
+        ]
+        with patch.object(agent, "_post", return_value={
+            "blocks": [{"type": "minecraft:crafting_table",
+                        "distance": 5.5, "x": 200, "y": 70, "z": -100}]
+        }), patch.object(agent, "log_event"):
+            action = agent._resume_blocked_crafting(runtime, goal, inventory)
+        self.assertIsNone(action)
+        self.assertEqual(runtime["known_workstation"]["x"], 200)
+
+    def test_chat_cannot_claim_to_be_shaping_an_unmade_axe(self):
+        runtime = {"awareness": {"inventory": [
+            {"item": "minecraft:wooden_pickaxe", "count": 1}
+        ]}}
+        goals = [{"source": "user", "id": 9, "title": "Obtain an axe"}]
+        with patch.object(agent.store, "list_goals", return_value=goals):
+            grounded = agent._ground_chat_reply(
+                "nearly done, just need to shape the head.", runtime
+            )
+        self.assertEqual(grounded, "not yet, still haven't crafted the axe")
+
+    def test_recipe_capability_question_is_not_inventory_table_question(self):
+        response = agent._inventory_fact_reply(
+            "do you have access to recipes? to use crafting table?",
+            {"awareness": {"inventory": []}}
+        )
+        self.assertIn("test crafting recipes", response)
+
     def test_target_key_ignores_hypothesis_wording(self):
         a = {"action": "mine", "x": 205, "y": 71, "z": -120, "hypothesis": "A"}
         b = dict(a, hypothesis="B", tool="minecraft:string")
