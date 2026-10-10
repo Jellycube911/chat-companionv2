@@ -142,6 +142,9 @@ class RealWorld:
     def job_state(self):
         return practice._get("/state")
 
+    def stop_job(self):
+        return practice._post("/stop-action")
+
 
 class OllamaPlanner:
     """Uses only the native local Ollama API, never OpenAI or an auto fallback."""
@@ -396,6 +399,87 @@ def _bearing_error(state, pos):
     return abs((actual - wanted + 180) % 360 - 180)
 
 
+# Match the Minecraft server's physical job type, not merely a terminal
+# response received sometime later. The existing controller lock prevents
+# simultaneous local brains issuing body commands.
+PHYSICAL_JOB_TYPES = {"move_to": "MOVE", "move_forward": "MOVE",
+                      "mine": "MINE", "collect": "COLLECT", "place": "PLACE"}
+TERMINAL_STATES = {"COMPLETED", "FAILED", "CANCELLED"}
+
+
+def _settle_pending_job(world, execution, timeout_seconds=35.0, poll_seconds=0.5):
+    """Resolve a started Minecraft job before advancing the curriculum.
+
+    A RUNNING/repath_pending result is not failure or success. Poll the live
+    server; continue if it finishes. After a bounded deadline cancel only the
+    active job matching our own action. If cancellation cannot be confirmed,
+    keep the status pending and halt the session to avoid parallel commands.
+    """
+    if execution.get("status") != "pending":
+        return execution
+    action = (execution.get("plan") or {}).get("action")
+    expected_type = PHYSICAL_JOB_TYPES.get(action)
+    if not expected_type:
+        return execution
+
+    deadline = time.monotonic() + max(0.01, float(timeout_seconds))
+    def resolved(state):
+        if not isinstance(state, dict) or state.get("ok") is False:
+            return None
+        if state.get("jobActive"):
+            return None
+        last = state.get("lastJob") or {}
+        if (str(last.get("type") or "").upper() != expected_type
+                or str(last.get("state") or "").upper() not in TERMINAL_STATES):
+            return None
+        terminal = str(last["state"]).upper()
+        return {
+            **execution,
+            "status": "settled",
+            "ok": terminal == "COMPLETED",
+            "result": {"state": terminal,
+                       "reason": str(last.get("reason") or "unknown"),
+                       "pos": [state.get(v) for v in ("x", "y", "z")]},
+        }
+
+    while True:
+        state = world.job_state()
+        final = resolved(state)
+        if final is not None:
+            return final
+        if not isinstance(state, dict) or state.get("ok") is False:
+            return execution
+        if not state.get("jobActive") or str(state.get("jobType") or "").upper() != expected_type:
+            return execution
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(min(poll_seconds, max(0.0, deadline - time.monotonic())))
+
+    # Timeouts are ordinary failed *physical* trials once Minecraft confirms
+    # the job was cancelled. No additional action is launched until then.
+    log_event("training", "job_deadline", action=action,
+              last_reason=state.get("jobReason"), timeout_seconds=timeout_seconds)
+    try:
+        stop = world.stop_job()
+        if isinstance(stop, dict) and stop.get("ok") is False:
+            return execution
+        for _ in range(6):
+            state = world.job_state()
+            final = resolved(state)
+            if final is not None:
+                final["result"]["training_timeout"] = True
+                log_event("training", "job_timeout_cancelled",
+                          action=action, terminal=final["result"])
+                return final
+            if not state.get("jobActive"):
+                return execution
+            time.sleep(0.25)
+    except (KeyError, TypeError, ValueError, requests.RequestException) as error:
+        log_event("training", "job_cancel_check_failed",
+                  action=action, error=str(error)[:180])
+    return execution
+
+
 def _verify(challenge, before, after, execution):
     """Training success must come from actual world state, not plan text."""
     plan = execution.get("plan") or {}
@@ -620,6 +704,10 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
                     continue
                 # All game actions run through the same physical practice engine.
                 result = world.execute(plan)
+                if result.get("status") == "pending":
+                    print("[TRAIN] %-8s waiting for Minecraft physical job..." % task,
+                          flush=True)
+                    result = _settle_pending_job(world, result)
                 after = world.snapshot(allow_busy=True)
                 ok, evidence = _verify(challenge, observed, after, result)
                 attempts.append({
