@@ -1550,6 +1550,120 @@ class PlannerInterfaceRegressions(unittest.TestCase):
             self.assertTrue(runtime["knowledge_last"]["reason"].startswith(
                 "missing_materials:"))
 
+    def test_latest_log_nested_scan_and_symbolic_goal_replay(self):
+        """Replay the exact v17 format that caused nine rejected plans."""
+        raw = json.dumps({
+            "action": "scan_blocks",
+            "query": {"contains": ["minecraft:blackstone", "minecraft:cobblestone"],
+                      "exact": [], "radius": 15, "limit": 8, "exposed_only": False},
+            "origin": [194, 69, -101],
+            "dimension": "minecraft:overworld",
+            "goal_id": "stone_pickaxe",
+            "goal_reason": ("Identify and locate missing recipe materials "
+                            "(blackstone and cobblestone) to craft a stone pickaxe."),
+        })
+        parsed = practice.parse_plan(raw)
+        bound = agent._bind_planner_goal(parsed, self.goal)
+        self.assertEqual(bound["goal_id"], 12)
+        self.assertEqual(bound["contains"],
+                         ["minecraft:blackstone", "minecraft:cobblestone"])
+        self.assertEqual(bound["radius"], 15)
+        self.assertEqual(bound["limit"], 8)
+        self.assertIsNone(agent._planner_shape_error(bound))
+        self.assertTrue(agent._plan_matches_user_goal(bound, self.goal))
+        self.assertNotIn("x", bound)
+        self.assertNotIn("y", bound)
+        self.assertNotIn("z", bound)
+
+    def test_nested_scan_executes_and_does_not_call_teacher(self):
+        """The user's repeated scan proposal should execute, not enter backoff."""
+        async def scenario():
+            from memory_store import MemoryStore
+            sample = json.dumps({
+                "action": "scan_blocks",
+                "query": {"contains": ["minecraft:blackstone", "minecraft:cobblestone"],
+                          "exact": [], "radius": 15, "limit": 8},
+                "origin": [194, 69, -101], "goal_id": "stone_pickaxe",
+                "goal_reason": "Locate materials to craft a stone pickaxe"
+            })
+            runtime = {"awareness": {"state": {
+                "x": 194.5, "y": 69, "z": -101.5,
+                "dimension": "minecraft:overworld"
+            }, "inventory": []}}
+            with ExitStack() as stack:
+                db = MemoryStore(Path(stack.enter_context(
+                    tempfile.TemporaryDirectory())) / "memory.sqlite3")
+                stack.enter_context(patch.object(agent, "store", db))
+                stack.enter_context(patch.object(db, "list_goals",
+                                                 return_value=[self.goal]))
+                stack.enter_context(patch.object(agent, "update_awareness"))
+                stack.enter_context(patch.object(agent, "_notify_once"))
+                stack.enter_context(patch.object(agent, "_report_planned_outcome"))
+                stack.enter_context(patch.object(agent, "_resume_blocked_crafting",
+                                                 return_value=None))
+                stack.enter_context(patch.object(agent, "_general_recipe_goal_action",
+                                                 return_value=None))
+                teacher = stack.enter_context(patch.object(
+                    agent, "_escalate_stalled_goal",
+                    side_effect=AssertionError("schema metadata is not a teacher topic")))
+                model = stack.enter_context(patch.object(
+                    agent, "_local_fast_completion", return_value=sample))
+                action = stack.enter_context(patch.object(
+                    agent, "execute_plan", return_value={
+                        "ok": True, "plan": {}, "result": {
+                            "ok": True, "blocks": [{"type": "minecraft:stone",
+                                                   "pos": [194, 68, -101]}]},
+                        "observation": {"origin": [194, 69, -101],
+                                        "query": {"contains": ["minecraft:stone"],
+                                                  "exact": [], "radius": 15,
+                                                  "limit": 8, "exposed_only": False}},
+                    }))
+                result = await agent.run_planned_action(None, runtime)
+                self.assertTrue(result["ok"])
+                self.assertEqual(model.call_count, 1)
+                self.assertEqual(action.call_count, 1)
+                sent = action.call_args.args[0]
+                self.assertEqual(sent["goal_id"], 12)
+                self.assertEqual(sent["contains"],
+                                 ["minecraft:blackstone", "minecraft:cobblestone"])
+                teacher.assert_not_called()
+        asyncio.run(scenario())
+
+    def test_invalid_schema_does_not_request_cloud_teacher(self):
+        """Even repeated protocol mistakes must not trigger paid skill tutoring."""
+        async def scenario():
+            from memory_store import MemoryStore
+            invalid = json.dumps({
+                "action": "scan_blocks", "goal_id": "stone_pickaxe",
+                "goal_reason": "Locate materials to craft a stone pickaxe"
+            })
+            runtime = {"awareness": {"state": {"x": 194, "y": 69, "z": -101},
+                                      "inventory": []}}
+            with ExitStack() as stack:
+                db = MemoryStore(Path(stack.enter_context(
+                    tempfile.TemporaryDirectory())) / "memory.sqlite3")
+                stack.enter_context(patch.object(agent, "store", db))
+                stack.enter_context(patch.object(db, "list_goals",
+                                                 return_value=[self.goal]))
+                stack.enter_context(patch.object(agent, "update_awareness"))
+                stack.enter_context(patch.object(agent, "_notify_once"))
+                stack.enter_context(patch.object(agent, "_resume_blocked_crafting",
+                                                 return_value=None))
+                stack.enter_context(patch.object(agent, "_general_recipe_goal_action",
+                                                 return_value=None))
+                stack.enter_context(patch.object(
+                    agent, "_local_fast_completion", return_value=invalid))
+                teacher = stack.enter_context(patch.object(
+                    agent, "_escalate_stalled_goal",
+                    side_effect=AssertionError("never escalate schema faults")))
+                execute = stack.enter_context(patch.object(
+                    agent, "execute_plan", side_effect=AssertionError("no action")))
+                result = await agent.run_planned_action(None, runtime)
+                self.assertEqual(result["status"], "planner_schema_stalled")
+                execute.assert_not_called()
+                teacher.assert_not_called()
+        asyncio.run(scenario())
+
     def test_missing_query_requires_model_revision(self):
         bad = {"action": "scan_blocks", "goal_id": 1,
                "goal_reason": "Confirm a target's block type"}
