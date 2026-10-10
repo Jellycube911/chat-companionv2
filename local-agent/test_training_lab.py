@@ -47,7 +47,10 @@ class FakePhysicalWorld:
         return {"ok": True, "air": y >= 64, "solid_support_up": y == 63}
 
     def find(self, block_id, radius=7):
-        return [{"type": block_id, "x": math.floor(self.pos[0]) + 2,
+        available = ([block_id] if isinstance(block_id, str)
+                     else list(block_id))
+        found = "minecraft:dirt" if "minecraft:dirt" in available else available[0]
+        return [{"type": found, "x": math.floor(self.pos[0]) + 2,
                  "y": 64, "z": math.floor(self.pos[2]),
                  "distance": 2.4}]
 
@@ -249,6 +252,81 @@ class TrainingLabRegressions(unittest.TestCase):
             self.assertFalse(db.recent_skill_trials("training.observe"))
             self.assertFalse(db.recent_skill_trials("training.orient"))
             self.assertFalse(db.recent_skill_trials("training.navigate"))
+
+    def test_live_report_exact_textual_target_is_grounded_not_invented(self):
+        """Navigation proposals in uploaded report provide ONLY hypothesis XYZ."""
+        challenge = lab.Challenge(
+            "navigate", "Walk to confirmed location",
+            {"pos": [54, 87, 180]}, ("move_to",), "minecraft:overworld")
+        proposal = {
+            "action": "move_to", "intent": "navigate to target",
+            "hypothesis": (
+                "The target position [54, 87, 180] is reachable from "
+                "the current position [58.06738186390909, 87.0, 177.98960466651576]."
+            ),
+        }
+        bound = lab._ground_confirmed_coordinates(proposal, challenge)
+        self.assertEqual([bound[k] for k in ("x", "y", "z")], [54, 87, 180])
+        self.assertEqual(lab._plan_allowed(bound, challenge), (True, "ok"))
+        self.assertNotIn("x", proposal)  # do not mutate original LLM output
+        self.assertIn("schema_binding", bound["_schema_binding"])
+
+    def test_untrusted_textual_position_cannot_override_observed_target(self):
+        challenge = lab.Challenge(
+            "navigate", "Walk to confirmed location",
+            {"pos": [54, 87, 180]}, ("move_to",), "minecraft:overworld")
+        for text in ("walk to [999, 87, 999]",
+                     "I think I should move closer",
+                     "Target might be [54, 87, 181]"):
+            with self.subTest(text=text):
+                proposal = {"action": "move_to", "hypothesis": text}
+                bound = lab._ground_confirmed_coordinates(proposal, challenge)
+                self.assertNotIn("x", bound)
+                self.assertEqual(lab._plan_allowed(bound, challenge)[1], "missing_xyz")
+
+    def test_text_only_goal_coordinates_execute_once_when_server_confirms(self):
+        class TextualTargetPlanner(FakeLocalPlanner):
+            def propose(self, payload):
+                plan = super().propose(payload)
+                if plan["action"] == "move_to":
+                    target = json.loads(payload)["target_confirmed_by_minecraft"]["pos"]
+                    return {
+                        "action": "move_to", "intent": "navigate",
+                        "hypothesis": (
+                            "The target position [%d, %d, %d] is reachable "
+                            "from my current position." % tuple(target)
+                        ),
+                    }
+                return plan
+        with tempfile.TemporaryDirectory() as tmp:
+            db = MemoryStore(Path(tmp) / "memory.sqlite3")
+            world = FakePhysicalWorld()
+            with patch.object(lab, "store", db), patch.object(lab, "log_event"):
+                report = lab.run_training(
+                    world, TextualTargetPlanner(), rounds=1, max_steps=1,
+                    report_dir=Path(tmp))
+            self.assertEqual(report["summary"]["passed"], 5)
+            self.assertEqual(report["summary"]["rejected_proposals"], 0)
+            self.assertIn("move_to", [p["action"] for p in world.calls])
+
+    def test_mining_eligibility_uses_observed_exposed_block_beyond_five_blocks(self):
+        class TreeSixBlocksAway(FakePhysicalWorld):
+            def find(self, block_id, radius=7):
+                if not isinstance(block_id, (list, tuple)):
+                    return []
+                self.calls.append({"probe": "/find-blocks", "radius": radius})
+                return [{
+                    "type": "minecraft:birch_log",
+                    "x": 14, "y": 64, "z": 15, "distance": 6.4
+                }]
+        world = TreeSixBlocksAway()
+        challenge = lab._select_challenge(
+            "mine", world, world.snapshot(), __import__("random").Random(0))
+        self.assertIsNotNone(challenge)
+        self.assertEqual(challenge.target["type"], "minecraft:birch_log")
+        self.assertEqual(challenge.target["pos"], [14, 64, 15])
+        self.assertTrue(challenge.target["standable_candidates"])
+        self.assertEqual(world.calls[0]["radius"], 10)
 
     def test_inventory_is_required_for_verified_collection(self):
         task = lab.Challenge("collect", "collect", {
