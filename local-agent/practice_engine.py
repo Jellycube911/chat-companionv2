@@ -352,37 +352,74 @@ def _scan_blocks(plan):
 
 
 def _place_nearby(slot, face="up"):
+    """Choose real empty terrain with solid support, retaining failed evidence."""
     state = _get("/state")
+    if _failed(state):
+        return {"ok": False, "error": "placement_state_unavailable", "details": state}
     bx = math.floor(float(state.get("x", 0)))
     by = math.floor(float(state.get("y", 0)))
     bz = math.floor(float(state.get("z", 0)))
-    for x, y, z in [
-        (bx + 1, by, bz),
-        (bx - 1, by, bz),
-        (bx, by, bz + 1),
-        (bx, by, bz - 1),
-        (bx + 1, by, bz + 1),
-        (bx + 1, by, bz - 1),
-        (bx - 1, by, bz + 1),
-        (bx - 1, by, bz - 1),
-    ]:
+    offsets = [
+        (1, 0), (-1, 0), (0, 1), (0, -1),
+        (1, 1), (1, -1), (-1, 1), (-1, -1),
+        (2, 0), (-2, 0), (0, 2), (0, -2),
+    ]
+    candidates = []
+    failed = []
+    for dx, dz in offsets:
+        target = {"x": bx + dx, "y": by, "z": bz + dz}
+        observed = _post("/block-at", target)
+        if _failed(observed):
+            failed.append({"pos": [target["x"], by, target["z"]],
+                           "reason": observed.get("error", "target_probe_failed")})
+            continue
+        if not observed.get("replaceable", observed.get("air", False)):
+            continue
+        # The current automatic placement method works on the upper face of
+        # the support below the target. Do not guess that grass or a leaf can
+        # support a crafting table.
+        support = {"x": target["x"], "y": by - 1, "z": target["z"]}
+        floor = _post("/block-at", support)
+        if _failed(floor):
+            failed.append({"pos": [target["x"], by, target["z"]],
+                           "reason": floor.get("error", "support_probe_failed")})
+            continue
+        if not floor.get("solid_support_up", not floor.get("air", True)):
+            continue
+        # Pure air first: tall grass is technically replaceable but can
+        # occlude clicks aimed at the support block.
+        candidates.append((not observed.get("air", False), target))
+
+    candidates.sort(key=lambda item: item[0])
+    for _, target in candidates[:8]:
         started = _post(
             "/place-block",
-            {
-                "x": x,
-                "y": y,
-                "z": z,
-                "inventory_slot": int(slot),
-                "face": face or "up",
-            },
+            {**target, "inventory_slot": int(slot), "face": "up"},
         )
+        pos = [target["x"], target["y"], target["z"]]
         if _failed(started):
+            failed.append({"pos": pos, "reason": started.get("error", "admission_rejected")})
             continue
-        result = _wait_for_job(10)
+        result = _wait_for_job(6)
         if result.get("state") == "COMPLETED":
-            result["placed_at"] = [x, y, z]
+            result["placed_at"] = pos
             return result
-    return {"ok": False, "error": "no nearby placement candidate succeeded"}
+        failed.append({
+            "pos": pos,
+            "reason": result.get("reason") or result.get("error") or result.get("state") or "unknown",
+        })
+        if result.get("state") == "RUNNING":
+            # A pending placement job must not leak into the next candidate.
+            _post("/stop-action")
+    return {
+        "ok": False,
+        "error": "no_valid_placement: " + (
+            "; ".join(str(a["reason"]) for a in failed[-4:])
+            if failed else "no empty target with solid upper support within reach"
+        ),
+        "candidates": len(candidates),
+        "failures": failed[-10:],
+    }
 
 
 def _execute_action(plan, before):
