@@ -315,6 +315,12 @@ def parse_plan(text):
             for field in ("x", "y", "z"):
                 if plan.get(field) is None and nested.get(field) is not None:
                     plan[field] = nested[field]
+        elif (isinstance(nested, (tuple, list)) and len(nested) == 3
+              and all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                      and math.isfinite(v) for v in nested)):
+            for field, value in zip(("x", "y", "z"), nested):
+                if plan.get(field) is None:
+                    plan[field] = value
         # Alternate coordinate representations from Qwen are equivalent
         # only when explicitly three numeric values; never guess missing axes.
         if not all(plan.get(k) is not None for k in ("x", "y", "z")):
