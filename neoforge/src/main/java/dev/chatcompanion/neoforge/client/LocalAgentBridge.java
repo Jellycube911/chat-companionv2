@@ -261,6 +261,24 @@ public final class LocalAgentBridge {
         }
     }
 
+    /**
+     * Perception, not X-ray. Resource search and nearby-block summaries may
+     * only expose blocks currently in the companion's field of view and
+     * unobstructed by world geometry. Minecraft still validates the action.
+     */
+    private static boolean visibleToCompanion(ServerLevel world, CompanionEntity companion, BlockPos pos) {
+        Vec3 eye = companion.getEyePosition();
+        Vec3 target = Vec3.atCenterOf(pos);
+        Vec3 toward = target.subtract(eye);
+        double rangeSquared = toward.lengthSqr();
+        if (rangeSquared < 0.0001 || rangeSquared > 18.0 * 18.0) return false;
+        Vec3 facing = companion.getViewVector(1.0F).normalize();
+        if (facing.dot(toward.normalize()) < Math.cos(Math.toRadians(50.0))) return false;
+        HitResult sight = world.clip(new ClipContext(
+                eye, target, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, companion));
+        return sight instanceof BlockHitResult hit && pos.equals(hit.getBlockPos());
+    }
+
     private static void handleNearbyBlocks(HttpExchange exchange) throws IOException {
         if (!requireMethod(exchange, "GET")) {
             return;
@@ -281,7 +299,7 @@ public final class LocalAgentBridge {
                         for (int z = origin.getZ() - BLOCK_RADIUS; z <= origin.getZ() + BLOCK_RADIUS; z++) {
                             BlockPos pos = new BlockPos(x, y, z);
                             BlockState state = world.getBlockState(pos);
-                            if (state.isAir()) {
+                            if (state.isAir() || !visibleToCompanion(world, companion, pos)) {
                                 continue;
                             }
 
@@ -494,6 +512,10 @@ public final class LocalAgentBridge {
                                 }
                             }
                             if (!matched) continue;
+                            // Restrict every scan mode, including exposed_only=false.
+                            // A block behind stone, around a corner, or outside
+                            // Chat's current gaze is NOT world-observed.
+                            if (!visibleToCompanion(world, companion, pos)) continue;
 
                             if (exposedOnly) {
                                 boolean exposed = false;
