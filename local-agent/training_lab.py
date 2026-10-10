@@ -14,6 +14,7 @@ import json
 import math
 import os
 import random
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -129,9 +130,10 @@ class RealWorld:
         return practice._post("/block-at", {"x": int(x), "y": int(y), "z": int(z)})
 
     def find(self, block_id, radius=7):
+        ids = ([block_id] if isinstance(block_id, str) else list(block_id))
         return practice._post("/find-blocks", {
-            "exact": [block_id], "radius": radius,
-            "limit": 24, "exposed_only": True,
+            "exact": ids, "radius": radius,
+            "limit": 64, "exposed_only": True,
         }).get("blocks", [])
 
     def execute(self, plan):
@@ -229,24 +231,37 @@ def _select_challenge(name, world, snapshot, rng):
                                  {"pos": point}, ("move_to",), dim)
         return None
     if name == "mine":
-        usable = [b for b in candidates if b.get("type") in PRACTICE_MATERIALS]
-        usable.sort(key=lambda b: float(b.get("nearestDistance") or 99))
-        for b in usable[:8]:
-            for found in world.find(b["type"], radius=7):
-                pos = [found.get(k) for k in ("x", "y", "z")]
-                if (all(isinstance(v, int) for v in pos)
-                        and _distance(origin, pos) <= 5.2
-                        and abs(pos[1] - origin[1]) <= 2.0):
-                    standable = []
-                    for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                        neighbour = [pos[0] + dx, pos[1], pos[2] + dz]
-                        if _walkable(world, neighbour):
-                            standable.append(neighbour)
-                    return Challenge(
-                        name, "Mine this observed natural block through real breaking",
-                        {"type": b["type"], "pos": pos,
-                         "standable_candidates": standable},
-                        ("mine", "scan_blocks", "look_at", "move_to"), dim)
+        # /nearby-blocks aggregates only each block type's nearest position.
+        # It misses reachable trees if the target is >5 blocks away, and often
+        # shows stone under the companion's feet. Ask the REAL bridge for
+        # exposed candidate blocks instead; never conjure mining coordinates.
+        seen = world.find(PRACTICE_MATERIALS, radius=10)
+        usable = []
+        for block in seen:
+            pos = [block.get(k) for k in ("x", "y", "z")]
+            if block.get("type") not in PRACTICE_MATERIALS:
+                continue
+            if not all(isinstance(v, int) and not isinstance(v, bool)
+                       for v in pos):
+                continue
+            if abs(pos[1] - origin[1]) > 3.0:
+                continue
+            distance = _distance(origin, pos)
+            if 1.0 <= distance <= 9.5:
+                usable.append((distance, block["type"], pos))
+        usable.sort(key=lambda sample: sample[0])
+        for _, block_type, pos in usable[:18]:
+            standable = []
+            for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                neighbour = [pos[0] + dx, pos[1], pos[2] + dz]
+                if _walkable(world, neighbour):
+                    standable.append(neighbour)
+            if standable:
+                return Challenge(
+                    name, "Mine a confirmed exposed natural block physically",
+                    {"type": block_type, "pos": pos,
+                     "standable_candidates": standable},
+                    ("mine", "scan_blocks", "look_at", "move_to"), dim)
         return None
     if name == "collect":
         entities = [e for e in snapshot["entities"]
@@ -260,6 +275,40 @@ def _select_challenge(name, world, snapshot, rng):
                           "pos": [e["x"], e["y"], e["z"]]},
                          ("collect",), dim)
     raise ValueError("unknown curriculum task: " + name)
+
+
+def _ground_confirmed_coordinates(plan, challenge):
+    """Canonicalize Qwen's textual coordinate mention, never invent a target.
+
+    When Qwen says "the target position [54, 87, 180]" but omits the numeric
+    JSON fields, accept that *exact* triple only if Minecraft already supplied
+    those coordinates as the current challenge's target. Any other triple
+    is rejected normally. This is protocol translation, not gameplay policy.
+    """
+    if not isinstance(plan, dict):
+        return plan
+    if plan.get("action") not in {"move_to", "look_at", "mine"}:
+        return plan
+    if all(plan.get(k) is not None for k in ("x", "y", "z")):
+        return plan
+    target = challenge.target.get("pos")
+    if not isinstance(target, (list, tuple)) or len(target) != 3:
+        return plan
+    text = str(plan.get("hypothesis") or "")
+    matches = re.findall(
+        r"\\[\\s*(-?\\d+)\\s*,\\s*(-?\\d+)\\s*,\\s*(-?\\d+)\\s*\\]",
+        text,
+    )
+    for match in matches:
+        observed = [int(v) for v in match]
+        if observed == list(target):
+            fixed = dict(plan)
+            for axis, value in zip(("x", "y", "z"), observed):
+                if fixed.get(axis) is None:
+                    fixed[axis] = value
+            fixed["_schema_binding"] = "exact_triple_confirmed_in_world_objective"
+            return fixed
+    return plan
 
 
 def _plan_allowed(plan, challenge, observed_extra=()):
@@ -540,6 +589,11 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
                 history = _verified_history("training." + task, 12)[-6:]
                 plan = planner.propose(_prompt(
                     challenge, observed, attempts, history, observed_extra))
+                plan = _ground_confirmed_coordinates(plan, challenge)
+                if isinstance(plan, dict) and plan.get("_schema_binding"):
+                    log_event("training", "schema_arguments_grounded",
+                              task=task, action=plan.get("action"),
+                              target=challenge.target.get("pos"))
                 valid, why = _plan_allowed(plan, challenge, observed_extra)
                 fingerprint = json.dumps({
                     k: (plan or {}).get(k)
