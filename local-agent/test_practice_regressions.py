@@ -82,6 +82,73 @@ class PracticeRegressions(unittest.TestCase):
             [selected["x"], selected["y"], selected["z"]],
         )
 
+    def test_pickaxe_goal_uses_existing_planks_and_sticks_before_scanning(self):
+        goal = {"id": 11, "title": "Craft a wooden pickaxe", "source": "user"}
+        inventory = [
+            {"item": "minecraft:jungle_planks", "count": 3},
+            {"item": "minecraft:stick", "count": 3},
+            {"item": "minecraft:jungle_log", "count": 18},
+        ]
+        plan = agent._wooden_pickaxe_goal_action({}, goal, inventory)
+        self.assertEqual(plan["action"], "craft")
+        self.assertEqual((plan["width"], plan["height"]), (3, 3))
+        self.assertEqual(plan["grid"], [
+            "minecraft:jungle_planks", "minecraft:jungle_planks",
+            "minecraft:jungle_planks", "", "minecraft:stick", "",
+            "", "minecraft:stick", "",
+        ])
+        self.assertEqual(plan["goal_id"], 11)
+        self.assertIsNone(agent._wooden_pickaxe_goal_action(
+            {}, {"id": 8, "title": "Improve practical capability", "source": "self"},
+            inventory,
+        ))
+
+    def test_pickaxe_goal_makes_missing_intermediate_ingredients(self):
+        goal = {"id": 11, "title": "Craft a wooden pickaxe", "source": "user"}
+        no_sticks = [
+            {"item": "minecraft:jungle_planks", "count": 3},
+            {"item": "minecraft:stick", "count": 0},
+            {"item": "minecraft:jungle_log", "count": 5},
+        ]
+        first = agent._wooden_pickaxe_goal_action({}, goal, no_sticks)
+        self.assertEqual(first["grid"], ["minecraft:jungle_planks"] * 2)
+        self.assertEqual((first["width"], first["height"]), (1, 2))
+        no_planks = [{"item": "minecraft:jungle_log", "count": 5}]
+        second = agent._wooden_pickaxe_goal_action({}, goal, no_planks)
+        self.assertEqual((second["width"], second["height"]), (1, 1))
+        self.assertEqual(second["grid"], ["minecraft:jungle_log"])
+
+    def test_invalid_pickaxe_recipe_is_quarantined_after_real_failure(self):
+        goal = {"id": 11, "title": "Craft a wooden pickaxe", "source": "user"}
+        inventory = [
+            {"item": "minecraft:jungle_planks", "count": 3},
+            {"item": "minecraft:stick", "count": 3},
+        ]
+        plan = agent._wooden_pickaxe_goal_action({}, goal, inventory)
+        invalid = {
+            agent._plan_target_key(plan): (
+                agent.time.monotonic(), "Minecraft server rejected recipe"
+            ),
+        }
+        self.assertIsNone(agent._wooden_pickaxe_goal_action(
+            {"invalid_targets": invalid}, goal, inventory,
+        ))
+
+    def test_cocoa_obstruction_is_observed_not_blindly_mined(self):
+        runtime = {"pending_mining_obstruction": {
+            "at": agent.time.monotonic(),
+            "original": {
+                "action": "mine", "expected_block": "minecraft:jungle_log",
+                "x": 208, "y": 70, "z": -112,
+            },
+            "blocker": {"type": "minecraft:cocoa", "x": 209, "y": 71, "z": -112},
+        }}
+        plan = agent._mining_obstruction_recovery(runtime, None)
+        self.assertEqual(plan["expected_block"], "minecraft:cocoa")
+        self.assertEqual([plan["x"], plan["y"], plan["z"]], [209, 71, -112])
+        runtime["pending_mining_obstruction"]["blocker"]["type"] = "minecraft:stone"
+        self.assertIsNone(agent._mining_obstruction_recovery(runtime, None))
+
     def test_mining_obstruction_only_clears_observed_vines(self):
         now = agent.time.monotonic()
         original = {"action": "mine", "intent": "chop observed log",
