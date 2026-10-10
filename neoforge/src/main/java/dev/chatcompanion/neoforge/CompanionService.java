@@ -382,7 +382,12 @@ public final class CompanionService implements AutoCloseable {
                 return;
             }
             companion.jobProgress(0.0F, "approaching_block");
-            moveNearBlock(companion, job.block(), world);
+            if (!moveNearBlock(companion, job.block(), world)) {
+                clearBreakProgress(companion, job, world);
+                companion.failJob("mining_no_standable_approach");
+                work.remove(owner);
+                miningApproaches.remove(owner);
+            }
             return;
         }
 
@@ -536,8 +541,8 @@ public final class CompanionService implements AutoCloseable {
         return companion.getEyePosition().distanceToSqr(Vec3.atCenterOf(block)) <= 4.5 * 4.5;
     }
 
-    private void moveNearBlock(CompanionEntity companion, BlockPos block, ServerLevel world) {
-        if (world.getGameTime() % 4 != 0) return;
+    private boolean moveNearBlock(CompanionEntity companion, BlockPos block, ServerLevel world) {
+        if (world.getGameTime() % 4 != 0) return true;
         BlockPos best = null;
         double bestDistance = Double.POSITIVE_INFINITY;
         for (Direction direction : Direction.Plane.HORIZONTAL) {
@@ -550,8 +555,13 @@ public final class CompanionService implements AutoCloseable {
             double distance = companion.distanceToSqr(Vec3.atBottomCenterOf(candidate));
             if (distance < bestDistance) { bestDistance = distance; best = candidate; }
         }
-        if (best != null) companion.getNavigation().moveTo(best.getX() + 0.5, best.getY(), best.getZ() + 0.5, 1.28);
-        else companion.getNavigation().moveTo(block.getX() + 0.5, block.getY(), block.getZ() + 0.5, 1.28);
+        if (best == null) {
+            // Do not navigate directly into a solid underground block.
+            // Let the agent select another observed target or experiment.
+            return false;
+        }
+        companion.getNavigation().moveTo(best.getX() + 0.5, best.getY(), best.getZ() + 0.5, 1.28);
+        return true;
     }
 
     private void lookAtBlock(CompanionEntity companion, BlockPos block) {
