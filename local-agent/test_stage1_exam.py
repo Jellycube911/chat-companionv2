@@ -119,6 +119,72 @@ class StageOneExamRegressions(unittest.TestCase):
             self.assertTrue(recorded)
             self.assertFalse(recorded[0]["success"])
 
+    def test_blocked_mining_changes_approach_before_retry(self):
+        class BlockedOnceWorld(RealisticExamWorld):
+            def __init__(self):
+                super().__init__()
+                self.mine_attempts = 0
+
+            def execute(self, plan):
+                if plan["action"] == "mine":
+                    self.mine_attempts += 1
+                    if self.mine_attempts == 1:
+                        self.calls.append(dict(plan))
+                        return {"ok": True, "plan": plan, "result": {
+                            "state": "FAILED",
+                            "reason": "mining_blocked|block=minecraft:grass_block|at=16,65,10"}}
+                return super().execute(plan)
+
+        class RecoveryPlanner(ExamPlanner):
+            def __init__(self):
+                self.approaches = []
+
+            def propose(self, prompt):
+                p = json.loads(prompt)
+                allowed = p["permitted_actions"]
+                if allowed == ["scan_blocks"]:
+                    return {"action": "scan_blocks", "contains": "_log",
+                            "radius": 10, "limit": 24}
+                if allowed == ["move_to"]:
+                    resource = next(
+                        r for r in p["own_observed_resources"]
+                        if r["type"] == "minecraft:oak_log")
+                    stand = resource["standable_candidates"][0]
+                    self.approaches.append(tuple(stand))
+                    return {"action": "move_to", "position": stand}
+                return super().propose(prompt)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = MemoryStore(Path(tmp) / "memory.sqlite3")
+            world = BlockedOnceWorld()
+            planner = RecoveryPlanner()
+            result = run_exam(world, planner, db, max_steps=10)
+            self.assertEqual(result["status"], "passed", result)
+            self.assertEqual(world.mine_attempts, 2)
+            self.assertEqual(len(planner.approaches), 2)
+            self.assertNotEqual(planner.approaches[0], planner.approaches[1])
+            self.assertEqual(
+                [s["action"] for s in result["experiments"]],
+                ["scan_blocks", "move_to", "look_at", "mine",
+                 "move_to", "look_at", "mine", "collect"])
+            self.assertEqual(result["experiments"][3]["reason"],
+                             "mining_blocked|block=minecraft:grass_block|at=16,65,10")
+
+    def test_irrelevant_procedural_memories_are_not_presented_as_skills(self):
+        from stage1_exam import exam_memory_context
+        class ConfusedMemory:
+            def recent_skill_trials(self, intent, limit):
+                return []
+            def find_learned_skills(self, query, limit):
+                return [{"procedure": '{"action":"move_to"}'},
+                        {"procedure": '{"action":"mine"}'},
+                        {"procedure": '{"action":"collect"}'}]
+        context = exam_memory_context(ConfusedMemory())
+        got = {x["skill"]: json.loads(x["procedure"])["action"]
+               for x in context["learned_procedures"]}
+        self.assertEqual(got, {"navigate": "move_to", "mine": "mine",
+                               "collect": "collect"})
+
     def test_exam_rejects_claimed_success_without_physical_mining(self):
         class FakeClaim:
             def propose(self, prompt):
