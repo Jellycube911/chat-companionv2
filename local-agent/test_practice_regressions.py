@@ -1629,6 +1629,34 @@ class PlannerInterfaceRegressions(unittest.TestCase):
                 teacher.assert_not_called()
         asyncio.run(scenario())
 
+    def test_repeated_valid_world_observations_are_not_learning_failures(self):
+        from memory_store import MemoryStore
+        runtime = {"awareness": {"inventory": []}}
+        scan = {"ok": True, "plan": {"action": "scan_blocks"},
+                "result": {"ok": True, "blocks": []}}
+        with ExitStack() as stack:
+            db = MemoryStore(Path(stack.enter_context(
+                tempfile.TemporaryDirectory())) / "memory.sqlite3")
+            stack.enter_context(patch.object(agent, "store", db))
+            teacher = stack.enter_context(patch.object(
+                agent, "_escalate_stalled_goal",
+                side_effect=AssertionError("observations are not failed trials")))
+            for _ in range(16):
+                agent._goal_progress_evidence(runtime, self.goal, scan)
+            teacher.assert_not_called()
+            self.assertNotIn("goal_stalls", runtime)
+
+    def test_repeated_actual_physical_failures_still_eligible_for_learning(self):
+        failed = {"ok": False, "plan": {"action": "mine"},
+                  "result": {"state": "FAILED",
+                             "reason": "mining_approach_stalled"}}
+        with patch.object(agent, "_escalate_stalled_goal") as teacher:
+            agent._goal_progress_evidence(
+                {"awareness": {"inventory": []}}, self.goal, failed)
+            teacher.assert_called_once()
+            self.assertIn("mining_approach_stalled",
+                          teacher.call_args.args[2])
+
     def test_invalid_schema_does_not_request_cloud_teacher(self):
         """Even repeated protocol mistakes must not trigger paid skill tutoring."""
         async def scenario():
