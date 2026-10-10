@@ -449,17 +449,39 @@ public final class CompanionService implements AutoCloseable {
             companion.failJob("empty_inventory_slot"); work.remove(owner); placements.remove(owner); return;
         }
 
+        BlockPos support = placement.block().relative(placement.face().getOpposite());
+        if (!world.getBlockState(support).isFaceSturdy(world, support, placement.face())) {
+            companion.failJob("placement_support_invalid"); work.remove(owner); placements.remove(owner); return;
+        }
         if (!withinBlockReach(companion, placement.block())) {
+            if (world.getGameTime() - job.started() > 120) {
+                companion.failJob("placement_approach_timeout"); work.remove(owner); placements.remove(owner); return;
+            }
             moveNearBlock(companion, placement.block(), world);
             return;
         }
 
         companion.getNavigation().stop();
-        BlockPos support = placement.block().relative(placement.face().getOpposite());
         Vec3 hitPoint = Vec3.atCenterOf(support)
                 .add(Vec3.atLowerCornerOf(placement.face().getNormal()).scale(0.5));
         lookAtPoint(companion, hitPoint);
-        if (!canInteractWithPoint(companion, support, hitPoint, world)) return;
+        HitResult sight = world.clip(new ClipContext(
+                companion.getEyePosition(), hitPoint, ClipContext.Block.OUTLINE,
+                ClipContext.Fluid.NONE, companion));
+        if (sight instanceof BlockHitResult obstruction && !obstruction.getBlockPos().equals(support)) {
+            BlockPos blocked = obstruction.getBlockPos();
+            String blockId = BuiltInRegistries.BLOCK.getKey(world.getBlockState(blocked).getBlock()).toString();
+            companion.failJob("placement_blocked|block=" + blockId
+                    + "|at=" + blocked.getX() + "," + blocked.getY() + "," + blocked.getZ());
+            work.remove(owner); placements.remove(owner); return;
+        }
+        if (!canInteractWithPoint(companion, support, hitPoint, world)) {
+            if (world.getGameTime() - job.started() > 80) {
+                companion.failJob("placement_alignment_timeout");
+                work.remove(owner); placements.remove(owner);
+            }
+            return;
+        }
 
         FakePlayer fake = fake(companion, world, placement.slot());
         fake.setYRot(companion.getYRot());
