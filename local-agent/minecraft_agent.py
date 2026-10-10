@@ -718,8 +718,11 @@ def build_practice_plan_input(runtime, directive=None):
             + json.dumps(knowledge, ensure_ascii=False)[:950]
         )
         parts.append(
-            "If a recipe dependency is missing, acquire it or request a "
-            "cloud lesson after repeated failure. Do not rescan unrelated logs."
+            "Recipe ingredients are inventory items; the world block that "
+            "drops an item can have a DIFFERENT name. If exact ingredient "
+            "searches return nothing, use observed trials to hypothesize an "
+            "alternative source block and test it physically. Never treat an "
+            "empty search as learning success or repeat the same covered scan."
         )
 
     if events:
@@ -2360,13 +2363,8 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
 
     plan = parse_plan(raw)
     if plan is None:
-        _escalate_stalled_goal(
-            runtime,
-            next((g for g in store.list_goals("active", 20)
-                  if g.get("source") == "user"), None),
-            "local model returned invalid action JSON",
-            awareness_inventory,
-        )
+        # Invalid model JSON is an interface fault, never gameplay evidence.
+        # Do not spend cloud-teacher calls diagnosing our action schema.
         log_event(
             "practice_host",
             "invalid_plan",
@@ -2432,9 +2430,8 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
                 runtime["planner_backoff_until"] = time.monotonic() + 30.0
                 store.record_event("practice_stalled",
                                    "Obstruction recovery stalled after three unsupported hypotheses")
-                _escalate_stalled_goal(runtime, user_goal,
-                                       "three unsupported obstruction hypotheses",
-                                       awareness_inventory)
+                # Unsupported proposals never executed: log the stall but
+                # do not count them as real gameplay learning failures.
             else:
                 runtime["planner_backoff_until"] = time.monotonic() + 8.0
             return {"ok": False, "status": "obstruction_plan_ungrounded",
@@ -2585,7 +2582,8 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         ):
             runtime["planner_backoff_until"] = time.monotonic() + 30.0
             store.record_event("practice_stalled", "Repeated empty search rejected; no new physical action executed.")
-            _escalate_stalled_goal(runtime, user_goal, "repeated empty search", awareness_inventory)
+            # Redundant scans are prevented locally. No Minecraft skill
+            # failed, so there is no reason to consult the cloud teacher.
             await _notify_once(runtime, "empty_search_stalled",
                                "nothing there; stuck finding a different approach", cooldown=120.0)
             return {"ok": False, "status": "scan_stalled", "plan": plan}
