@@ -684,6 +684,14 @@ def build_practice_plan_input(runtime, directive=None):
             )
 
     goal = next((g for g in goals if g.get("source") == "user"), None)
+    if goal and str(goal.get("title") or "").lower() == "craft a wooden pickaxe":
+        parts.append(
+            "UNTESTED VANILLA RECIPE HYPOTHESIS for a wooden pickaxe: "
+            "3x3 grid top row three wood planks, middle row empty/stick/empty, "
+            "bottom row empty/stick/empty. Use the inventory's actual wood "
+            "plank item ID. Exactly nine entries. Verify the output via /craft; "
+            "do not claim success without that Minecraft response."
+        )
     if goal:
         budget = max(0, 2 - _goal_navigation_count(
             runtime, goal, (runtime.get("awareness") or {}).get("inventory") or []
@@ -1415,7 +1423,7 @@ def _brain_console_decision(runtime, plan, goal=None):
         else ""
     )
     print(
-        f"\\n[BRAIN] GOAL: {goal_text} | ACTION: {action}{coords}\\n"
+        f"\n[BRAIN] GOAL: {goal_text} | ACTION: {action}{coords}\n"
         f"[BRAIN] TEST: {hypothesis}", flush=True
     )
     log_event(
