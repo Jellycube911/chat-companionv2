@@ -40,6 +40,10 @@ import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.monster.Enemy;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.crafting.CraftingInput;
+import net.minecraft.world.item.crafting.Ingredient;
+import net.minecraft.world.item.crafting.RecipeHolder;
+import net.minecraft.world.item.crafting.ShapedRecipe;
+import net.minecraft.world.item.crafting.ShapelessRecipe;
 import net.minecraft.world.item.crafting.RecipeType;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
@@ -113,6 +117,7 @@ public final class LocalAgentBridge {
             created.createContext("/attack-entity", LocalAgentBridge::handleAttackEntity);
             created.createContext("/take-held-item", LocalAgentBridge::handleTakeHeldItem);
             created.createContext("/craft", LocalAgentBridge::handleCraft);
+            created.createContext("/recipe-knowledge", LocalAgentBridge::handleRecipeKnowledge);
             created.createContext("/equip-slot", LocalAgentBridge::handleEquipSlot);
             created.createContext("/chat-inbox", LocalAgentBridge::handleChatInbox);
             created.setExecutor(HTTP_EXECUTOR);
@@ -1028,6 +1033,94 @@ public final class LocalAgentBridge {
         }
     }
 
+    /** Read the exact recipes loaded by the world, including mods and datapacks. */
+    private static void handleRecipeKnowledge(HttpExchange exchange) throws IOException {
+        if (!requireMethod(exchange, "POST")) return;
+
+        RecipeKnowledgeRequest request;
+        try {
+            request = readJson(exchange, RecipeKnowledgeRequest.class);
+        } catch (IllegalArgumentException failure) {
+            sendJson(exchange, 400, GSON.toJson(Map.of("error", failure.getMessage())));
+            return;
+        }
+
+        String query = request == null || request.output() == null
+                ? "" : request.output().strip().toLowerCase(java.util.Locale.ROOT);
+        if (query.isEmpty() || query.length() > 120 || !query.matches("[a-z0-9_:-]+")) {
+            sendJson(exchange, 400, "{\"error\":\"output must be a valid item id or fragment\"}");
+            return;
+        }
+        int limit = request.limit() == null ? 12 : request.limit();
+        if (limit < 1 || limit > 24) {
+            sendJson(exchange, 400, "{\"error\":\"limit must be 1-24\"}");
+            return;
+        }
+        try {
+            Map<String, Object> result = withCompanion(context -> {
+                ServerLevel world = context.world();
+                List<Map<String, Object>> recipes = new ArrayList<>();
+                String wanted = query.contains(":") ? query : "minecraft:" + query;
+                for (RecipeHolder<?> holder : world.getRecipeManager().getAllRecipesFor(RecipeType.CRAFTING)) {
+                    var recipe = holder.value();
+                    ItemStack output = recipe.getResultItem(world.registryAccess());
+                    if (output.isEmpty()) continue;
+                    String resultId = BuiltInRegistries.ITEM.getKey(output.getItem()).toString();
+                    if (!resultId.equals(wanted) && !resultId.contains(query)) continue;
+
+                    int width;
+                    int height;
+                    if (recipe instanceof ShapedRecipe shaped) {
+                        width = shaped.getWidth();
+                        height = shaped.getHeight();
+                    } else if (recipe instanceof ShapelessRecipe shapeless) {
+                        int count = shapeless.getIngredients().size();
+                        if (count <= 0 || count > 9) continue;
+                        width = count == 1 ? 1 : count <= 4 ? 2 : 3;
+                        height = (count + width - 1) / width;
+                    } else {
+                        // Special/dynamic recipes have no static grid to report.
+                        continue;
+                    }
+                    if (width < 1 || width > 3 || height < 1 || height > 3) continue;
+
+                    List<List<String>> ingredients = new ArrayList<>();
+                    for (Ingredient ingredient : recipe.getIngredients()) {
+                        List<String> choices = new ArrayList<>();
+                        if (!ingredient.isEmpty()) {
+                            for (ItemStack item : ingredient.getItems()) {
+                                if (item.isEmpty()) continue;
+                                String id = BuiltInRegistries.ITEM.getKey(item.getItem()).toString();
+                                if (!choices.contains(id)) choices.add(id);
+                                if (choices.size() >= 24) break;
+                            }
+                        }
+                        ingredients.add(choices);
+                    }
+                    if (ingredients.size() > width * height) continue;
+                    while (ingredients.size() < width * height) ingredients.add(List.of());
+
+                    Map<String, Object> entry = new LinkedHashMap<>();
+                    entry.put("recipe_id", holder.id().toString());
+                    entry.put("output", resultId);
+                    entry.put("count", output.getCount());
+                    entry.put("width", width);
+                    entry.put("height", height);
+                    entry.put("ingredients", ingredients);
+                    entry.put("crafting_table", width > 2 || height > 2);
+                    entry.put("kind", recipe instanceof ShapedRecipe ? "shaped" : "shapeless");
+                    recipes.add(entry);
+                    if (recipes.size() >= limit) break;
+                }
+                return Map.of("ok", true, "source", "server_recipe_manager",
+                        "query", query, "recipes", recipes);
+            });
+            sendJson(exchange, 200, GSON.toJson(result));
+        } catch (Exception failure) {
+            sendFailure(exchange, failure);
+        }
+    }
+
     private static void handleCraft(HttpExchange exchange) throws IOException {
         if (!requireMethod(exchange, "POST")) {
             return;
@@ -1347,6 +1440,7 @@ public final class LocalAgentBridge {
     private record PlaceRequest(int x, int y, int z, int inventory_slot, String face) {}
     private record AttackRequest(String entity_id) {}
     private record CraftRequest(int width, int height, List<String> grid, Integer times) {}
+    private record RecipeKnowledgeRequest(String output, Integer limit) {}
     private record EquipRequest(int slot) {}
     private record FindBlocksRequest(List<String> exact, List<String> contains, Integer radius, Integer limit, Boolean exposed_only) {}
 
