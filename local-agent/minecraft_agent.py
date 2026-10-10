@@ -2742,6 +2742,10 @@ def _inventory_summary(runtime):
 
 def _inventory_fact_reply(text, runtime):
     normalized = str(text or "").lower().strip().rstrip(".!?")
+    # "You have enough logs, WHY are you still woodcutting?" is a
+    # behavioral question, not a request for a bare item count.
+    if "why" in normalized or "hardstuck" in normalized or "stuck" in normalized:
+        return None
     inventory, counts = _inventory_summary(runtime)
 
     log_count = sum(
@@ -2802,7 +2806,7 @@ def _inventory_fact_reply(text, runtime):
     return None
 
 
-def _simple_chat_reply(text):
+def _simple_chat_reply(text, runtime=None):
     normalized = text.lower().strip().rstrip(".!?")
     if normalized in {"hey", "hi", "hello", "yo", "sup", "hey chat", "hi chat"}:
         return "hey"
@@ -2827,7 +2831,7 @@ def _simple_chat_reply(text):
         "what you doing",
         "what u doing",
     }:
-        return _current_activity_text()
+        return _current_activity_text(runtime)
     return None
 
 
@@ -3471,7 +3475,7 @@ async def poll_minecraft_chat(input_queue, runtime, chat_agent):
                         )
                         continue
 
-                    simple = _simple_chat_reply(text)
+                    simple = _simple_chat_reply(text, runtime)
                     if simple is not None:
                         await _send_ingame(
                             simple,
