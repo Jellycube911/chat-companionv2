@@ -1483,5 +1483,102 @@ class GoalResourceRecoveryRegressions(unittest.TestCase):
         )
 
 
+class PlannerInterfaceRegressions(unittest.TestCase):
+    """Replay the 2026-10-10 14:51 UTC wrong-ID and malformed-action loop."""
+
+    def setUp(self):
+        self.goal = {"id": 12, "title": "Craft a stone pickaxe",
+                     "description": "Craft a stone pickaxe", "source": "user",
+                     "priority": 9, "status": "active"}
+
+    def test_wrong_goal_id_is_metadata_not_a_different_objective(self):
+        from_log = {
+            "action": "mine", "goal_id": 1,
+            "goal_reason": "Mine blackstone to fulfill the recipe for minecraft:stone_pickaxe",
+            "target_block": "minecraft:blackstone",
+            "intent": "mine", "hypothesis": "mine will advance the current goal",
+        }
+        bound = agent._bind_planner_goal(from_log, self.goal)
+        self.assertEqual(bound["goal_id"], 12)
+        self.assertEqual(agent._planner_shape_error(bound),
+                         "physical_action_requires_numeric_xyz")
+        self.assertNotIn("x", bound)  # Never invent the target's coordinates.
+
+    def test_wrong_goal_id_without_relevant_reason_stays_rejected(self):
+        unrelated = {
+            "action": "mine", "goal_id": 1, "goal_reason": "Collect some random sand",
+            "x": 100, "y": 64, "z": 100,
+        }
+        self.assertEqual(agent._bind_planner_goal(unrelated, self.goal)["goal_id"], 1)
+        self.assertFalse(agent._plan_matches_user_goal(unrelated, self.goal))
+
+    def test_scan_alias_is_converted_to_safe_search_not_mining(self):
+        from_log = {"action": "scan_blocks", "goal_id": 1,
+                    "goal_reason": "Locate blackstone for minecraft:stone_pickaxe",
+                    "target_block": "minecraft:blackstone"}
+        bound = agent._bind_planner_goal(from_log, self.goal)
+        scan = agent._normalize_planner_scan(bound)
+        self.assertEqual(scan["goal_id"], 12)
+        self.assertEqual(scan["action"], "scan_blocks")
+        self.assertEqual(scan["contains"], ["minecraft:blackstone"])
+        self.assertIsNone(agent._planner_shape_error(scan))
+        self.assertNotIn("x", scan)
+
+    def test_missing_query_requires_model_revision(self):
+        bad = {"action": "scan_blocks", "goal_id": 1,
+               "goal_reason": "Confirm a target's block type"}
+        self.assertEqual(agent._planner_shape_error(bad),
+                         "scan_requires_contains_or_exact")
+        repaired = dict(bad, contains=["minecraft:stone"])
+        self.assertIsNone(agent._planner_shape_error(repaired))
+
+    def test_malformed_scan_repaired_before_any_physical_call(self):
+        async def scenario():
+            from memory_store import MemoryStore
+            runtime = {
+                "awareness": {"state": {"x": 10.5, "y": 70.0, "z": -10.5,
+                                        "dimension": "minecraft:overworld"},
+                              "inventory": []},
+            }
+            wrong = {"action": "scan_blocks", "goal_id": 1,
+                     "goal_reason": "Confirm the exact block at the target"}
+            corrected = {"action": "scan_blocks", "goal_id": 12,
+                         "contains": ["minecraft:stone"], "radius": 12,
+                         "hypothesis": "look for nearby stones"}
+            proposals = [json.dumps(wrong), json.dumps(corrected)]
+            with ExitStack() as stack:
+                db = MemoryStore(Path(stack.enter_context(
+                    tempfile.TemporaryDirectory())) / "memory.sqlite3")
+                stack.enter_context(patch.object(agent, "store", db))
+                stack.enter_context(patch.object(
+                    db, "list_goals", return_value=[self.goal]))
+                stack.enter_context(patch.object(agent, "update_awareness"))
+                stack.enter_context(patch.object(agent, "_notify_once"))
+                stack.enter_context(patch.object(agent, "_report_planned_outcome"))
+                stack.enter_context(patch.object(
+                    agent, "_resume_blocked_crafting", return_value=None))
+                stack.enter_context(patch.object(
+                    agent, "_general_recipe_goal_action", return_value=None))
+                model = stack.enter_context(patch.object(
+                    agent, "_local_fast_completion", side_effect=proposals))
+                execute = stack.enter_context(patch.object(
+                    agent, "execute_plan", return_value={
+                        "ok": True, "result": {"ok": True, "blocks": []},
+                        "plan": corrected,
+                        "observation": {"origin": [10, 70, -11],
+                                        "query": {"contains": ["minecraft:stone"],
+                                                  "exact": [], "radius": 12,
+                                                  "limit": 16, "exposed_only": False}},
+                    }))
+                result = await agent.run_planned_action(None, runtime)
+                self.assertTrue(result["ok"])
+                self.assertEqual(execute.call_count, 1)
+                self.assertEqual(execute.call_args.args[0]["contains"],
+                                 ["minecraft:stone"])
+                self.assertEqual(model.call_count, 2)
+        asyncio.run(scenario())
+
+
+
 if __name__ == "__main__":
     unittest.main()
