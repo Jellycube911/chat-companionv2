@@ -262,6 +262,7 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None):
                     if len(candidates) >= 15:
                         break
             verified = found_target is not None
+            selected = found_target
             reason = ("exam_observed_usable_resource" if verified
                       else "no_exam_resource_in_scan")
         elif action == "move_to" and successful and selected:
