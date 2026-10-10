@@ -1524,6 +1524,32 @@ class PlannerInterfaceRegressions(unittest.TestCase):
         self.assertIsNone(agent._planner_shape_error(scan))
         self.assertNotIn("x", scan)
 
+    def test_recipe_shortage_is_not_relearned_every_third_tick(self):
+        """A repeated inventory deficit is not a repeated failed experiment."""
+        from memory_store import MemoryStore
+        recipe = {
+            "ok": True, "recipes": [{
+                "recipe_id": "minecraft:stone_pickaxe",
+                "output": "minecraft:stone_pickaxe",
+                "width": 1, "height": 1,
+                "ingredients": [["minecraft:cobblestone"]],
+            }],
+        }
+        with ExitStack() as stack:
+            db = MemoryStore(Path(stack.enter_context(
+                tempfile.TemporaryDirectory())) / "memory.sqlite3")
+            stack.enter_context(patch.object(agent, "store", db))
+            stack.enter_context(patch.object(agent, "_lookup_world_recipe",
+                                             return_value=recipe))
+            teacher = stack.enter_context(patch.object(db, "request_learning"))
+            runtime = {}
+            for _ in range(7):
+                self.assertIsNone(agent._general_recipe_goal_action(
+                    runtime, self.goal, []))
+            teacher.assert_not_called()
+            self.assertTrue(runtime["knowledge_last"]["reason"].startswith(
+                "missing_materials:"))
+
     def test_missing_query_requires_model_revision(self):
         bad = {"action": "scan_blocks", "goal_id": 1,
                "goal_reason": "Confirm a target's block type"}
