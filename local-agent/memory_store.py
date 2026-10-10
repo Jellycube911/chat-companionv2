@@ -50,11 +50,20 @@ def _trial_evidence(intent, actions, outcome, reported_success):
         attempts = plan.get("experiments") or []
         executed = [a for a in attempts if isinstance(a, dict)
                     and a.get("status") == "completed"
-                    and a.get("verified") is True
                     and isinstance(a.get("result"), dict)]
         if evidence.get("verified") is not True or not executed:
             return "unverified"
-        if str(intent) == "training.collect":
+        last_receipt = executed[-1]["result"]
+        task = str(intent).removeprefix("training.")
+        if task == "observe" and int(last_receipt.get("observed_count") or 0) <= 0:
+            return "unverified"
+        if task == "mine" and not (
+                last_receipt.get("state") == "COMPLETED" and
+                str(last_receipt.get("reason") or "").startswith("block_mined|")):
+            return "unverified"
+        if task in {"navigate", "collect"} and last_receipt.get("state") != "COMPLETED":
+            return "unverified"
+        if task == "collect":
             match = re.search(r"target_item_before=(\d+)\s+after=(\d+)",
                               str(evidence.get("outcome", "")))
             if not match or int(match[2]) <= int(match[1]):
@@ -1329,13 +1338,15 @@ class MemoryStore:
             raise ValueError("intent, hypothesis, actions and outcome are required")
         now = time.time()
         evidence_grade = _trial_evidence(intent, actions, outcome, success)
-        if evidence_grade in {"unresolved", "unverified"}:
-            # Preserve the diagnostic but never reward it as a skill trial.
-            # Pending actions must be reconciled by the real Minecraft body.
-            self.record_event("unverified_skill_claim",
-                              f"{intent}: {evidence_grade}: {outcome[:1100]}")
+        if evidence_grade == "unresolved":
+            # A pending action is not a completed training experiment.
+            self.record_event("unresolved_skill_trial",
+                              f"{intent}: {outcome[:1100]}")
             return {"ok": False, "success": False,
                     "evidence_status": evidence_grade, "skill": None}
+        # Keep raw unsupported claims for audit while excluding them from
+        # success counters and from context/training graduation.
+        qualified = evidence_grade != "unverified"
 
         with self._connect() as db:
             resolved_skill_id = None
@@ -1370,7 +1381,7 @@ class MemoryStore:
                 ),
             )
 
-            if resolved_skill_id is not None:
+            if resolved_skill_id is not None and qualified:
                 db.execute(
                     """
                     UPDATE learned_skills
@@ -1410,7 +1421,7 @@ class MemoryStore:
         )
         return {
             "ok": True,
-            "success": success,
+            "success": success and qualified,
             "evidence_status": evidence_grade,
             "skill": skill,
         }
