@@ -295,8 +295,12 @@ def run_exam(world, planner, memory, *, max_steps=18, checkpoint=None):
             typ = mined[0]
             count = lambda bag: sum(int(v.get("count", 0)) for v in bag
                                     if v.get("item") == typ)
-            verified = (count(after["inventory"]) >
-                        count(initial["inventory"]))
+            # The pickup must happen *during this collect action*. A prior
+            # accidental pickup, or a successful-looking tool receipt alone,
+            # is not proof that the tested collection step worked.
+            verified = (receipt.get("state") == "COMPLETED"
+                        and count(after["inventory"]) > count(before["inventory"])
+                        and count(after["inventory"]) > count(initial["inventory"]))
             reason = "collected_mined_resource" if verified else "no_inventory_gain"
             if verified:
                 selected = candidates.get(mined)
