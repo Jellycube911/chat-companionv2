@@ -609,7 +609,8 @@ def _record_episode(challenge, attempts, passed, elapsed, initial, reason):
     hypothesis = (attempts[-1].get("hypothesis") if attempts else None) or \
                  "Test world-grounded " + challenge.name
     rejections = sum(a.get("status") == "rejected" for a in attempts)
-    executed = sum(a.get("status") in {"completed", "failed"} for a in attempts)
+    executed = sum(a.get("status") in {"completed", "failed", "progress"}
+                   for a in attempts)
     if executed == 0:
         # A malformed model JSON or forbidden action never touched Minecraft.
         # Keep the diagnosis, but do not poison skill memory with fictitious
@@ -705,7 +706,7 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
     for repetition in range(rounds):
         round_actions_start = sum(
             len([a for a in episode.get("experiments", [])
-                 if a.get("status") in {"completed", "failed"}])
+                 if a.get("status") in {"completed", "failed", "progress"}])
             for episode in report["episodes"])
         # Recalculate from durable gameplay evidence on every round.
         # When old skills deteriorate, Stage 2 becomes locked again.
@@ -827,7 +828,7 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
             break
         round_actions_end = sum(
             len([a for a in episode.get("experiments", [])
-                 if a.get("status") in {"completed", "failed"}])
+                 if a.get("status") in {"completed", "failed", "progress"}])
             for episode in report["episodes"])
         if round_actions_end == round_actions_start:
             unproductive_rounds += 1
@@ -844,7 +845,7 @@ def run_training(world, planner, *, rounds=12, max_steps=4, seed=7,
     eligible = [e for e in episodes if e["status"] in {"passed", "failed"}]
     executed = [
         a for e in eligible for a in e.get("experiments", [])
-        if a.get("status") in {"completed", "failed"}
+        if a.get("status") in {"completed", "failed", "progress"}
     ]
     total_physical = sum(
         a.get("plan", {}).get("action") in {
