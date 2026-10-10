@@ -1133,7 +1133,7 @@ def _bind_planner_goal(plan, goal):
     except (TypeError, ValueError, KeyError):
         return plan
     ignored = {"craft", "make", "obtain", "some", "another", "with", "from",
-               "the", "for", "your", "collect", "gather", "build", "an"}
+               "the", "for", "your", "collect", "gather", "build", "a", "an"}
     required = set(re.findall(r"[a-z0-9]+",
                       str(goal.get("title") or "").lower().replace("_", " "))) - ignored
     claim = set(re.findall(r"[a-z0-9]+",
