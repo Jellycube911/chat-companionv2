@@ -89,6 +89,36 @@ class StageOneExamRegressions(unittest.TestCase):
                              ["scan_blocks", "move_to", "look_at", "mine",
                               "collect"])
 
+    def test_after_resource_discovery_scan_loop_is_rejected_not_executed(self):
+        class RepeatScanPlanner:
+            def __init__(self):
+                self.seen_actions = []
+
+            def propose(self, prompt):
+                p = json.loads(prompt)
+                self.seen_actions.append(p["permitted_actions"])
+                return {"action": "scan_blocks", "exact": ["minecraft:oak_log"],
+                        "radius": 10, "limit": 16}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = MemoryStore(Path(tmp) / "memory.sqlite3")
+            world = RealisticExamWorld()
+            planner = RepeatScanPlanner()
+            result = run_exam(world, planner, db, max_steps=18)
+            self.assertEqual([x["action"] for x in world.calls],
+                             ["scan_blocks"])
+            self.assertEqual(planner.seen_actions[0], ["scan_blocks"])
+            self.assertEqual(planner.seen_actions[1], ["move_to"])
+            self.assertEqual(result["reason"],
+                             "planner_stalled_on_rejected_proposals")
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["attempts"], 4)
+            self.assertEqual(result["experiments"][1]["reason"],
+                             "not_permitted_now_expected_move_to")
+            recorded = db.recent_skill_trials("training.stage1_exam")
+            self.assertTrue(recorded)
+            self.assertFalse(recorded[0]["success"])
+
     def test_exam_rejects_claimed_success_without_physical_mining(self):
         class FakeClaim:
             def propose(self, prompt):
