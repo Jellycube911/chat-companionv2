@@ -5,13 +5,16 @@ datapacks) is the source of truth. The Python brain only decides which discovere
 recipe to try and which missing intermediate material to make first.
 """
 from collections import Counter
-from math import ceil
+import re
 
 
 def output_for_goal(title):
     text = str(title or "").strip().lower()
-    if text == "craft a wooden pickaxe":
-        return "minecraft:wooden_pickaxe"
+    match = re.fullmatch(
+        r"craft an? (wooden|stone|iron|golden|diamond|netherite) pickaxe", text
+    )
+    if match:
+        return "minecraft:" + match.group(1) + "_pickaxe"
     if text.startswith("craft minecraft:"):
         return text.removeprefix("craft ").strip()
     return None
