@@ -1423,7 +1423,7 @@ def _plan_target_key(plan):
 
 
 def _mining_obstruction_recovery(runtime, goal):
-    """Clear only a harmless, observed vine, then retry the blocked log."""
+    """Clear only a server-observed soft obstruction, not arbitrary blocks."""
     pending = runtime.get("pending_mining_obstruction") or {}
     if time.monotonic() - float(pending.get("at") or 0) > 90:
         runtime.pop("pending_mining_obstruction", None)
@@ -1434,18 +1434,18 @@ def _mining_obstruction_recovery(runtime, goal):
     if goal and goal.get("source") == "user" and goal.get("title") != "Chop a log":
         return None
     blocker = pending.get("blocker") or {}
-    if blocker.get("type") != "minecraft:vine":
+    if blocker.get("type") not in {"minecraft:vine", "minecraft:cocoa"}:
         return None
     recovery = {
         "action": "mine",
-        "intent": "clear vine obstructing observed log",
-        "hypothesis": "removing the server-observed vine opens line of sight to the target log",
+        "intent": "clear observed obstruction in front of log",
+        "hypothesis": "removing the server-observed plant opens line of sight to the target log",
         "x": blocker.get("x"), "y": blocker.get("y"), "z": blocker.get("z"),
-        "expected_block": "minecraft:vine",
+        "expected_block": blocker["type"],
     }
     if goal and goal.get("source") == "user":
         recovery["goal_id"] = goal.get("id")
-        recovery["goal_reason"] = "the observed vine blocks the specific log Alik wants chopped"
+        recovery["goal_reason"] = "the observed plant blocks the specific log Alik wants chopped"
     invalid = runtime.setdefault("invalid_targets", {})
     key = _plan_target_key(recovery)
     if key in invalid and time.monotonic() - invalid[key][0] < _invalid_target_ttl(key):
@@ -1905,7 +1905,7 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
         or execution.get("error") or ""
     )
     if plan.get("action") == "mine":
-        if execution.get("ok") and str(plan.get("expected_block") or "") == "minecraft:vine":
+        if execution.get("ok") and str(plan.get("expected_block") or "") in {"minecraft:vine", "minecraft:cocoa"}:
             pending = runtime.pop("pending_mining_obstruction", None) or {}
             original = pending.get("original") or {}
             if original:
@@ -1913,7 +1913,7 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
                     _plan_target_key(original), None
                 )
                 log_event("practice_host", "obstruction_cleared", original=original)
-        elif not execution.get("ok") and str(plan.get("expected_block") or "") == "minecraft:vine":
+        elif not execution.get("ok") and str(plan.get("expected_block") or "") in {"minecraft:vine", "minecraft:cocoa"}:
             runtime.pop("pending_mining_obstruction", None)
         elif not execution.get("ok") and reason.startswith("mining_blocked|"):
             parts = dict(
@@ -1921,7 +1921,7 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
                 for field in reason.split("|")[1:]
                 if "=" in field
             )
-            if parts.get("block") == "minecraft:vine":
+            if parts.get("block") in {"minecraft:vine", "minecraft:cocoa"}:
                 try:
                     x, y, z = [int(value) for value in parts["at"].split(",")]
                 except (KeyError, ValueError, TypeError):
@@ -1930,7 +1930,7 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
                     runtime["pending_mining_obstruction"] = {
                         "at": time.monotonic(),
                         "original": dict(plan),
-                        "blocker": {"type": "minecraft:vine", "x": x, "y": y, "z": z},
+                        "blocker": {"type": parts["block"], "x": x, "y": y, "z": z},
                     }
                     log_event(
                         "practice_host", "observed_mining_obstruction",
