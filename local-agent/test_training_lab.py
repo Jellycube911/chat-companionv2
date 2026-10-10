@@ -120,6 +120,19 @@ class FakeLocalPlanner:
 
 
 class TrainingLabRegressions(unittest.TestCase):
+    def test_inventory_telemetry_distinguishes_mining_pickup(self):
+        before = [{"item": "minecraft:oak_log", "count": 2},
+                  {"item": "minecraft:dirt", "count": 3}]
+        after_mine = [{"item": "minecraft:oak_log", "count": 3},
+                      {"item": "minecraft:dirt", "count": 3}]
+        after_collect = [{"item": "minecraft:oak_log", "count": 3},
+                         {"item": "minecraft:dirt", "count": 4}]
+        self.assertEqual(lab._inventory_gains(before, after_mine),
+                         {"minecraft:oak_log": 1})
+        self.assertEqual(lab._inventory_gains(after_mine, after_collect),
+                         {"minecraft:dirt": 1})
+        self.assertEqual(lab._inventory_gains(after_collect, after_collect), {})
+
     def test_successful_five_stage_training_is_verified_and_saved(self):
         world = FakePhysicalWorld()
         with tempfile.TemporaryDirectory() as tmp:
