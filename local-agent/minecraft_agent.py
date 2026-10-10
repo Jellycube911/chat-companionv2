@@ -42,7 +42,7 @@ AMBIENT_WANDER_INTERVAL = 22.0
 REFLEX_COOLDOWN = 4.0
 LEARNING_COOLDOWN_SECONDS = 1800
 TEACHER_MAX_OUTPUT_TOKENS = 700
-AGENT_BUILD = "self-learning-local-brain-v17-verified-goal-boundaries-2026-10-10"
+AGENT_BUILD = "self-learning-local-brain-v18-executable-plans-2026-10-10"
 BASE_DIR = Path(__file__).resolve().parent
 
 set_tracing_disabled(True)
@@ -1131,7 +1131,9 @@ def _bind_planner_goal(plan, goal):
         if int(plan["goal_id"]) == int(goal["id"]):
             return plan
     except (TypeError, ValueError, KeyError):
-        return plan
+        # Symbolic values like "stone_pickaxe" are also model guesses.
+        # Check the written goal relationship, then bind to the SQLite ID.
+        pass
     ignored = {"craft", "make", "obtain", "some", "another", "with", "from",
                "the", "for", "your", "collect", "gather", "build", "a", "an"}
     required = set(re.findall(r"[a-z0-9]+",
@@ -2389,9 +2391,9 @@ async def run_planned_action(planner_agent, runtime, directive=None, source="pra
             runtime["planner_backoff_until"] = time.monotonic() + 20.0
             log_event("practice_host", "planner_schema_stalled",
                       initial=malformed, revision=candidate)
-            _escalate_stalled_goal(runtime, user_goal,
-                                   "repeated malformed primitive: " + malformed,
-                                   awareness_inventory)
+            # This is a planner/protocol fault, not Minecraft learning.
+            # Repeatedly paying the cloud teacher here cannot change an
+            # executable world skill, and leads to request spam.
             return {"ok": False, "status": "planner_schema_stalled",
                     "plan": plan, "error": malformed}
         log_event("practice_host", "planner_schema_repaired", plan=candidate)
