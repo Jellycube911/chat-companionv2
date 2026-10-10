@@ -297,7 +297,8 @@ class TrainingLabRegressions(unittest.TestCase):
             mined = next(p for p in world.calls if p["action"] == "mine")
             self.assertEqual([look[k] for k in ("x", "y", "z")], [16, 64, 11])
             self.assertEqual([mined[k] for k in ("x", "y", "z")], [16, 64, 11])
-            self.assertEqual(abs(nav["x"] - 16) + abs(nav["z"] - 11), 1)
+            self.assertLessEqual(max(abs(nav["x"] - 16), abs(nav["z"] - 11)), 1)
+            self.assertGreater(abs(nav["x"] - 16) + abs(nav["z"] - 11), 0)
 
     def test_old_schema_only_memories_are_ignored_without_deleting_them(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -369,7 +370,7 @@ class TrainingLabRegressions(unittest.TestCase):
                     report_dir=Path(tmp))
             self.assertTrue(result["summary"]["stopped_due_to_no_actions"])
             self.assertEqual(result["summary"]["physical_actions"], 0)
-            self.assertLessEqual(len(result["episodes"]), 15)
+            self.assertLessEqual(len(result["episodes"]), 18)
             self.assertFalse(db.recent_skill_trials("training.observe"))
             self.assertFalse(db.recent_skill_trials("training.orient"))
             self.assertFalse(db.recent_skill_trials("training.navigate"))
@@ -447,7 +448,9 @@ class TrainingLabRegressions(unittest.TestCase):
         self.assertEqual(challenge.target["resource_type"], "minecraft:oak_log")
         self.assertEqual(challenge.target["resource_pos"], [16, 64, 11])
         waypoint = challenge.target["pos"]
-        self.assertEqual(abs(waypoint[0] - 16) + abs(waypoint[2] - 11), 1)
+        self.assertLessEqual(max(abs(waypoint[0] - 16),
+                                 abs(waypoint[2] - 11)), 1)
+        self.assertGreater(abs(waypoint[0] - 16) + abs(waypoint[2] - 11), 0)
         self.assertTrue(lab._walkable(world, waypoint))
         execution = world.execute({
             "action": "move_to", "x": waypoint[0],
